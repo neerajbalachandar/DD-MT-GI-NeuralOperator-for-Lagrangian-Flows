@@ -18,3 +18,6 @@ torch_extensions/
 
 # Data Path
 data/
+
+
+final-2/output/

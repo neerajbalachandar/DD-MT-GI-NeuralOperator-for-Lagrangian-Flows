@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import glob as globlib
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -58,11 +59,18 @@ def _to_obj_list(x: np.ndarray) -> List[str]:
 
 
 def _sample_glob_patterns(root: Path, patterns: Sequence[str]) -> List[Path]:
-    """Resolve multiple glob patterns relative to `root` into sorted unique paths."""
+    """Resolve multiple glob patterns into sorted unique paths.
+
+    Supports both relative patterns (resolved from `root`) and absolute patterns.
+    """
 
     files: List[Path] = []
     for pat in patterns:
-        files.extend(sorted(root.glob(pat)))
+        p = Path(str(pat))
+        if p.is_absolute() or str(pat).startswith("~"):
+            files.extend(Path(x) for x in globlib.glob(str(p.expanduser())))
+        else:
+            files.extend(sorted(root.glob(str(pat))))
     return sorted(set(files))
 
 

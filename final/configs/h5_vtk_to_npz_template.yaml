@@ -1,8 +1,10 @@
 # Template config to merge split INPUT/OUTPUT H5 streams (+ optional XMF/VTK)
 # into unified NPZ frames for multiple datasets.
 #
-# Run:
-#   python -m final.h5_vtk_to_npz --config final/configs/h5_vtk_to_npz_template.yaml
+# Run from repo root:
+#   python -m final.h5_vtk_to_npz \
+#     --config final/configs/h5_vtk_to_npz_template.yaml \
+#     --root "/media/dysco/New Volume/Neeraj/neuralop/data/raw data"
 
 output_dir: final/output/merged_npz
 
@@ -14,71 +16,72 @@ frame_id_regex: "(\\d+)(?!.*\\d)"
 # - nearest_prev: for each input frame, choose latest output frame <= input
 pair_mode: intersection
 
-# Optional global defaults (can be overridden per dataset)
-input_key_map: {}
-output_key_map: {}
+# Global key maps from your XMF/H5 structure
+# (top-level H5 datasets: X, Gamma, velocity, velocity_gradient_x/y/z, vorticity,
+#  sigma, circulation, vol, static, nodes, U, W)
+input_key_map:
+  particle_xyz: "X"
+  Gamma_vec: "Gamma"
+  velocity: "velocity"
+  velocity_gradient_x: "velocity_gradient_x"
+  velocity_gradient_y: "velocity_gradient_y"
+  velocity_gradient_z: "velocity_gradient_z"
+  vorticity: "vorticity"
+  sigma: "sigma"
+  circulation: "circulation"
+  vol: "vol"
+  static: "static"
 
-# Multiple datasets supported. Use numeric names if preferred.
-# Set output_subdir to 1/2/7/8 etc so pipeline_config npz_glob can point there.
+output_key_map:
+  points: "nodes"
+  U: "U"
+  W: "W"
+
+# Multiple datasets supported.
+# IMPORTANT: input uses `wing-example_pfield.*` only (not `*`) to avoid staticpfield
+# files overriding frame IDs during pairing.
 datasets:
   - name: "1"
     output_subdir: "1"
-
-    # Required (separate input/output streams)
-    input_h5_glob: []
-    output_h5_glob: []
-
-    # Optional sidecar metadata paths
-    input_xmf_glob: []
-    output_xmf_glob: []
-    vtk_glob: []
-
+    input_h5_glob: ["1/input/wing-example_pfield.*.h5"]
+    output_h5_glob: ["1/output/wing-example_fdom.*.h5"]
+    input_xmf_glob: ["1/input/wing-example_pfield.*.xmf"]
+    output_xmf_glob: ["1/output/wing-example_fdom.*.xmf"]
+    vtk_glob: ["1/vtk/wing-example_Wing_vlm.*.vtk"]
     pair_mode: intersection
-    input_key_map: {}
-    output_key_map: {}
 
   - name: "2"
     output_subdir: "2"
-    input_h5_glob: []
-    output_h5_glob: []
-    input_xmf_glob: []
-    output_xmf_glob: []
-    vtk_glob: []
+    input_h5_glob: ["2/input/wing-example_pfield.*.h5"]
+    output_h5_glob: ["2/output/wing-example_fdom.*.h5"]
+    input_xmf_glob: ["2/input/wing-example_pfield.*.xmf"]
+    output_xmf_glob: ["2/output/wing-example_fdom.*.xmf"]
+    vtk_glob: ["2/vtk/wing-example_Wing_vlm.*.vtk"]
     pair_mode: intersection
-    input_key_map: {}
-    output_key_map: {}
 
   - name: "7"
     output_subdir: "7"
-    input_h5_glob: []
-    output_h5_glob: []
-    input_xmf_glob: []
-    output_xmf_glob: []
-    vtk_glob: []
+    input_h5_glob: ["7/input/wing-example_pfield.*.h5"]
+    output_h5_glob: ["7/output/wing-example_fdom.*.h5"]
+    input_xmf_glob: ["7/input/wing-example_pfield.*.xmf"]
+    output_xmf_glob: ["7/output/wing-example_fdom.*.xmf"]
+    vtk_glob: ["7/vtk/wing-example_Wing_vlm.*.vtk"]
     pair_mode: intersection
-    input_key_map: {}
-    output_key_map: {}
 
   - name: "8"
     output_subdir: "8"
-    input_h5_glob: []
-    output_h5_glob: []
-    input_xmf_glob: []
-    output_xmf_glob: []
-    vtk_glob: []
+    input_h5_glob: ["8/input/wing-example_pfield.*.h5"]
+    output_h5_glob: ["8/output/wing-example_fdom.*.h5"]
+    input_xmf_glob: ["8/input/wing-example_pfield.*.xmf"]
+    output_xmf_glob: ["8/output/wing-example_fdom.*.xmf"]
+    vtk_glob: ["8/vtk/wing-example_Wing_vlm.*.vtk"]
     pair_mode: intersection
-    input_key_map: {}
-    output_key_map: {}
 
-# Example key maps:
-# input_key_map:
-#   particle_xyz: "/X"
-#   Gamma_vec: "/Gamma"
-#   sigma: "/sigma"
-#   vol: "/vol"
-#   circulation: "/circulation"
-#   static: "/static"
-# output_key_map:
-#   nodes: "/nodes"
-#   U: "/U"
-#   W: "/W"
+  - name: "9"
+    output_subdir: "9"
+    input_h5_glob: ["9/input/wing-example_pfield.*.h5"]
+    output_h5_glob: ["9/output/wing-example_fdom.*.h5"]
+    input_xmf_glob: ["9/input/wing-example_pfield.*.xmf"]
+    output_xmf_glob: ["9/output/wing-example_fdom.*.xmf"]
+    vtk_glob: ["9/vtk/wing-example_Wing_vlm.*.vtk"]
+    pair_mode: intersection

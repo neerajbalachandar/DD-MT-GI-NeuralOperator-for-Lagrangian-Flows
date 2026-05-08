@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import glob as globlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -79,11 +80,28 @@ def parse_frame_id(path: Path) -> str:
 
 
 def discover_files(glob_patterns: Sequence[str], root: Path | str = ".") -> List[Path]:
-    """Resolve one or more glob patterns relative to `root` and return a sorted unique file list."""
+    """Resolve one or more glob patterns and return a sorted unique file list.
+
+    Supports both:
+    - patterns relative to `root`
+    - absolute glob patterns (e.g. `/data/run/*.npz`)
+    """
     root_path = Path(root)
     found: List[Path] = []
+
     for pattern in glob_patterns:
-        found.extend(sorted(root_path.glob(pattern)))
+        pat = str(pattern)
+        p = Path(pat)
+
+        # Absolute or home-expanded pattern: use stdlib glob directly.
+        if p.is_absolute() or pat.startswith("~"):
+            expanded = str(p.expanduser())
+            found.extend(Path(x) for x in globlib.glob(expanded))
+            continue
+
+        # Relative pattern: resolve against root.
+        found.extend(sorted(root_path.glob(pat)))
+
     return sorted(set(found))
 
 

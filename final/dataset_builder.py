@@ -728,6 +728,29 @@ def _extract_particle_targets(data: Mapping[str, np.ndarray], n: int) -> Optiona
         elif g.ndim == 2 and g.shape[1] == 9:
             grad = g[:n]
 
+    # vector-row fallback: gradU stored as three vectors (x/y/z rows), each shape (N,3)
+    if grad is None:
+        kx = _find_key(data, ["velocity_gradient_x", "gradU_x", "gradUx_vec"])
+        ky = _find_key(data, ["velocity_gradient_y", "gradU_y", "gradUy_vec"])
+        kz = _find_key(data, ["velocity_gradient_z", "gradU_z", "gradUz_vec"])
+        if kx is not None and ky is not None and kz is not None:
+            gx = np.asarray(data[kx])
+            gy = np.asarray(data[ky])
+            gz = np.asarray(data[kz])
+
+            def _as_n3(a: np.ndarray) -> Optional[np.ndarray]:
+                if a.ndim == 2 and a.shape[1] == 3:
+                    return a[:n]
+                if a.ndim == 2 and a.shape[0] == 3:
+                    return a.T[:n]
+                return None
+
+            gx_n3 = _as_n3(gx)
+            gy_n3 = _as_n3(gy)
+            gz_n3 = _as_n3(gz)
+            if gx_n3 is not None and gy_n3 is not None and gz_n3 is not None:
+                grad = np.concatenate([gx_n3, gy_n3, gz_n3], axis=1)
+
     # component fallback
     if grad is None:
         comps = []
