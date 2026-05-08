@@ -103,6 +103,10 @@ normalization:
 
 # Particle-surrogate (GNO) dataset settings
 build_particle_dataset: true
+# Recommended modeling choice:
+# - quantities_then_physics: learn U and gradU, then advance X/Gamma/sigma with physics rollout
+# - direct_next_state: not implemented here (requires robust particle correspondence across frames)
+particle_task_mode: quantities_then_physics
 particle_input_features:
   - x
   - y

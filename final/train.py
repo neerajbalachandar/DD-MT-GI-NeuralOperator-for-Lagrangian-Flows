@@ -17,6 +17,7 @@ from .io import ensure_dir, load_config
 
 
 def set_seed(seed: int = 42) -> None:
+    """Seed numpy/torch RNGs (including CUDA generators when available) for reproducible runs."""
     torch.manual_seed(seed)
     np.random.seed(seed)
     if torch.cuda.is_available():
@@ -24,6 +25,7 @@ def set_seed(seed: int = 42) -> None:
 
 
 def resolve_device(cfg: Dict[str, Any]) -> torch.device:
+    """Resolve runtime device from config (`cuda`, `cpu`, `auto`) and print selected backend."""
     requested = str(cfg.get("device", "auto")).lower()
 
     if requested == "cuda":
@@ -78,6 +80,7 @@ def make_adam_optimizer(params, cfg: Dict[str, Any]):
 
 
 def relative_l2_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+    """Compute mean relative L2 error over batch samples."""
     b = pred.shape[0]
     diff = (pred - target).reshape(b, -1)
     tgt = target.reshape(b, -1)
@@ -86,16 +89,20 @@ def relative_l2_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-1
 
 
 class GridSampleDataset(Dataset):
+    """Dataset loader for field samples stored under one preset directory."""
     def __init__(self, preset_root: Path, split: str, use_normalized: bool = True):
+        """Load split file list and store absolute sample paths for one preset split."""
         split_info = json.loads((preset_root / "split_files.json").read_text())
         rels = split_info[split]
         self.paths = [preset_root / rel for rel in rels]
         self.use_normalized = use_normalized
 
     def __len__(self) -> int:
+        """Return number of structured-grid samples in this split."""
         return len(self.paths)
 
     def __getitem__(self, idx: int):
+        """Load one sample and return `(input_tensor, target_tensor)` as torch tensors."""
         p = self.paths[idx]
         with np.load(p, allow_pickle=True) as d:
             x_key = "input_norm" if self.use_normalized and "input_norm" in d.files else "input"
@@ -107,6 +114,7 @@ class GridSampleDataset(Dataset):
 
 
 def build_field_model(cfg: Dict[str, Any], device: torch.device) -> nn.Module:
+    """Instantiate NeuralOperator FNO with compatibility handling across API variants."""
     try:
         from neuralop.models import FNO  # type: ignore
     except Exception as exc:
@@ -153,6 +161,7 @@ def build_field_model(cfg: Dict[str, Any], device: torch.device) -> nn.Module:
 
 
 def _eval_field(model: nn.Module, loader: DataLoader, device: torch.device) -> Dict[str, float]:
+    """Evaluate field model on a loader and report relative L2 and MSE metrics."""
     model.eval()
     rel_sum, mse_sum, n = 0.0, 0.0, 0
     with torch.no_grad():
@@ -173,6 +182,7 @@ def _eval_field(model: nn.Module, loader: DataLoader, device: torch.device) -> D
 
 
 def train_field_model(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """End-to-end training loop for the structured-grid field reconstruction model (FNO)."""
     set_seed(int(cfg.get("seed", 42)))
     device = resolve_device(cfg)
 
@@ -285,6 +295,7 @@ class ParticleFrameDataset(Dataset):
     """One item = all particles from one frame."""
 
     def __init__(self, dataset_npz: Path, split_idx_npz: Path, split: str):
+        """Load particle dataset and keep frame-wise row ranges for a specific split."""
         ds = np.load(dataset_npz, allow_pickle=True)
         self.x = np.asarray(ds["inputs_particle"], dtype=np.float32)
         self.y = np.asarray(ds["targets_particle"], dtype=np.float32)
@@ -302,9 +313,11 @@ class ParticleFrameDataset(Dataset):
                 self.ranges.append((start_i, end_i))
 
     def __len__(self) -> int:
+        """Return number of particle frames in this split."""
         return len(self.ranges)
 
     def __getitem__(self, idx: int):
+        """Return all particles for one frame as `(X_frame, Y_frame)` tensors."""
         s, e = self.ranges[idx]
         return (
             torch.from_numpy(self.x[s:e]),
@@ -314,6 +327,7 @@ class ParticleFrameDataset(Dataset):
 
 def particle_collate(batch):
     # Keep variable-size frames as lists.
+    """Custom collate that keeps variable-length per-frame particle tensors as Python lists."""
     xs, ys = zip(*batch)
     return list(xs), list(ys)
 
@@ -335,6 +349,7 @@ class ParticleGNOModel(nn.Module):
         use_open3d_neighbor_search: bool = False,
         use_torch_scatter_reduce: bool = False,
     ):
+        """Construct encoder + stacked GNOBlock operator layers + regression head."""
         super().__init__()
 
         try:
@@ -382,6 +397,7 @@ class ParticleGNOModel(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # First three channels are expected to be particle coordinates.
+        """Predict particle targets for one frame using coordinates as graph positions."""
         pos = x[:, :3]
         h = self.encoder(x)
 
@@ -395,6 +411,7 @@ class ParticleGNOModel(nn.Module):
 
 
 def _eval_particle(model, loader, device, max_nodes: int = 4096):
+    """Evaluate the particle GNO model on frame-wise particle batches."""
     model.eval()
     rel_sum, mse_sum, n = 0.0, 0.0, 0
     with torch.no_grad():
@@ -420,6 +437,7 @@ def _eval_particle(model, loader, device, max_nodes: int = 4096):
 
 
 def train_particle_model(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """End-to-end training loop for particle surrogate model built from GNO blocks."""
     set_seed(int(cfg.get("seed", 42)))
     device = resolve_device(cfg)
 
@@ -529,6 +547,7 @@ def train_particle_model(cfg: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def main() -> None:
+    """CLI wrapper for running either field-task or particle-task training."""
     parser = argparse.ArgumentParser(description="Train field or particle model on final dataset")
     parser.add_argument("--config", type=str, required=True, help="YAML/JSON config")
     parser.add_argument("--task", type=str, choices=["field", "particle"], default="field")

@@ -14,6 +14,7 @@ import numpy as np
 
 @dataclass
 class ArrayInfo:
+    """Metadata descriptor for one VTK array (association, shape, components, and semantic kind)."""
     name: str
     association: str  # "point" | "cell" | "field"
     dtype: str
@@ -24,6 +25,7 @@ class ArrayInfo:
 
 @dataclass
 class VTKData:
+    """Normalized container for parsed VTK geometry, connectivity, and all discovered data arrays."""
     path: Path
     dataset_type: str
     points: np.ndarray
@@ -37,6 +39,7 @@ class VTKData:
 
 
 def _classify_array(arr: np.ndarray) -> Tuple[int, str]:
+    """Infer whether an array behaves like scalar/vector/tensor from its trailing component size."""
     arr = np.asarray(arr)
     if arr.ndim == 1:
         return 1, "scalar"
@@ -53,6 +56,7 @@ def _classify_array(arr: np.ndarray) -> Tuple[int, str]:
 
 
 def _register_arrays(dst: Dict[str, ArrayInfo], arrays: Dict[str, np.ndarray], association: str) -> None:
+    """Register array metadata into the summary dictionary for debug and auditing."""
     for name, arr in arrays.items():
         a = np.asarray(arr)
         comps, kind = _classify_array(a)
@@ -67,6 +71,7 @@ def _register_arrays(dst: Dict[str, ArrayInfo], arrays: Dict[str, np.ndarray], a
 
 
 def _load_with_pyvista(path: Path) -> VTKData:
+    """Load a VTK file through PyVista and extract points/cells/point-data/cell-data/field-data."""
     import pyvista as pv  # type: ignore
 
     mesh = pv.read(str(path))
@@ -105,6 +110,7 @@ def _load_with_pyvista(path: Path) -> VTKData:
 
 
 def _vtk_reader_for_suffix(suffix: str):
+    """Select the appropriate VTK reader class based on file extension."""
     import vtk  # type: ignore
 
     suffix = suffix.lower()
@@ -124,6 +130,7 @@ def _vtk_reader_for_suffix(suffix: str):
 
 
 def _vtk_array_dict(data_obj, association: str) -> Dict[str, np.ndarray]:
+    """Convert VTK point/cell/field data arrays to numpy arrays keyed by array name."""
     from vtk.util.numpy_support import vtk_to_numpy  # type: ignore
 
     if association == "point":
@@ -147,6 +154,7 @@ def _vtk_array_dict(data_obj, association: str) -> Dict[str, np.ndarray]:
 
 
 def _load_with_vtk(path: Path) -> VTKData:
+    """Load a VTK file through raw VTK API when PyVista is unavailable or fails."""
     import vtk  # type: ignore
     from vtk.util.numpy_support import vtk_to_numpy  # type: ignore
 

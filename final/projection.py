@@ -13,6 +13,7 @@ import numpy as np
 
 @dataclass
 class ProjectionConfig:
+    """Configuration for particle-to-grid deposition kernel choice, radius policy, and normalization."""
     kernel: str = "gaussian"  # "gaussian" | "compact"
     radius: float = 0.05
     support_multiplier: float = 3.0
@@ -23,10 +24,12 @@ class ProjectionConfig:
 
 
 def _gaussian_kernel(d: np.ndarray, h: np.ndarray) -> np.ndarray:
+    """Compute isotropic Gaussian deposition weights from particle-to-grid distances."""
     return np.exp(-0.5 * (d / np.maximum(h, 1e-12)) ** 2)
 
 
 def _wendland_c2_kernel(d: np.ndarray, h: np.ndarray) -> np.ndarray:
+    """Compute compact-support Wendland C2 weights for local particle deposition."""
     q = d / np.maximum(h, 1e-12)
     w = np.zeros_like(q)
     m = q < 1.0
@@ -36,6 +39,7 @@ def _wendland_c2_kernel(d: np.ndarray, h: np.ndarray) -> np.ndarray:
 
 
 def _build_grid_index(grid_xyz: np.ndarray):
+    """Build a KD-tree over flattened grid points for fast neighborhood queries per particle."""
     try:
         from scipy.spatial import cKDTree  # type: ignore
     except Exception as exc:
@@ -48,6 +52,7 @@ def _build_grid_index(grid_xyz: np.ndarray):
 
 
 def _resolve_radius(base_radius: float, sigma_value: float, cfg: ProjectionConfig) -> float:
+    """Resolve per-particle deposition radius using sigma scaling or fixed fallback radius."""
     if cfg.radius_from_sigma and np.isfinite(sigma_value) and sigma_value > 0:
         return float(cfg.sigma_scale * sigma_value)
     return float(base_radius)
@@ -166,6 +171,7 @@ def split_vector_channels(name: str, arr: np.ndarray) -> Dict[str, np.ndarray]:
 
 
 def ensure_scalar_particle_channels(channels: Mapping[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    """Convert mixed scalar/vector particle channels into scalar-only channel dictionary."""
     out: Dict[str, np.ndarray] = {}
     for name, arr in channels.items():
         a = np.asarray(arr)

@@ -30,6 +30,7 @@ FRAME_ID_REGEX = re.compile(r"(\d+)(?!.*\d)")
 
 
 def ensure_dir(path: Path | str) -> Path:
+    """Create a directory (including parents) if it does not exist and return it as `Path`."""
     p = Path(path)
     p.mkdir(parents=True, exist_ok=True)
     return p
@@ -62,6 +63,7 @@ def load_config(path: Path | str) -> Dict[str, Any]:
 
 
 def save_json(path: Path | str, payload: Dict[str, Any]) -> None:
+    """Write a JSON file with indentation and ensure the parent folder exists first."""
     p = Path(path)
     ensure_dir(p.parent)
     p.write_text(json.dumps(payload, indent=2))
@@ -77,6 +79,7 @@ def parse_frame_id(path: Path) -> str:
 
 
 def discover_files(glob_patterns: Sequence[str], root: Path | str = ".") -> List[Path]:
+    """Resolve one or more glob patterns relative to `root` and return a sorted unique file list."""
     root_path = Path(root)
     found: List[Path] = []
     for pattern in glob_patterns:
@@ -85,6 +88,7 @@ def discover_files(glob_patterns: Sequence[str], root: Path | str = ".") -> List
 
 
 def _index_by_frame(files: Iterable[Path]) -> Dict[str, Path]:
+    """Index files by parsed frame id so frame-based pairing can be done quickly."""
     out: Dict[str, Path] = {}
     for f in sorted(files):
         frame_id = parse_frame_id(f)
@@ -93,6 +97,7 @@ def _index_by_frame(files: Iterable[Path]) -> Dict[str, Path]:
 
 
 def pair_npz_vtk(npz_files: Sequence[Path], vtk_files: Sequence[Path]) -> List[Tuple[Path, Optional[Path], str]]:
+    """Pair each NPZ frame with an optional VTK frame by matching extracted frame ids."""
     vtk_map = _index_by_frame(vtk_files)
     pairs: List[Tuple[Path, Optional[Path], str]] = []
     for npz in sorted(npz_files):
@@ -196,6 +201,7 @@ def split_entries(
 
 
 def entries_to_records(entries: Sequence[FrameEntry]) -> List[Dict[str, Any]]:
+    """Convert `FrameEntry` objects into plain dictionaries for logging and JSON export."""
     recs: List[Dict[str, Any]] = []
     for e in entries:
         recs.append(
@@ -212,14 +218,17 @@ def entries_to_records(entries: Sequence[FrameEntry]) -> List[Dict[str, Any]]:
 
 
 def save_split_index(path: Path | str, split: Dict[str, List[FrameEntry]]) -> None:
+    """Persist train/val/test split metadata to disk as JSON for reproducible training."""
     payload = {k: entries_to_records(v) for k, v in split.items()}
     save_json(path, payload)
 
 
 def npz_to_dict(path: Path | str) -> Dict[str, np.ndarray]:
+    """Load an `.npz` archive into a normal Python dict of numpy arrays."""
     with np.load(path, allow_pickle=True) as data:
         return {k: data[k] for k in data.files}
 
 
 def pretty_shape(a: np.ndarray) -> str:
+    """Format a numpy shape tuple into a compact `a x b x c` style string."""
     return "x".join(str(int(s)) for s in a.shape)

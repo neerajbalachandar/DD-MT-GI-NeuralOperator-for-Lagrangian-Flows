@@ -8,6 +8,7 @@ import numpy as np
 
 
 def _as_points(arr: np.ndarray) -> np.ndarray:
+    """Validate that coordinates are in `(N, 3)` form and return them as numpy array."""
     a = np.asarray(arr)
     if a.ndim != 2 or a.shape[1] != 3:
         raise ValueError(f"Expected points shape (N,3), got {a.shape}")
@@ -15,6 +16,7 @@ def _as_points(arr: np.ndarray) -> np.ndarray:
 
 
 def _to_channels_last(values: np.ndarray) -> np.ndarray:
+    """Normalize field layout to channels-last representation for interpolation backends."""
     v = np.asarray(values)
     if v.ndim == 4 and v.shape[-1] in (1, 3, 6, 9, 12):
         return v
@@ -47,6 +49,7 @@ def direct_reshape_if_possible(
 
 
 def _infer_structured_axes(points: np.ndarray) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Detect structured-grid axes from point cloud if it lies on a Cartesian product grid."""
     p = _as_points(points)
     xs = np.unique(np.round(p[:, 0], decimals=12))
     ys = np.unique(np.round(p[:, 1], decimals=12))
@@ -57,6 +60,7 @@ def _infer_structured_axes(points: np.ndarray) -> Optional[Tuple[np.ndarray, np.
 
 
 def _reshape_to_structured(points: np.ndarray, values: np.ndarray):
+    """Reconstruct structured value volume from scattered points when exact axes are inferred."""
     axes = _infer_structured_axes(points)
     if axes is None:
         return None
@@ -92,6 +96,7 @@ def _trilinear_interpolate(
     source_values: np.ndarray,
     target_grid_xyz: np.ndarray,
 ) -> Optional[np.ndarray]:
+    """Use `RegularGridInterpolator` for trilinear remapping when source grid is structured."""
     try:
         from scipy.interpolate import RegularGridInterpolator  # type: ignore
     except Exception:
@@ -123,6 +128,7 @@ def _griddata_linear(
     source_values: np.ndarray,
     target_grid_xyz: np.ndarray,
 ) -> Optional[np.ndarray]:
+    """Use SciPy `griddata` linear interpolation with nearest fill outside convex hull."""
     try:
         from scipy.interpolate import griddata  # type: ignore
     except Exception:
@@ -152,6 +158,7 @@ def _rbf_fallback(
     source_values: np.ndarray,
     target_grid_xyz: np.ndarray,
 ) -> Optional[np.ndarray]:
+    """Fallback remapping using RBF interpolation when other interpolation modes are unavailable."""
     p = _as_points(source_points)
     v = _to_channels_last(source_values)
     if v.ndim != 2:

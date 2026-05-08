@@ -99,10 +99,12 @@ FIELD_ALIASES = {
 
 @dataclass
 class GridSpec:
+    """Structured target grid definition (bounds + resolution) with helper to build grid coordinates."""
     bounds: Tuple[float, float, float, float, float, float]
     resolution: Tuple[int, int, int]
 
     def build_xyz(self) -> np.ndarray:
+        """Build `(nx, ny, nz, 3)` grid coordinates from configured bounds and resolution."""
         xmin, xmax, ymin, ymax, zmin, zmax = self.bounds
         nx, ny, nz = self.resolution
         xs = np.linspace(xmin, xmax, nx)
@@ -114,6 +116,7 @@ class GridSpec:
 
 @dataclass
 class BuildLog:
+    """Mutable counters and diagnostics collected while creating one preset dataset."""
     n_entries: int = 0
     n_samples_written: int = 0
     missing_vtk: int = 0
@@ -122,12 +125,14 @@ class BuildLog:
     detected_vtk_arrays: Dict[str, Dict[str, Any]] = None  # type: ignore
 
     def __post_init__(self):
+        """Initialize mutable dict fields to empty dictionaries when dataclass defaults are `None`."""
         if self.interpolation_counts is None:
             self.interpolation_counts = {}
         if self.detected_vtk_arrays is None:
             self.detected_vtk_arrays = {}
 
     def count_interp(self, mode: str) -> None:
+        """Increment interpolation-mode usage counters for final build diagnostics."""
         self.interpolation_counts[mode] = self.interpolation_counts.get(mode, 0) + 1
 
 
@@ -136,6 +141,7 @@ class BuildLog:
 # ---------------------------
 
 def _find_key(data: Mapping[str, np.ndarray], aliases: Sequence[str]) -> Optional[str]:
+    """Find best-matching key in a dictionary using exact then substring alias matching."""
     lower_to_real = {k.lower(): k for k in data.keys()}
     for alias in aliases:
         a = alias.lower()
@@ -150,6 +156,7 @@ def _find_key(data: Mapping[str, np.ndarray], aliases: Sequence[str]) -> Optiona
 
 
 def _extract_xyz(data: Mapping[str, np.ndarray]) -> np.ndarray:
+    """Extract particle coordinates from supported key patterns and normalize to `(N, 3)`."""
     key = _find_key(data, PARTICLE_ALIASES["xyz"])
     if key is not None:
         xyz = np.asarray(data[key])
@@ -172,6 +179,7 @@ def _extract_xyz(data: Mapping[str, np.ndarray]) -> np.ndarray:
 
 
 def _extract_gamma_vec(data: Mapping[str, np.ndarray], n: int) -> np.ndarray:
+    """Extract full Gamma vector channels and provide scalar-to-vector fallback if needed."""
     kvec = _find_key(data, PARTICLE_ALIASES["gamma_vec"])
     if kvec is not None:
         g = np.asarray(data[kvec])
@@ -197,6 +205,7 @@ def _extract_gamma_vec(data: Mapping[str, np.ndarray], n: int) -> np.ndarray:
 
 
 def _extract_optional_scalar(data: Mapping[str, np.ndarray], aliases: Sequence[str], n: int, default: float = 0.0) -> np.ndarray:
+    """Extract optional scalar particle channel with robust shape and default handling."""
     k = _find_key(data, aliases)
     if k is None:
         return np.full(n, default, dtype=np.float64)
@@ -211,6 +220,7 @@ def _extract_optional_scalar(data: Mapping[str, np.ndarray], aliases: Sequence[s
 
 
 def _extract_optional_vector(data: Mapping[str, np.ndarray], aliases: Sequence[str], n: int) -> Optional[np.ndarray]:
+    """Extract optional vector particle channel in `(N, 3)` form when available."""
     k = _find_key(data, aliases)
     if k is None:
         return None
@@ -279,6 +289,7 @@ def extract_particle_channels(data: Mapping[str, np.ndarray]) -> Tuple[np.ndarra
 
 
 def _extract_field_points(data: Mapping[str, np.ndarray]) -> Optional[np.ndarray]:
+    """Extract source field coordinates used for remapping target U/W fields to the grid."""
     k = _find_key(data, FIELD_ALIASES["points"])
     if k is not None:
         pts = np.asarray(data[k])
@@ -299,6 +310,7 @@ def _extract_field_points(data: Mapping[str, np.ndarray]) -> Optional[np.ndarray
 
 
 def _extract_vector_field(data: Mapping[str, np.ndarray], aliases: Sequence[str]) -> Optional[np.ndarray]:
+    """Extract vector field array from possible aliases and normalize layout."""
     k = _find_key(data, aliases)
     if k is None:
         return None
@@ -322,6 +334,7 @@ def extract_target_tensor(
     output_mode: str,
     interpolation_priority: Sequence[str],
 ) -> Tuple[np.ndarray, str, List[str]]:
+    """Build CHW target tensor from U/W output mode and interpolation priority chain."""
     output_mode = output_mode.upper()
     points = _extract_field_points(data)
 
@@ -356,6 +369,7 @@ def extract_target_tensor(
 
 
 def _channel_stack(channels: Mapping[str, np.ndarray], channel_order: Sequence[str]) -> np.ndarray:
+    """Stack selected 3D channels into a `(C, nx, ny, nz)` tensor following requested order."""
     arrs: List[np.ndarray] = []
     for name in channel_order:
         if name not in channels:
@@ -372,6 +386,7 @@ def _resolve_preset_channels(
     channels: Mapping[str, np.ndarray],
     config: Mapping[str, Any],
 ) -> List[str]:
+    """Resolve channel list for a preset definition, including CUSTOM and ALL modes."""
     if preset == "CUSTOM":
         return list(config.get("custom_input_channels", []))
 
@@ -394,6 +409,7 @@ def _entry_context(entry: FrameEntry, case_idx: int, n_case_entries: int, global
     # - If `phase` is provided in metadata, use it.
     # - Else, optionally infer normalized phase from frame index.
     # - For explicitly stationary-labeled cases, keep phase=0.
+    """Build per-frame global context (phase, AoA, freestream, dt, etc.) for conditioning channels."""
     if "phase" in entry.meta:
         phase = float(entry.meta.get("phase", 0.0))
     else:
@@ -421,6 +437,7 @@ def _entry_context(entry: FrameEntry, case_idx: int, n_case_entries: int, global
 
 
 def _compute_global_bounds(entries: Sequence[FrameEntry], padding_frac: float = 0.05, include_vtk: bool = True) -> Tuple[float, float, float, float, float, float]:
+    """Compute global spatial bounds over all frames (particles and optionally VTK geometry)."""
     mins = np.array([np.inf, np.inf, np.inf], dtype=np.float64)
     maxs = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float64)
 
@@ -447,6 +464,7 @@ def _compute_global_bounds(entries: Sequence[FrameEntry], padding_frac: float = 
 
 
 def _collect_entries(cfg: Mapping[str, Any], root: Path) -> List[FrameEntry]:
+    """Collect and sort all frame entries across configured dataset cases."""
     entries: List[FrameEntry] = []
     for case_cfg in cfg.get("cases", []):
         case_entries = discover_case_entries(case_cfg, root=root)
@@ -462,6 +480,7 @@ def _save_sample(
     target_channels: Sequence[str],
     meta: Mapping[str, Any],
 ) -> None:
+    """Persist one processed training sample with tensors, channel names, and metadata."""
     ensure_dir(out_path.parent)
     np.savez_compressed(
         out_path,
@@ -474,6 +493,7 @@ def _save_sample(
 
 
 def build_field_datasets(config: Mapping[str, Any], root: Path) -> Dict[str, Any]:
+    """Main stage-2 builder for structured field-learning datasets and preset variants A-F."""
     out_root = ensure_dir(root / config.get("output_root", "final/output"))
     dataset_name = str(config.get("dataset_name", "geometry_aware"))
     dataset_root = ensure_dir(out_root / dataset_name)
@@ -694,6 +714,7 @@ def build_field_datasets(config: Mapping[str, Any], root: Path) -> Dict[str, Any
 
 
 def _extract_particle_targets(data: Mapping[str, np.ndarray], n: int) -> Optional[np.ndarray]:
+    """Extract particle-level targets `(velocity, gradU)` as a 12-channel regression vector."""
     vel = _extract_optional_vector(data, PARTICLE_ALIASES["velocity"], n)
     if vel is None:
         return None
@@ -733,6 +754,7 @@ def _extract_particle_targets(data: Mapping[str, np.ndarray], n: int) -> Optiona
 
 
 def build_particle_dataset(config: Mapping[str, Any], root: Path) -> Dict[str, Any]:
+    """Build particle-surrogate dataset (`inputs_particle`, `targets_particle`) for GNO training."""
     out_root = ensure_dir(root / config.get("output_root", "final/output"))
     dataset_name = str(config.get("dataset_name", "geometry_aware"))
     p_root = ensure_dir(out_root / dataset_name / "particle_dataset")
@@ -780,6 +802,7 @@ def build_particle_dataset(config: Mapping[str, Any], root: Path) -> Dict[str, A
     rows_x: List[np.ndarray] = []
     rows_y: List[np.ndarray] = []
     frame_offsets: List[Tuple[str, str, int, int]] = []
+    frame_contexts: List[Dict[str, Any]] = []
 
     case_to_entries: Dict[str, List[FrameEntry]] = {}
     for e in entries:
@@ -818,6 +841,19 @@ def build_particle_dataset(config: Mapping[str, Any], root: Path) -> Dict[str, A
             start = 0 if not rows_x else int(sum(r.shape[0] for r in rows_x))
             end = start + n
             frame_offsets.append((entry.case_name, entry.frame_id, start, end))
+            frame_contexts.append(
+                {
+                    "case_name": entry.case_name,
+                    "frame_id": entry.frame_id,
+                    "start": start,
+                    "end": end,
+                    "dt": None if context.get("dt", None) is None else float(context["dt"]),
+                    "phase": float(context.get("phase", 0.0)),
+                    "angle_of_attack": float(context.get("angle_of_attack", 0.0)),
+                    "freestream": [float(v) for v in np.asarray(context.get("freestream", [0.0, 0.0, 0.0])).reshape(-1)[:3]],
+                    "stationary": bool(context.get("stationary", False)),
+                }
+            )
 
             rows_x.append(x)
             rows_y.append(y)
@@ -835,6 +871,7 @@ def build_particle_dataset(config: Mapping[str, Any], root: Path) -> Dict[str, A
         feature_names=np.asarray(feature_names, dtype=object),
         target_names=np.asarray(target_names, dtype=object),
         frame_offsets=np.asarray(frame_offsets, dtype=object),
+        frame_contexts=np.asarray(frame_contexts, dtype=object),
     )
 
     # row-level split generated from frame split.
@@ -870,6 +907,7 @@ def build_particle_dataset(config: Mapping[str, Any], root: Path) -> Dict[str, A
         "n_rows": int(X.shape[0]),
         "n_features": int(X.shape[1]),
         "n_targets": int(Y.shape[1]),
+        "particle_task_mode": str(config.get("particle_task_mode", "quantities_then_physics")),
         "split_counts": {k: int(v.shape[0]) for k, v in split_arrays.items()},
     }
     save_json(p_root / "build_log.json", summary)
@@ -877,6 +915,7 @@ def build_particle_dataset(config: Mapping[str, Any], root: Path) -> Dict[str, A
 
 
 def main() -> None:
+    """CLI wrapper for dataset building (field datasets and/or particle dataset)."""
     parser = argparse.ArgumentParser(description="Build geometry-aware vortex-particle datasets")
     parser.add_argument("--config", type=str, default="final/configs/pipeline_config.yaml")
     parser.add_argument("--root", type=str, default=".")

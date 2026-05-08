@@ -1,6 +1,14 @@
-"""Combine separate input/output H5 (+ optional XMF/VTK refs) into unified NPZ frames.
+"""Convert split input/output H5 streams into merged per-frame NPZ files.
 
-Supports multiple datasets and frame pairing between input/output streams.
+Why this module exists:
+- Your raw simulation pipeline stores input and output in separate folders.
+- Training/preprocessing is easier when each frame lives in one NPZ payload.
+- This converter performs that merge while preserving traceability metadata.
+
+This file intentionally supports the project's current workflow only:
+- explicit `datasets:` config entries
+- separate `input_h5_glob` and `output_h5_glob`
+- optional sidecar `input_xmf_glob`, `output_xmf_glob`, and `vtk_glob`
 """
 
 from __future__ import annotations
@@ -11,7 +19,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -23,6 +31,8 @@ DEFAULT_FRAME_ID_REGEX = r"(\d+)(?!.*\d)"
 
 @dataclass
 class PairRecord:
+    """Container for one paired input/output frame and its optional sidecar files."""
+
     in_frame: str
     out_frame: str
     in_h5: Path
@@ -33,11 +43,15 @@ class PairRecord:
 
 
 def parse_frame_id(path: Path, regex: re.Pattern[str]) -> str:
+    """Extract normalized frame id from filename using configured regex."""
+
     m = regex.search(path.stem)
     return m.group(1).zfill(6) if m else path.stem
 
 
 def discover_many(patterns: Sequence[str], root: Path) -> List[Path]:
+    """Resolve many glob patterns relative to `root` and return unique sorted paths."""
+
     out: List[Path] = []
     for pat in patterns:
         if not pat:
@@ -47,15 +61,19 @@ def discover_many(patterns: Sequence[str], root: Path) -> List[Path]:
 
 
 def _h5_read_dataset(h5f, dataset_path: str) -> np.ndarray:
+    """Read one dataset path from an open H5 handle."""
+
     if dataset_path not in h5f:
         raise KeyError(f"Dataset path not found in H5: {dataset_path}")
     return np.asarray(h5f[dataset_path])
 
 
 def _load_h5_map(h5_path: Path, key_map: Mapping[str, str]) -> Dict[str, np.ndarray]:
+    """Load selected arrays from H5 using mapping `output_key -> h5_dataset_path`."""
+
     try:
         import h5py  # type: ignore
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover
         raise RuntimeError("h5py is required for H5->NPZ conversion") from exc
 
     out: Dict[str, np.ndarray] = {}
@@ -68,6 +86,8 @@ def _load_h5_map(h5_path: Path, key_map: Mapping[str, str]) -> Dict[str, np.ndar
 
 
 def _index_by_frame(files: Sequence[Path], regex: re.Pattern[str]) -> Dict[str, Path]:
+    """Index files by parsed frame id for fast temporal pairing."""
+
     idx: Dict[str, Path] = {}
     for f in sorted(files):
         idx[parse_frame_id(f, regex)] = f
@@ -80,6 +100,13 @@ def _pair_input_output(
     regex: re.Pattern[str],
     pair_mode: str,
 ) -> List[Tuple[str, str, Path, Path]]:
+    """Create input/output frame pairs.
+
+    Supported pair modes:
+    - `intersection`: use frames present in both streams
+    - `nearest_prev`: for each input frame, pick latest output frame <= input frame
+    """
+
     in_map = _index_by_frame(input_h5, regex)
     out_map = _index_by_frame(output_h5, regex)
 
@@ -105,12 +132,9 @@ def _pair_input_output(
     raise ValueError(f"Unknown pair_mode={pair_mode}. Use 'intersection' or 'nearest_prev'.")
 
 
-def _optional_for_pair(
-    by_frame: Mapping[str, Path],
-    in_frame: str,
-    out_frame: str,
-) -> Optional[Path]:
-    # Prefer exact input-frame match, then output-frame match.
+def _optional_for_pair(by_frame: Mapping[str, Path], in_frame: str, out_frame: str) -> Optional[Path]:
+    """Resolve optional sidecar for a pair (prefer input-frame match, then output-frame)."""
+
     return by_frame.get(in_frame) or by_frame.get(out_frame)
 
 
@@ -118,6 +142,8 @@ def _merge_payloads(
     in_payload: Mapping[str, np.ndarray],
     out_payload: Mapping[str, np.ndarray],
 ) -> Dict[str, np.ndarray]:
+    """Merge input/output payload dictionaries and guard against key collisions."""
+
     overlap = set(in_payload.keys()).intersection(out_payload.keys())
     if overlap:
         raise KeyError(
@@ -131,6 +157,8 @@ def _merge_payloads(
 
 
 def _as_obj_scalar(v: str) -> np.ndarray:
+    """Store string metadata as numpy object scalar for robust NPZ round-trip."""
+
     return np.asarray(v, dtype=object)
 
 
@@ -140,11 +168,15 @@ def convert_one_dataset(
     root: Path,
     out_root: Path,
 ) -> Dict[str, Any]:
+    """Convert one dataset config entry into merged per-frame NPZ outputs."""
+
     name = str(ds_cfg.get("name", "dataset"))
     output_subdir = str(ds_cfg.get("output_subdir", name))
     out_dir = ensure_dir(out_root / output_subdir)
 
-    frame_regex = re.compile(str(ds_cfg.get("frame_id_regex", global_cfg.get("frame_id_regex", DEFAULT_FRAME_ID_REGEX))))
+    frame_regex = re.compile(
+        str(ds_cfg.get("frame_id_regex", global_cfg.get("frame_id_regex", DEFAULT_FRAME_ID_REGEX)))
+    )
     pair_mode = str(ds_cfg.get("pair_mode", global_cfg.get("pair_mode", "intersection"))).lower()
 
     input_h5_glob = list(ds_cfg.get("input_h5_glob", []))
@@ -154,9 +186,7 @@ def convert_one_dataset(
     vtk_glob = list(ds_cfg.get("vtk_glob", []))
 
     if not input_h5_glob or not output_h5_glob:
-        raise RuntimeError(
-            f"Dataset `{name}` requires both input_h5_glob and output_h5_glob."
-        )
+        raise RuntimeError(f"Dataset `{name}` requires both input_h5_glob and output_h5_glob.")
 
     input_h5 = discover_many(input_h5_glob, root)
     output_h5 = discover_many(output_h5_glob, root)
@@ -168,9 +198,7 @@ def convert_one_dataset(
     output_key_map = dict(ds_cfg.get("output_key_map", global_cfg.get("output_key_map", {})))
 
     if not input_key_map and not output_key_map:
-        raise RuntimeError(
-            f"Dataset `{name}` has no input_key_map/output_key_map."
-        )
+        raise RuntimeError(f"Dataset `{name}` has no input_key_map/output_key_map.")
 
     pairs = _pair_input_output(input_h5, output_h5, frame_regex, pair_mode=pair_mode)
 
@@ -203,7 +231,11 @@ def convert_one_dataset(
         payload["input_frame_id"] = _as_obj_scalar(in_fr)
         payload["output_frame_id"] = _as_obj_scalar(out_fr)
 
-        fname = f"{name}__frame_{in_fr}.npz" if in_fr == out_fr else f"{name}__in_{in_fr}__out_{out_fr}.npz"
+        fname = (
+            f"{name}__frame_{in_fr}.npz"
+            if in_fr == out_fr
+            else f"{name}__in_{in_fr}__out_{out_fr}.npz"
+        )
         out_path = out_dir / fname
         np.savez_compressed(out_path, **payload)
         written += 1
@@ -241,92 +273,26 @@ def convert_one_dataset(
     return summary
 
 
-def _convert_legacy(cfg: Mapping[str, Any], root: Path, out_root: Path) -> Dict[str, Any]:
-    """Backwards-compatible mode: one h5_glob + one key_map."""
-    io_cfg = cfg.get("io", {})
-    h5_patterns = list(io_cfg.get("h5_glob", []))
-    vtk_patterns = list(io_cfg.get("vtk_glob", []))
-
-    if not h5_patterns:
-        raise RuntimeError("Config io.h5_glob is empty. Fill H5 path patterns first.")
-
-    h5_files = discover_many(h5_patterns, root)
-    vtk_files = discover_many(vtk_patterns, root) if vtk_patterns else []
-
-    key_map = dict(cfg.get("key_map", {}))
-    if not key_map:
-        raise RuntimeError("Config key_map is empty. Map output npz keys to H5 dataset paths.")
-
-    frame_regex = re.compile(str(cfg.get("frame_id_regex", DEFAULT_FRAME_ID_REGEX)))
-    vtk_map = _index_by_frame(vtk_files, frame_regex)
-
-    out_dir = ensure_dir(out_root / "legacy_single_stream")
-
-    written = 0
-    records = []
-    for h5_path in h5_files:
-        fr = parse_frame_id(h5_path, frame_regex)
-        try:
-            payload = _load_h5_map(h5_path, key_map)
-        except Exception as exc:
-            print(f"[warn] skip {h5_path}: {exc}")
-            continue
-
-        vtk_path = vtk_map.get(fr)
-        payload["source_h5_path"] = _as_obj_scalar(str(h5_path))
-        payload["source_vtk_path"] = _as_obj_scalar("" if vtk_path is None else str(vtk_path))
-        payload["input_frame_id"] = _as_obj_scalar(fr)
-        payload["output_frame_id"] = _as_obj_scalar(fr)
-
-        out_path = out_dir / f"frame_{fr}.npz"
-        np.savez_compressed(out_path, **payload)
-        written += 1
-
-        records.append(
-            {
-                "frame_id": fr,
-                "h5_path": str(h5_path),
-                "vtk_path": "" if vtk_path is None else str(vtk_path),
-                "npz_path": str(out_path),
-                "keys": sorted(payload.keys()),
-            }
-        )
-
-    summary = {
-        "mode": "legacy_single_stream",
-        "n_h5": len(h5_files),
-        "n_vtk": len(vtk_files),
-        "n_written": written,
-        "output_dir": str(out_dir),
-    }
-    save_json(out_dir / "conversion_summary.json", summary)
-    save_json(out_dir / "conversion_index.json", {"frames": records})
-    return summary
-
-
 def convert_h5_vtk_to_npz(cfg: Mapping[str, Any], root: Path) -> Dict[str, Any]:
+    """Convert all configured datasets from split H5/XMF/VTK to merged NPZ outputs."""
+
     out_root = ensure_dir(root / cfg.get("output_dir", "final/output/merged_npz"))
 
     datasets = cfg.get("datasets", None)
-    if datasets:
-        ds_summaries = []
-        for ds_cfg in datasets:
-            ds_summaries.append(convert_one_dataset(ds_cfg, cfg, root=root, out_root=out_root))
+    if not datasets:
+        raise RuntimeError(
+            "Expected `datasets:` list in conversion config. "
+            "Use final/configs/h5_vtk_to_npz_template.yaml format."
+        )
 
-        summary = {
-            "mode": "multi_dataset_split_io",
-            "n_datasets": len(ds_summaries),
-            "datasets": ds_summaries,
-            "output_root": str(out_root),
-        }
-        save_json(out_root / "conversion_summary.json", summary)
-        return summary
+    ds_summaries = []
+    for ds_cfg in datasets:
+        ds_summaries.append(convert_one_dataset(ds_cfg, cfg, root=root, out_root=out_root))
 
-    # Fallback for old config style.
-    legacy_summary = _convert_legacy(cfg, root=root, out_root=out_root)
     summary = {
-        "mode": "legacy",
-        "legacy": legacy_summary,
+        "mode": "multi_dataset_split_io",
+        "n_datasets": len(ds_summaries),
+        "datasets": ds_summaries,
         "output_root": str(out_root),
     }
     save_json(out_root / "conversion_summary.json", summary)
@@ -334,6 +300,8 @@ def convert_h5_vtk_to_npz(cfg: Mapping[str, Any], root: Path) -> Dict[str, Any]:
 
 
 def main() -> None:
+    """CLI wrapper for H5/XMF/VTK to NPZ conversion."""
+
     parser = argparse.ArgumentParser(
         description="Convert split input/output H5 (+ optional XMF/VTK) into unified NPZ frames"
     )

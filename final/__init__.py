@@ -10,4 +10,6 @@ __all__ = [
     "dataset_builder",
     "train",
     "h5_vtk_to_npz",
+    "sanity_checks",
+    "particle_rollout",
 ]

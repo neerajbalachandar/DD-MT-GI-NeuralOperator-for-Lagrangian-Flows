@@ -1,0 +1,40 @@
+# Evaluate particle surrogate as: quantities model + physics state update.
+#
+# Run:
+#   python -m final.particle_rollout --config final/configs/particle_rollout.yaml
+
+dataset_npz: final/output/unified_vpm_geometry_v2/particle_dataset/particle_dataset.npz
+checkpoint_path: final/output/unified_vpm_geometry_v2/particle_dataset/training_particle_gno/best_particle_gno_model.pt
+output_dir: final/output/unified_vpm_geometry_v2/particle_dataset/rollout_eval
+
+# Use at most this many consecutive same-case frame pairs (-1 means all).
+max_pairs: 200
+plot_example: true
+
+# Used if frame contexts do not provide dt/freestream.
+dt_default: 0.0
+freestream_default: [0.0, 0.0, 0.0]
+
+# Must match training architecture.
+model:
+  hidden_dim: 128
+  n_layers: 4
+  radius: 0.2
+  transform_type: linear
+  reduction: mean
+  pos_embedding_type: transformer
+  pos_embedding_channels: 16
+  use_open3d_neighbor_search: false
+  use_torch_scatter_reduce: false
+
+# Physics rollout mode:
+# - classic:      update X and Gamma using predicted U/J
+# - reformulated: update X, Gamma, sigma using rVPM-style Z term
+physics:
+  integration_mode: reformulated
+  transposed: false
+  # FLOWVPM default for rVPM in this install is approximately f=0, g=1/5.
+  f: 0.0
+  g: 0.2
+  zeta0: 1.0
+  epsilon: 1.0e-12

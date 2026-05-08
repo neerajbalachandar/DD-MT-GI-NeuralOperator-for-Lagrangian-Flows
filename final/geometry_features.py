@@ -12,6 +12,7 @@ from .vtk_loader import VTKData
 
 @dataclass
 class GeometryConfig:
+    """Controls geometry feature construction such as mask thickness, SDF sign, and coordinate channels."""
     body_mask_thickness: float = 0.02
     use_signed_sdf: bool = True
     include_coordinates: bool = False
@@ -39,6 +40,7 @@ _ARRAY_ALIASES = {
 
 
 def _lower_map(d: Mapping[str, np.ndarray]) -> Dict[str, str]:
+    """Create a lowercase-to-original-name lookup for case-insensitive array matching."""
     return {k.lower(): k for k in d.keys()}
 
 
@@ -59,6 +61,7 @@ def find_array(vtk_data: VTKData, aliases: Sequence[str]) -> Optional[Tuple[str,
 
 
 def _nearest_indices(src_points: np.ndarray, query_points: np.ndarray) -> np.ndarray:
+    """Find nearest source-point indices for each query point using KD-tree lookup."""
     try:
         from scipy.spatial import cKDTree  # type: ignore
     except Exception as exc:
@@ -70,6 +73,7 @@ def _nearest_indices(src_points: np.ndarray, query_points: np.ndarray) -> np.nda
 
 
 def _sample_nearest(src_points: np.ndarray, src_values: np.ndarray, grid_xyz: np.ndarray) -> np.ndarray:
+    """Nearest-neighbor sample source values at every target grid point."""
     flat = grid_xyz.reshape(-1, 3)
     idx = _nearest_indices(src_points, flat)
     values = np.asarray(src_values)
@@ -78,6 +82,7 @@ def _sample_nearest(src_points: np.ndarray, src_values: np.ndarray, grid_xyz: np
 
 
 def _cell_centers(vtk_data: VTKData) -> Optional[np.ndarray]:
+    """Compute cell centers from mesh cells so cell-associated arrays can be sampled on the grid."""
     mesh = vtk_data.raw_mesh
     if mesh is not None:
         try:
@@ -119,6 +124,7 @@ def _cell_centers(vtk_data: VTKData) -> Optional[np.ndarray]:
 
 
 def _association_points(vtk_data: VTKData, association: str) -> Optional[np.ndarray]:
+    """Return the point cloud corresponding to the array association (point or cell)."""
     if association == "point":
         if vtk_data.points.ndim == 2 and vtk_data.points.shape[1] == 3 and vtk_data.points.shape[0] > 0:
             return vtk_data.points
@@ -129,6 +135,7 @@ def _association_points(vtk_data: VTKData, association: str) -> Optional[np.ndar
 
 
 def _sample_alias_scalar_to_grid(vtk_data: VTKData, aliases: Sequence[str], grid_xyz: np.ndarray) -> Optional[np.ndarray]:
+    """Lookup a scalar array by aliases and sample it onto the grid via nearest-neighbor."""
     match = find_array(vtk_data, aliases)
     if match is None:
         return None
@@ -146,6 +153,7 @@ def _sample_alias_scalar_to_grid(vtk_data: VTKData, aliases: Sequence[str], grid
 
 
 def _sample_alias_vector_to_grid(vtk_data: VTKData, aliases: Sequence[str], grid_xyz: np.ndarray) -> Optional[np.ndarray]:
+    """Lookup a vector array by aliases and sample it onto the grid via nearest-neighbor."""
     match = find_array(vtk_data, aliases)
     if match is None:
         return None
@@ -165,6 +173,7 @@ def _sample_alias_vector_to_grid(vtk_data: VTKData, aliases: Sequence[str], grid
 
 
 def _extract_point_normals(vtk_data: VTKData) -> Optional[np.ndarray]:
+    """Fetch surface normals from arrays or reconstruct point normals from mesh geometry."""
     match = find_array(vtk_data, _ARRAY_ALIASES["normal"])
     if match is not None:
         _, _, arr = match
@@ -219,6 +228,7 @@ def _estimate_signed_distance(
 
 
 def _expand_vector_to_grid(v: np.ndarray, grid_shape: Tuple[int, int, int]) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Split flattened vector values into x/y/z grids with target structured shape."""
     if v.ndim != 2 or v.shape[1] != 3:
         raise ValueError(f"Expected vector with shape (N,3), got {v.shape}")
     vx = v[:, 0].reshape(grid_shape)
@@ -228,6 +238,7 @@ def _expand_vector_to_grid(v: np.ndarray, grid_shape: Tuple[int, int, int]) -> T
 
 
 def _broadcast_scalar(value: float, grid_shape: Tuple[int, int, int]) -> np.ndarray:
+    """Broadcast one scalar value into a full 3D grid channel."""
     return np.full(grid_shape, float(value), dtype=np.float32)
 
 

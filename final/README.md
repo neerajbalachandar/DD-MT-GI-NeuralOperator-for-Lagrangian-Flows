@@ -13,6 +13,8 @@ This folder is a **new version** of the preprocessing/training pipeline. Existin
 - `dataset_builder.py` - builds presets A-F + particle-surrogate dataset
 - `train.py` - field FNO training + particle true GNOBlock model
 - `h5_vtk_to_npz.py` - merges split input/output H5 streams (+ optional XMF/VTK) into unified NPZ
+- `sanity_checks.py` - visual sanity pass (data summaries, channel slices, model forward checks, training curves)
+- `particle_rollout.py` - one-step particle rollout check using learned quantities (`U`, `gradU`) + rVPM-style state update
 
 ## Key support implemented
 
@@ -71,6 +73,31 @@ python -m final.train --task field --config final/configs/train_field_fno.yaml
 python -m final.train --task particle --config final/configs/train_particle_gno.yaml
 ```
 
+5. Run sanity checks (optional but strongly recommended):
+
+```bash
+python -m final.sanity_checks \
+  --pipeline-config final/configs/pipeline_config.yaml \
+  --field-train-config final/configs/train_field_fno.yaml \
+  --particle-train-config final/configs/train_particle_gno.yaml
+```
+
+6. Evaluate particle rollout (after particle model training):
+
+```bash
+python -m final.particle_rollout --config final/configs/particle_rollout.yaml
+```
+
+This reports two levels of quality:
+- quantity-level: how well model predicts `velocity` and `velocity_gradient`
+- rollout-level: how well one-step updated `X/Gamma/sigma` match the next frame
+
+Artifacts are written under `final/output/sanity_checks/`:
+- merged-input summaries and scatter plots
+- sample input/target channel slices
+- (if checkpoints exist) prediction vs target/error plots
+- training-history curves from `history.json`
+
 Use separate dataset fields in `h5_vtk_to_npz_template.yaml`:
 `input_h5_glob`, `output_h5_glob`, `input_xmf_glob`, `output_xmf_glob`, `vtk_glob`.
 
@@ -78,6 +105,8 @@ Use separate dataset fields in `h5_vtk_to_npz_template.yaml`:
 
 - `final/configs/pipeline_config.yaml` is stage-2 and consumes NPZs from `h5_vtk_to_npz.py`.
 - Cases are fully generic (e.g. `1`, `2`, `7`, `8`); no flapping/stationary classification is required.
+- `h5_vtk_to_npz.py` is simplified to the split input/output workflow (no legacy single-stream branch).
+- particle surrogate follows `quantities_then_physics`: learn local P2P quantities first, then advance state with physics update.
 - VTK loading uses `pyvista` when available, then falls back to `vtk`.
 - Interpolation methods requiring SciPy will gracefully fall back if unavailable.
 - Optimizer selection is `auto` by default and chooses Adam/AdamW from NeuralOperator when available.

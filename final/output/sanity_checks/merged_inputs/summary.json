@@ -1,0 +1,23 @@
+{
+  "cases": {
+    "1": {
+      "n_files": 0,
+      "n_checked": 0
+    },
+    "2": {
+      "n_files": 0,
+      "n_checked": 0
+    },
+    "7": {
+      "n_files": 0,
+      "n_checked": 0
+    },
+    "8": {
+      "n_files": 0,
+      "n_checked": 0
+    }
+  },
+  "global_xyz_min": null,
+  "global_xyz_max": null,
+  "npz_key_frequency": {}
+}
