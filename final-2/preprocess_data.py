@@ -192,6 +192,13 @@ def _case_meta(case: str) -> Dict[str, object]:
     fs = meta.get("freestream", [0.0, 0.0, 0.0])
     dt = meta.get("dt", 1.0)
 
+    if aoa is None:
+        aoa = 0.0
+    if dt is None:
+        dt = 1.0
+    if fs is None:
+        fs = [0.0, 0.0, 0.0]
+
     fs_arr = np.asarray(fs, dtype=np.float64).reshape(-1)
     if fs_arr.shape[0] != 3:
         fs_arr = np.asarray([0.0, 0.0, 0.0], dtype=np.float64)
