@@ -26,13 +26,6 @@ try:
 except Exception:
     SCIPY_AVAILABLE = False
 
-try:
-    import pyvista as pv
-
-    PYVISTA_AVAILABLE = True
-except Exception:
-    PYVISTA_AVAILABLE = False
-
 
 # ==============================================================================
 # USER SETTINGS
@@ -64,7 +57,6 @@ FIELD_INPUT_CHANNELS = [
 
 # Task-1 evolution setup
 RANDOM_SEED = 42
-TASK1_TARGET_MODE = "ugradu"  # "delta" | "ugradu" | "both"
 
 # IMPORTANT: fill these with real metadata.
 # This removes fake placeholders and prevents silent leakage/assumptions.
@@ -96,31 +88,6 @@ TARGET_DELTA_NAMES = [
     "dGamma_z",
     "dsigma",
 ]
-TARGET_UGRADU_NAMES = [
-    "velocity_x",
-    "velocity_y",
-    "velocity_z",
-    "gradUx_x",
-    "gradUx_y",
-    "gradUx_z",
-    "gradUy_x",
-    "gradUy_y",
-    "gradUy_z",
-    "gradUz_x",
-    "gradUz_y",
-    "gradUz_z",
-]
-
-# Geometry-aware particle channels (from per-frame VTK).
-USE_GEOMETRY_CHANNELS = True
-GEOMETRY_NEAR_THRESHOLD = 0.02
-GEOMETRY_CHANNEL_NAMES = [
-    "geom_dist",
-    "geom_nx",
-    "geom_ny",
-    "geom_nz",
-    "geom_body_near",
-]
 
 PARTICLE_INPUT_FEATURES = [
     "x",
@@ -131,8 +98,6 @@ PARTICLE_INPUT_FEATURES = [
     "Gamma_z",
     "sigma",
 ]
-if USE_GEOMETRY_CHANNELS:
-    PARTICLE_INPUT_FEATURES = PARTICLE_INPUT_FEATURES + GEOMETRY_CHANNEL_NAMES
 
 
 # ==============================================================================
@@ -242,89 +207,6 @@ def _case_meta(case: str) -> Dict[str, object]:
         "aoa_deg": float(aoa),
         "freestream": fs_arr,
         "dt": float(dt),
-    }
-
-
-_VTK_GEOM_CACHE: Dict[str, Tuple[np.ndarray, np.ndarray, object]] = {}
-
-
-def _load_vtk_geom(vtk_path: str):
-    """Load/cached VTK points and normals.
-
-    Returns (points, normals, tree_or_none). Normals can be zeros if unavailable.
-    """
-    if not vtk_path:
-        return None, None, None
-    if vtk_path in _VTK_GEOM_CACHE:
-        return _VTK_GEOM_CACHE[vtk_path]
-
-    vp = Path(vtk_path)
-    if not vp.exists() or not PYVISTA_AVAILABLE:
-        _VTK_GEOM_CACHE[vtk_path] = (None, None, None)
-        return _VTK_GEOM_CACHE[vtk_path]
-
-    try:
-        mesh = pv.read(str(vp))
-        pts = np.asarray(mesh.points, dtype=np.float64)
-        nrm = None
-
-        for k in ["Normals", "normal", "normals"]:
-            if hasattr(mesh, "point_data") and k in mesh.point_data:
-                cand = np.asarray(mesh.point_data[k], dtype=np.float64)
-                if cand.ndim == 2 and cand.shape[1] == 3 and cand.shape[0] == pts.shape[0]:
-                    nrm = cand
-                    break
-
-        if nrm is None:
-            nrm = np.zeros_like(pts)
-
-        tree = cKDTree(pts) if (SCIPY_AVAILABLE and pts is not None and pts.size > 0) else None
-        _VTK_GEOM_CACHE[vtk_path] = (pts, nrm, tree)
-    except Exception:
-        _VTK_GEOM_CACHE[vtk_path] = (None, None, None)
-
-    return _VTK_GEOM_CACHE[vtk_path]
-
-
-def _particle_geometry_features(xyz: np.ndarray, vtk_path: str, n: int) -> Dict[str, np.ndarray]:
-    """Compute per-particle geometry channels by nearest surface query."""
-    zeros = np.zeros(n, dtype=np.float64)
-    if not USE_GEOMETRY_CHANNELS:
-        return {
-            "geom_dist": zeros,
-            "geom_nx": zeros,
-            "geom_ny": zeros,
-            "geom_nz": zeros,
-            "geom_body_near": zeros,
-        }
-
-    pts, nrm, tree = _load_vtk_geom(vtk_path)
-    if pts is None or nrm is None or len(pts) == 0:
-        return {
-            "geom_dist": zeros,
-            "geom_nx": zeros,
-            "geom_ny": zeros,
-            "geom_nz": zeros,
-            "geom_body_near": zeros,
-        }
-
-    q = xyz[:n]
-    if tree is not None:
-        dist, idx = tree.query(q, k=1)
-    else:
-        diff = q[:, None, :] - pts[None, :, :]
-        d2 = np.sum(diff * diff, axis=2)
-        idx = np.argmin(d2, axis=1)
-        dist = np.sqrt(np.min(d2, axis=1))
-
-    nn = nrm[idx]
-    body_near = (dist <= GEOMETRY_NEAR_THRESHOLD).astype(np.float64)
-    return {
-        "geom_dist": np.asarray(dist, dtype=np.float64),
-        "geom_nx": np.asarray(nn[:, 0], dtype=np.float64),
-        "geom_ny": np.asarray(nn[:, 1], dtype=np.float64),
-        "geom_nz": np.asarray(nn[:, 2], dtype=np.float64),
-        "geom_body_near": body_near,
     }
 
 
@@ -580,7 +462,6 @@ def _feature_matrix_from_state(
     phase: float,
     aoa_deg: float,
     freestream: np.ndarray,
-    geom_feat: Dict[str, np.ndarray] = None,
 ) -> np.ndarray:
     feat = {
         "x": state["x"][:n],
@@ -602,18 +483,6 @@ def _feature_matrix_from_state(
         feat["freestream_y"] = np.full(n, float(freestream[1]), dtype=np.float64)
     if "freestream_z" in PARTICLE_INPUT_FEATURES:
         feat["freestream_z"] = np.full(n, float(freestream[2]), dtype=np.float64)
-    if geom_feat is not None:
-        for gk in GEOMETRY_CHANNEL_NAMES:
-            if gk in PARTICLE_INPUT_FEATURES:
-                gv = geom_feat.get(gk, None)
-                if gv is None:
-                    feat[gk] = np.zeros(n, dtype=np.float64)
-                else:
-                    feat[gk] = np.asarray(gv[:n], dtype=np.float64)
-    else:
-        for gk in GEOMETRY_CHANNEL_NAMES:
-            if gk in PARTICLE_INPUT_FEATURES:
-                feat[gk] = np.zeros(n, dtype=np.float64)
     return np.stack([feat[k] for k in PARTICLE_INPUT_FEATURES], axis=1).astype(np.float32)
 
 
@@ -665,7 +534,6 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
                 data = {k: d[k] for k in d.files}
             state = _state_from_frame(data)
             fr = str(np.asarray(data["frame_id"]).reshape(-1)[0])
-            vtk_path = str(np.asarray(data.get("source_vtk_path", "")).reshape(-1)[0])
             phase = 0.0 if T <= 1 else float(i) / float(T - 1)
             fr_list.append(
                 {
@@ -673,7 +541,6 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
                     "state": state,
                     "phase": phase,
                     "path": str(p),
-                    "vtk_path": vtk_path,
                 }
             )
         case_frames[case] = fr_list
@@ -725,16 +592,12 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
             if n <= 0:
                 continue
 
-            curr_xyz = np.stack([s0["x"][:n], s0["y"][:n], s0["z"][:n]], axis=1)
-            geom_feat = _particle_geometry_features(curr_xyz, str(curr.get("vtk_path", "")), n)
-
             x_feat = _feature_matrix_from_state(
                 state=s0,
                 n=n,
                 phase=float(curr["phase"]),
                 aoa_deg=float(meta["aoa_deg"]),
                 freestream=np.asarray(meta["freestream"], dtype=np.float64),
-                geom_feat=geom_feat,
             )
 
             st0 = _state_matrix(s0, n)
@@ -822,8 +685,6 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         val_cases=np.asarray(VAL_CASES, dtype=object),
         test_cases=np.asarray(TEST_CASES, dtype=object),
         case_metadata=np.asarray(CASE_METADATA, dtype=object),
-        use_geometry_channels=np.asarray(USE_GEOMETRY_CHANNELS),
-        geometry_channel_names=np.asarray(GEOMETRY_CHANNEL_NAMES, dtype=object),
         # normalization
         in_mean=in_mean.astype(np.float32),
         in_std=in_std.astype(np.float32),
@@ -841,160 +702,11 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     print("  n_pairs                   :", len(pair_ranges))
     print("  n_rollout_cases           :", len(rollout_cases))
     print("  feature_names             :", PARTICLE_INPUT_FEATURES)
-    print("  use_geometry_channels     :", USE_GEOMETRY_CHANNELS)
     print("  target_names              :", TARGET_DELTA_NAMES)
     print("  split(train/val/test) pairs:", len(pair_split_train), len(pair_split_val), len(pair_split_test))
     print("  split(train/val/test) rows :", len(train_rows), len(val_rows), len(test_rows))
     print("  train/val/test cases      :", TRAIN_CASES, VAL_CASES, TEST_CASES)
 
-    return out_path
-
-
-def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
-    """Build instantaneous Task-1 dataset: x_t -> [u_t, gradU_t].
-
-    This is the surrogate mode where FLOWUnsteady still performs particle
-    integration, while the ML model replaces only the expensive U/gradU query.
-    """
-    by_case: Dict[str, List[Path]] = {}
-    for p in merged:
-        by_case.setdefault(p.parent.name, []).append(p)
-    for c in by_case:
-        by_case[c] = sorted(by_case[c], key=lambda x: frame_id(x))
-
-    all_cases = sorted(by_case.keys())
-    _validate_case_split(all_cases)
-
-    rows_x: List[np.ndarray] = []
-    rows_y: List[np.ndarray] = []
-    frame_ranges: List[Tuple] = []
-    frame_contexts: List[Dict[str, object]] = []
-
-    start = 0
-    for case in all_cases:
-        meta = _case_meta(case)
-        fr_list = by_case[case]
-        T = len(fr_list)
-
-        for i, p in enumerate(fr_list):
-            with np.load(p, allow_pickle=True) as d:
-                data = {k: d[k] for k in d.files}
-
-            state = _state_from_frame(data)
-            xyz = as_xyz(data["particle_xyz"])
-            vel = as_xyz(data["velocity"])
-            gx = as_xyz(data["velocity_gradient_x"])
-            gy = as_xyz(data["velocity_gradient_y"])
-            gz = as_xyz(data["velocity_gradient_z"])
-            grad = np.concatenate([gx, gy, gz], axis=1)
-
-            n = min(
-                xyz.shape[0],
-                vel.shape[0],
-                gx.shape[0],
-                gy.shape[0],
-                gz.shape[0],
-            )
-            if n <= 0:
-                continue
-
-            phase = 0.0 if T <= 1 else float(i) / float(T - 1)
-            vtk_path = str(np.asarray(data.get("source_vtk_path", "")).reshape(-1)[0])
-            geom_feat = _particle_geometry_features(xyz, vtk_path, n)
-            x_feat = _feature_matrix_from_state(
-                state=state,
-                n=n,
-                phase=phase,
-                aoa_deg=float(meta["aoa_deg"]),
-                freestream=np.asarray(meta["freestream"], dtype=np.float64),
-                geom_feat=geom_feat,
-            )
-            y = np.concatenate([vel[:n], grad[:n]], axis=1).astype(np.float32)
-
-            end = start + n
-            fr = str(np.asarray(data["frame_id"]).reshape(-1)[0])
-            frame_ranges.append((case, fr, start, end, n))
-            frame_contexts.append(
-                {
-                    "case": case,
-                    "frame": fr,
-                    "start": start,
-                    "end": end,
-                    "n_particles": n,
-                    "phase": phase,
-                    "aoa_deg": float(meta["aoa_deg"]),
-                    "freestream": [float(v) for v in np.asarray(meta["freestream"]).reshape(-1)],
-                    "dt": float(meta["dt"]),
-                    "vtk_path": vtk_path,
-                }
-            )
-
-            rows_x.append(x_feat.astype(np.float32))
-            rows_y.append(y)
-            start = end
-
-    if not rows_x:
-        raise RuntimeError("No Task-1 u/gradU samples were built")
-
-    X = np.concatenate(rows_x, axis=0).astype(np.float32)
-    Y = np.concatenate(rows_y, axis=0).astype(np.float32)
-
-    frame_ids_train = np.array([i for i, r in enumerate(frame_ranges) if _case_split_label(r[0]) == "train"], dtype=np.int64)
-    frame_ids_val = np.array([i for i, r in enumerate(frame_ranges) if _case_split_label(r[0]) == "val"], dtype=np.int64)
-    frame_ids_test = np.array([i for i, r in enumerate(frame_ranges) if _case_split_label(r[0]) == "test"], dtype=np.int64)
-
-    def rows_from_frame_ids(fid: np.ndarray) -> np.ndarray:
-        chunks = []
-        for i in fid:
-            _, _, s, e, _ = frame_ranges[int(i)]
-            chunks.append(np.arange(int(s), int(e), dtype=np.int64))
-        return np.concatenate(chunks) if chunks else np.zeros((0,), dtype=np.int64)
-
-    train_rows = rows_from_frame_ids(frame_ids_train)
-    val_rows = rows_from_frame_ids(frame_ids_val)
-    test_rows = rows_from_frame_ids(frame_ids_test)
-
-    in_mean, in_std, Xn = _normalize_channels_rows(X, train_rows)
-    out_mean, out_std, Yn = _normalize_channels_rows(Y, train_rows)
-
-    out_path = OUT_ROOT / "particle_ugradu_dataset.npz"
-    np.savez_compressed(
-        out_path,
-        inputs_t=X,
-        targets_ugradu=Y,
-        inputs_t_norm=Xn,
-        targets_ugradu_norm=Yn,
-        feature_names=np.asarray(PARTICLE_INPUT_FEATURES, dtype=object),
-        target_names=np.asarray(TARGET_UGRADU_NAMES, dtype=object),
-        frame_ranges=np.asarray(frame_ranges, dtype=object),
-        frame_contexts=np.asarray(frame_contexts, dtype=object),
-        train_frame_ids=frame_ids_train,
-        val_frame_ids=frame_ids_val,
-        test_frame_ids=frame_ids_test,
-        train_rows=train_rows,
-        val_rows=val_rows,
-        test_rows=test_rows,
-        train_cases=np.asarray(TRAIN_CASES, dtype=object),
-        val_cases=np.asarray(VAL_CASES, dtype=object),
-        test_cases=np.asarray(TEST_CASES, dtype=object),
-        case_metadata=np.asarray(CASE_METADATA, dtype=object),
-        use_geometry_channels=np.asarray(USE_GEOMETRY_CHANNELS),
-        geometry_channel_names=np.asarray(GEOMETRY_CHANNEL_NAMES, dtype=object),
-        in_mean=in_mean.astype(np.float32),
-        in_std=in_std.astype(np.float32),
-        out_mean=out_mean.astype(np.float32),
-        out_std=out_std.astype(np.float32),
-    )
-
-    print("\n[task1-ugradu] dataset built")
-    print("  inputs_t shape            :", X.shape)
-    print("  targets_ugradu shape      :", Y.shape)
-    print("  n_frames                  :", len(frame_ranges))
-    print("  feature_names             :", PARTICLE_INPUT_FEATURES)
-    print("  use_geometry_channels     :", USE_GEOMETRY_CHANNELS)
-    print("  target_names              :", TARGET_UGRADU_NAMES)
-    print("  split(train/val/test) rows:", len(train_rows), len(val_rows), len(test_rows))
-    print("  split(train/val/test) cases:", TRAIN_CASES, VAL_CASES, TEST_CASES)
     return out_path
 
 
@@ -1012,30 +724,15 @@ def main() -> None:
     if RUN_TASK2_FIELD:
         field_path = build_field_dataset(merged)
 
-    particle_evolution_path = None
-    particle_ugradu_path = None
-    mode = str(TASK1_TARGET_MODE).lower()
-    if mode == "delta":
-        particle_evolution_path = build_particle_evolution_dataset(merged)
-    elif mode == "ugradu":
-        particle_ugradu_path = build_particle_ugradu_dataset(merged)
-    elif mode == "both":
-        particle_evolution_path = build_particle_evolution_dataset(merged)
-        particle_ugradu_path = build_particle_ugradu_dataset(merged)
-    else:
-        raise ValueError("TASK1_TARGET_MODE must be one of: delta, ugradu, both")
+    particle_path = build_particle_evolution_dataset(merged)
 
     summary = {
         "raw_root": str(RAW_ROOT),
         "datasets": DATASET_IDS,
         "n_merged_frames": len(merged),
-        "task1_target_mode": mode,
-        "task1_particle_evolution_dataset": None if particle_evolution_path is None else str(particle_evolution_path),
-        "task1_particle_ugradu_dataset": None if particle_ugradu_path is None else str(particle_ugradu_path),
+        "task1_particle_evolution_dataset": str(particle_path),
         "task2_field_dataset": None if field_path is None else str(field_path),
         "run_task2_field": RUN_TASK2_FIELD,
-        "use_geometry_channels": USE_GEOMETRY_CHANNELS,
-        "geometry_channel_names": GEOMETRY_CHANNEL_NAMES,
         "train_cases": TRAIN_CASES,
         "val_cases": VAL_CASES,
         "test_cases": TEST_CASES,
