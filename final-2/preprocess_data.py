@@ -246,6 +246,114 @@ def _case_meta(case: str) -> Dict[str, object]:
 
 
 _VTK_GEOM_CACHE: Dict[str, Tuple[np.ndarray, np.ndarray, object]] = {}
+_GEOM_BACKEND_NOTICE_PRINTED = False
+
+
+def _normalize_rows(v: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    """Normalize row-vectors safely."""
+    n = np.linalg.norm(v, axis=1, keepdims=True)
+    n = np.maximum(n, eps)
+    return v / n
+
+
+def _point_normals_from_cells(points: np.ndarray, cells: List[np.ndarray]) -> np.ndarray:
+    """Estimate point normals by averaging adjacent cell normals."""
+    normals = np.zeros_like(points, dtype=np.float64)
+    for c in cells:
+        if c.size < 3:
+            continue
+        p0 = points[int(c[0])]
+        p1 = points[int(c[1])]
+        p2 = points[int(c[2])]
+        n = np.cross(p1 - p0, p2 - p0)
+        mag = np.linalg.norm(n)
+        if mag <= 1e-12:
+            continue
+        n = n / mag
+        normals[c.astype(np.int64)] += n
+
+    nz = np.linalg.norm(normals, axis=1) > 1e-12
+    if np.any(nz):
+        normals[nz] = _normalize_rows(normals[nz])
+    return normals
+
+
+def _load_legacy_vtk_ascii(vp: Path) -> Tuple[np.ndarray, np.ndarray]:
+    """Read VTK legacy ASCII points/cells and estimate point normals.
+
+    This is a dependency-light fallback for environments where `pyvista`
+    is unavailable. It is sufficient for common FLOWUnsteady wing VTK files.
+    """
+    txt = vp.read_text(errors="ignore").splitlines()
+
+    npts = None
+    p0 = None
+    for i, ln in enumerate(txt):
+        s = ln.strip()
+        if s.upper().startswith("POINTS "):
+            parts = s.split()
+            if len(parts) < 2:
+                raise ValueError(f"Invalid POINTS line in {vp}")
+            npts = int(parts[1])
+            p0 = i + 1
+            break
+    if npts is None or p0 is None:
+        raise ValueError(f"Could not find POINTS section in {vp}")
+
+    vals: List[float] = []
+    i = p0
+    while i < len(txt) and len(vals) < 3 * npts:
+        s = txt[i].strip()
+        if s == "" or s.startswith("#"):
+            i += 1
+            continue
+        head = s.split()[0].upper()
+        if head in {
+            "CELLS",
+            "CELL_TYPES",
+            "POINT_DATA",
+            "CELL_DATA",
+            "SCALARS",
+            "VECTORS",
+            "LOOKUP_TABLE",
+            "FIELD",
+        }:
+            break
+        vals.extend(float(x) for x in s.split())
+        i += 1
+    if len(vals) < 3 * npts:
+        raise ValueError(f"Incomplete POINTS data in {vp}")
+    pts = np.asarray(vals[: 3 * npts], dtype=np.float64).reshape(npts, 3)
+
+    cells: List[np.ndarray] = []
+    for j, ln in enumerate(txt):
+        s = ln.strip()
+        if s.upper().startswith("CELLS "):
+            parts = s.split()
+            if len(parts) < 2:
+                break
+            ncells = int(parts[1])
+            k = j + 1
+            for _ in range(ncells):
+                if k >= len(txt):
+                    break
+                row = txt[k].strip().split()
+                k += 1
+                if not row:
+                    continue
+                m = int(row[0])
+                if m <= 0:
+                    continue
+                idx = np.asarray([int(x) for x in row[1 : 1 + m]], dtype=np.int64)
+                if idx.size >= 3:
+                    cells.append(idx)
+            break
+
+    if len(cells) == 0:
+        normals = np.zeros_like(pts)
+    else:
+        normals = _point_normals_from_cells(pts, cells)
+    return pts, normals
 
 
 def _load_vtk_geom(vtk_path: str):
@@ -259,28 +367,50 @@ def _load_vtk_geom(vtk_path: str):
         return _VTK_GEOM_CACHE[vtk_path]
 
     vp = Path(vtk_path)
-    if not vp.exists() or not PYVISTA_AVAILABLE:
+    if not vp.exists():
         _VTK_GEOM_CACHE[vtk_path] = (None, None, None)
         return _VTK_GEOM_CACHE[vtk_path]
 
     try:
-        mesh = pv.read(str(vp))
-        pts = np.asarray(mesh.points, dtype=np.float64)
-        nrm = None
+        if PYVISTA_AVAILABLE:
+            mesh = pv.read(str(vp))
+            pts = np.asarray(mesh.points, dtype=np.float64)
+            nrm = None
 
-        for k in ["Normals", "normal", "normals"]:
-            if hasattr(mesh, "point_data") and k in mesh.point_data:
-                cand = np.asarray(mesh.point_data[k], dtype=np.float64)
-                if cand.ndim == 2 and cand.shape[1] == 3 and cand.shape[0] == pts.shape[0]:
-                    nrm = cand
-                    break
+            for k in ["Normals", "normal", "normals"]:
+                if hasattr(mesh, "point_data") and k in mesh.point_data:
+                    cand = np.asarray(mesh.point_data[k], dtype=np.float64)
+                    if cand.ndim == 2 and cand.shape[1] == 3 and cand.shape[0] == pts.shape[0]:
+                        nrm = cand
+                        break
 
-        if nrm is None:
-            nrm = np.zeros_like(pts)
+            # If normals are missing in file, estimate from mesh cells.
+            if nrm is None or np.linalg.norm(nrm, axis=1).max(initial=0.0) <= 1e-12:
+                if hasattr(mesh, "faces") and mesh.faces is not None and mesh.faces.size > 0:
+                    faces = mesh.faces
+                    cells: List[np.ndarray] = []
+                    i = 0
+                    while i < len(faces):
+                        m = int(faces[i])
+                        if m >= 3:
+                            cells.append(np.asarray(faces[i + 1 : i + 1 + m], dtype=np.int64))
+                        i += 1 + m
+                    nrm = _point_normals_from_cells(pts, cells) if len(cells) > 0 else np.zeros_like(pts)
+                else:
+                    # Last-resort parser for legacy ASCII VTK.
+                    pts2, nrm2 = _load_legacy_vtk_ascii(vp)
+                    pts, nrm = pts2, nrm2
+        else:
+            pts, nrm = _load_legacy_vtk_ascii(vp)
 
         tree = cKDTree(pts) if (SCIPY_AVAILABLE and pts is not None and pts.size > 0) else None
         _VTK_GEOM_CACHE[vtk_path] = (pts, nrm, tree)
-    except Exception:
+    except Exception as e:
+        # Keep running, but expose a clear warning once so the user can fix setup.
+        global _GEOM_BACKEND_NOTICE_PRINTED
+        if not _GEOM_BACKEND_NOTICE_PRINTED:
+            print(f"[geom] warning: failed to load VTK geometry ({e}). Geometry channels will be zeros for affected frames.")
+            _GEOM_BACKEND_NOTICE_PRINTED = True
         _VTK_GEOM_CACHE[vtk_path] = (None, None, None)
 
     return _VTK_GEOM_CACHE[vtk_path]
@@ -326,6 +456,33 @@ def _particle_geometry_features(xyz: np.ndarray, vtk_path: str, n: int) -> Dict[
         "geom_nz": np.asarray(nn[:, 2], dtype=np.float64),
         "geom_body_near": body_near,
     }
+
+
+def _print_geometry_channel_stats(X: np.ndarray, feature_names: List[str], tag: str) -> None:
+    """Print compact geometry-channel statistics for sanity checks."""
+    if not USE_GEOMETRY_CHANNELS:
+        print(f"[{tag}] geometry channels disabled.")
+        return
+    print(f"[{tag}] geometry channel stats:")
+    all_zero = True
+    for k in GEOMETRY_CHANNEL_NAMES:
+        if k not in feature_names:
+            print(f"  - {k}: missing from feature_names")
+            continue
+        j = feature_names.index(k)
+        v = X[:, j]
+        vmin = float(np.min(v))
+        vmax = float(np.max(v))
+        vmean = float(np.mean(v))
+        nnz = int(np.count_nonzero(v))
+        print(f"  - {k:14s} min={vmin:.6g} max={vmax:.6g} mean={vmean:.6g} nnz={nnz}")
+        if nnz > 0:
+            all_zero = False
+    if all_zero:
+        print(
+            f"[{tag}] warning: all geometry channels are zero. "
+            "Check VTK paths, VTK parser backend, and GEOMETRY_NEAR_THRESHOLD."
+        )
 
 
 # ==============================================================================
@@ -846,6 +1003,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     print("  split(train/val/test) pairs:", len(pair_split_train), len(pair_split_val), len(pair_split_test))
     print("  split(train/val/test) rows :", len(train_rows), len(val_rows), len(test_rows))
     print("  train/val/test cases      :", TRAIN_CASES, VAL_CASES, TEST_CASES)
+    _print_geometry_channel_stats(X, PARTICLE_INPUT_FEATURES, "task1-delta")
 
     return out_path
 
@@ -995,6 +1153,7 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
     print("  target_names              :", TARGET_UGRADU_NAMES)
     print("  split(train/val/test) rows:", len(train_rows), len(val_rows), len(test_rows))
     print("  split(train/val/test) cases:", TRAIN_CASES, VAL_CASES, TEST_CASES)
+    _print_geometry_channel_stats(X, PARTICLE_INPUT_FEATURES, "task1-ugradu")
     return out_path
 
 
@@ -1036,6 +1195,9 @@ def main() -> None:
         "run_task2_field": RUN_TASK2_FIELD,
         "use_geometry_channels": USE_GEOMETRY_CHANNELS,
         "geometry_channel_names": GEOMETRY_CHANNEL_NAMES,
+        "geometry_near_threshold": GEOMETRY_NEAR_THRESHOLD,
+        "pyvista_available": PYVISTA_AVAILABLE,
+        "scipy_available": SCIPY_AVAILABLE,
         "train_cases": TRAIN_CASES,
         "val_cases": VAL_CASES,
         "test_cases": TEST_CASES,
