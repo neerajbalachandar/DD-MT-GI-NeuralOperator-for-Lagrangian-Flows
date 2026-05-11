@@ -1,7 +1,6 @@
-"""Simplified manual preprocessing (single file).
-
-Task-1 focus in this version:
-- Build particle EVOLUTION dataset using consecutive frame pairs.
+"""
+Task-1:
+- Build particle evolution dataset using consecutive frame pairs.
 - Learn x_t -> delta_state_t where delta_state_t = state_{t+1} - state_t.
 - Save rollout-ready per-case sequences for autoregressive validation.
 
@@ -122,6 +121,17 @@ GEOMETRY_CHANNEL_NAMES = [
     "geom_body_near",
 ]
 
+# Explicit per-frame conditioning channels appended to each particle feature.
+# c_n = [alpha_n, U_inf,n, phi_n, geometry embedding]
+USE_EXPLICIT_CONDITIONING = True
+CONDITIONING_CHANNEL_NAMES = [
+    "angle_of_attack",
+    "freestream_x",
+    "freestream_y",
+    "freestream_z",
+    "phase",
+]
+
 PARTICLE_INPUT_FEATURES = [
     "x",
     "y",
@@ -133,6 +143,8 @@ PARTICLE_INPUT_FEATURES = [
 ]
 if USE_GEOMETRY_CHANNELS:
     PARTICLE_INPUT_FEATURES = PARTICLE_INPUT_FEATURES + GEOMETRY_CHANNEL_NAMES
+if USE_EXPLICIT_CONDITIONING:
+    PARTICLE_INPUT_FEATURES = PARTICLE_INPUT_FEATURES + CONDITIONING_CHANNEL_NAMES
 
 
 # ==============================================================================
@@ -1023,8 +1035,9 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
     all_cases = sorted(by_case.keys())
     _validate_case_split(all_cases)
 
-    rows_x: List[np.ndarray] = []
-    rows_y: List[np.ndarray] = []
+    # Keep each frame as one coherent graph sample.
+    frame_inputs_raw: List[np.ndarray] = []
+    frame_targets_raw: List[np.ndarray] = []
     frame_ranges: List[Tuple] = []
     frame_contexts: List[Dict[str, object]] = []
 
@@ -1087,15 +1100,15 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
                 }
             )
 
-            rows_x.append(x_feat.astype(np.float32))
-            rows_y.append(y)
+            x_this = x_feat.astype(np.float32)
+            y_this = y.astype(np.float32)
+            frame_inputs_raw.append(x_this)
+            frame_targets_raw.append(y_this)
+
             start = end
 
-    if not rows_x:
+    if not frame_inputs_raw:
         raise RuntimeError("No Task-1 u/gradU samples were built")
-
-    X = np.concatenate(rows_x, axis=0).astype(np.float32)
-    Y = np.concatenate(rows_y, axis=0).astype(np.float32)
 
     frame_ids_train = np.array([i for i, r in enumerate(frame_ranges) if _case_split_label(r[0]) == "train"], dtype=np.int64)
     frame_ids_val = np.array([i for i, r in enumerate(frame_ranges) if _case_split_label(r[0]) == "val"], dtype=np.int64)
@@ -1112,12 +1125,32 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
     val_rows = rows_from_frame_ids(frame_ids_val)
     test_rows = rows_from_frame_ids(frame_ids_test)
 
-    in_mean, in_std, Xn = _normalize_channels_rows(X, train_rows)
-    out_mean, out_std, Yn = _normalize_channels_rows(Y, train_rows)
+    # Normalize using ONLY training-frame particles.
+    X_train = np.concatenate([frame_inputs_raw[int(i)] for i in frame_ids_train], axis=0).astype(np.float32)
+    Y_train = np.concatenate([frame_targets_raw[int(i)] for i in frame_ids_train], axis=0).astype(np.float32)
+    in_mean = np.mean(X_train, axis=0, keepdims=True)
+    in_std = np.maximum(np.std(X_train, axis=0, keepdims=True), 1e-8)
+    out_mean = np.mean(Y_train, axis=0, keepdims=True)
+    out_std = np.maximum(np.std(Y_train, axis=0, keepdims=True), 1e-8)
+
+    frame_inputs_norm = [((x - in_mean) / in_std).astype(np.float32) for x in frame_inputs_raw]
+    frame_targets_norm = [((y - out_mean) / out_std).astype(np.float32) for y in frame_targets_raw]
+
+    # Flat arrays kept only as optional legacy compatibility keys.
+    X = np.concatenate(frame_inputs_raw, axis=0).astype(np.float32)
+    Y = np.concatenate(frame_targets_raw, axis=0).astype(np.float32)
+    Xn = np.concatenate(frame_inputs_norm, axis=0).astype(np.float32)
+    Yn = np.concatenate(frame_targets_norm, axis=0).astype(np.float32)
 
     out_path = OUT_ROOT / "particle_ugradu_dataset.npz"
     np.savez_compressed(
         out_path,
+        # Frame-graph dataset (preferred)
+        inputs_by_frame=np.asarray(frame_inputs_raw, dtype=object),
+        targets_by_frame=np.asarray(frame_targets_raw, dtype=object),
+        inputs_by_frame_norm=np.asarray(frame_inputs_norm, dtype=object),
+        targets_by_frame_norm=np.asarray(frame_targets_norm, dtype=object),
+        # Flat legacy arrays (optional compatibility with older scripts)
         inputs_t=X,
         targets_ugradu=Y,
         inputs_t_norm=Xn,
@@ -1136,6 +1169,8 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
         val_cases=np.asarray(VAL_CASES, dtype=object),
         test_cases=np.asarray(TEST_CASES, dtype=object),
         case_metadata=np.asarray(CASE_METADATA, dtype=object),
+        use_explicit_conditioning=np.asarray(USE_EXPLICIT_CONDITIONING),
+        conditioning_channel_names=np.asarray(CONDITIONING_CHANNEL_NAMES, dtype=object),
         use_geometry_channels=np.asarray(USE_GEOMETRY_CHANNELS),
         geometry_channel_names=np.asarray(GEOMETRY_CHANNEL_NAMES, dtype=object),
         in_mean=in_mean.astype(np.float32),
@@ -1145,10 +1180,14 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
     )
 
     print("\n[task1-ugradu] dataset built")
-    print("  inputs_t shape            :", X.shape)
-    print("  targets_ugradu shape      :", Y.shape)
+    print("  n_graph_frames            :", len(frame_inputs_raw))
+    print("  first graph shapes        :", frame_inputs_raw[0].shape, frame_targets_raw[0].shape)
+    print("  inputs_t shape (legacy)   :", X.shape)
+    print("  targets_ugradu (legacy)   :", Y.shape)
     print("  n_frames                  :", len(frame_ranges))
     print("  feature_names             :", PARTICLE_INPUT_FEATURES)
+    print("  use_explicit_conditioning :", USE_EXPLICIT_CONDITIONING)
+    print("  conditioning_channels     :", CONDITIONING_CHANNEL_NAMES if USE_EXPLICIT_CONDITIONING else [])
     print("  use_geometry_channels     :", USE_GEOMETRY_CHANNELS)
     print("  target_names              :", TARGET_UGRADU_NAMES)
     print("  split(train/val/test) rows:", len(train_rows), len(val_rows), len(test_rows))
@@ -1193,6 +1232,8 @@ def main() -> None:
         "task1_particle_ugradu_dataset": None if particle_ugradu_path is None else str(particle_ugradu_path),
         "task2_field_dataset": None if field_path is None else str(field_path),
         "run_task2_field": RUN_TASK2_FIELD,
+        "use_explicit_conditioning": USE_EXPLICIT_CONDITIONING,
+        "conditioning_channel_names": CONDITIONING_CHANNEL_NAMES if USE_EXPLICIT_CONDITIONING else [],
         "use_geometry_channels": USE_GEOMETRY_CHANNELS,
         "geometry_channel_names": GEOMETRY_CHANNEL_NAMES,
         "geometry_near_threshold": GEOMETRY_NEAR_THRESHOLD,
