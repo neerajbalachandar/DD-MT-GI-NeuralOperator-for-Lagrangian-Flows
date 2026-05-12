@@ -37,7 +37,7 @@ except Exception:
 # USER SETTINGS
 # ==============================================================================
 RAW_ROOT = Path("/media/dysco/New Volume/Neeraj/neuralop/data/raw data")
-DATASET_IDS = ["1", "2", "7", "8", "9"]
+DATASET_IDS = ["1", "2", "7", "8", "9", "10", "11"]
 
 INPUT_H5_PATTERN = "input/wing-example_pfield.*.h5"
 OUTPUT_H5_PATTERN = "output/wing-example_fdom.*.h5"
@@ -80,8 +80,8 @@ CASE_METADATA = {
 #   TRAIN_CASES = ["1", "2", "7"]
 #   VAL_CASES   = ["8"]
 #   TEST_CASES  = ["9"]
-TRAIN_CASES = ["1", "2", "7"]
-VAL_CASES = ["8"]
+TRAIN_CASES = ["1", "2","10","11"]
+VAL_CASES = ["8","7"]
 TEST_CASES = ["9"]
 
 # Feature/state definitions for Task-1
@@ -537,6 +537,7 @@ def merge_frames() -> List[Path]:
             payload = {}
             payload.update(read_h5_selected(pin, INPUT_KEYS))
             payload.update(read_h5_selected(pout, OUTPUT_KEYS))
+
             payload["source_dataset"] = np.asarray(ds, dtype=object)
             payload["frame_id"] = np.asarray(fr, dtype=object)
             payload["source_vtk_path"] = np.asarray(str(vtk.get(fr, "")), dtype=object)
