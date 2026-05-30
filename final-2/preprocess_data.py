@@ -10,6 +10,7 @@ Task-2 (field/FNO) code path is kept optional and disabled by default.
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections import defaultdict
 from dataclasses import dataclass
@@ -37,7 +38,13 @@ except Exception:
 # ==============================================================================
 # USER SETTINGS
 # ==============================================================================
+# Preferred raw-data root (can be auto-overridden by resolver below).
 RAW_ROOT = Path("/media/dysco/New Volume/Neeraj/neuralop/data/raw data")
+RAW_ROOT_CANDIDATES = [
+    RAW_ROOT,
+    Path(__file__).resolve().parents[1] / "data" / "raw data",
+    Path(__file__).resolve().parents[1] / "data" / "raw_data",
+]
 DATASET_IDS = ["1", "2", "7", "8", "9", "10", "11"]
 
 INPUT_H5_PATTERN = "input/wing-example_pfield.*.h5"
@@ -194,6 +201,10 @@ USE_DUAL_SPLIT_PROTOCOL = True
 VAL_ID_FRACTION_FROM_TRAIN_CASES = 0.2
 VAL_ID_MIN_FRAMES_PER_TRAIN_CASE = 8
 
+# Conditioning channels that are allowed to be constant by design for a setup.
+# Example: freestream_y is exactly zero when inflow is in x-z plane.
+CONDITIONING_ALLOWED_CONSTANT_CHANNELS = {"freestream_y"}
+
 
 # ==============================================================================
 # Basic helpers
@@ -263,6 +274,11 @@ def _rows_from_pair_ids(pair_ranges: List[Tuple], pair_ids: np.ndarray) -> np.nd
 
 
 def _validate_case_split(all_cases: List[str]) -> None:
+    if len(all_cases) == 0:
+        raise ValueError(
+            "No cases discovered from merged frames. This usually means raw-data path/pattern mismatch. "
+            "Check RAW_ROOT and INPUT/OUTPUT patterns."
+        )
     all_set = set(all_cases)
     tr, va, te = set(TRAIN_CASES), set(VAL_CASES), set(TEST_CASES)
     if tr & va or tr & te or va & te:
@@ -279,16 +295,45 @@ ACTIVE_CASE_METADATA: Dict[str, Dict[str, Any]] = {}
 ACTIVE_CONDITIONING_CHANNEL_NAMES: List[str] = []
 
 
-def _load_case_metadata_overrides() -> Dict[str, Dict[str, Any]]:
+def _load_case_metadata_overrides() -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
     if not CASE_METADATA_PATH.exists():
-        return {}
+        return {}, {}
     payload = json.loads(CASE_METADATA_PATH.read_text())
     if not isinstance(payload, dict):
         raise ValueError(f"CASE_METADATA_PATH must contain a JSON object: {CASE_METADATA_PATH}")
+    defaults = {}
+    for key in ["_defaults", "defaults", "__defaults__"]:
+        if key in payload and isinstance(payload[key], dict):
+            defaults = dict(payload[key])
+            break
     out: Dict[str, Dict[str, Any]] = {}
     for k, v in payload.items():
+        if str(k) in {"_defaults", "defaults", "__defaults__"}:
+            continue
         out[str(k)] = dict(v) if isinstance(v, dict) else {}
-    return out
+    return out, defaults
+
+
+def _resolve_raw_root() -> Path:
+    env_raw = os.environ.get("FINAL2_RAW_ROOT", "").strip()
+    if env_raw:
+        p = Path(env_raw)
+        if p.exists() and p.is_dir():
+            return p
+        raise FileNotFoundError(
+            f"FINAL2_RAW_ROOT is set but invalid: {p}. "
+            "Fix the env var or unset it."
+        )
+
+    for cand in RAW_ROOT_CANDIDATES:
+        c = Path(cand)
+        if c.exists() and c.is_dir():
+            return c
+    tried = ", ".join([str(Path(c)) for c in RAW_ROOT_CANDIDATES])
+    raise FileNotFoundError(
+        "Could not locate raw data root. Tried: "
+        f"{tried}. Update RAW_ROOT or mount the external drive."
+    )
 
 
 def _resolve_case_metadata(meta: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:
@@ -408,7 +453,7 @@ def _resolve_case_metadata(meta: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any
 
 def _prepare_case_metadata(all_cases: List[str]) -> Dict[str, Dict[str, Any]]:
     merged: Dict[str, Dict[str, Any]] = {str(k): dict(v) for k, v in CASE_METADATA.items()}
-    overrides = _load_case_metadata_overrides()
+    overrides, defaults = _load_case_metadata_overrides()
     merged.update(overrides)
 
     # Ensure all required cases exist in mapping.
@@ -418,7 +463,8 @@ def _prepare_case_metadata(all_cases: List[str]) -> Dict[str, Dict[str, Any]]:
     active: Dict[str, Dict[str, Any]] = {}
     missing: Dict[str, str] = {}
     for case in all_cases:
-        meta = merged.get(case, {}) or {}
+        meta = dict(defaults)
+        meta.update(merged.get(case, {}) or {})
         resolved, why = _resolve_case_metadata(meta)
         if resolved is None:
             missing[str(case)] = why
@@ -851,6 +897,7 @@ def _assert_conditioning_variance(X: np.ndarray, feature_names: List[str], train
     if not USE_EXPLICIT_CONDITIONING:
         return
     dead = []
+    informative = []
     for ch in ACTIVE_CONDITIONING_CHANNEL_NAMES:
         if ch not in feature_names:
             dead.append(f"{ch}(missing)")
@@ -858,12 +905,26 @@ def _assert_conditioning_variance(X: np.ndarray, feature_names: List[str], train
         idx = feature_names.index(ch)
         v = float(np.var(X[train_rows, idx]))
         if v <= 1e-12:
+            # Some channels are expected to be constant in specific setups.
+            if ch in CONDITIONING_ALLOWED_CONSTANT_CHANNELS:
+                print(f"[cond] info: {ch} is constant by design; allowing it.")
+                continue
             dead.append(f"{ch}(var~0)")
-    if dead:
+        else:
+            informative.append(ch)
+
+    # Only fail if non-allowed channels are dead and no informative channel remains.
+    if dead and len(informative) == 0:
         raise RuntimeError(
-            "Conditioning channels are non-informative on train rows: "
+            "Conditioning channels are non-informative on train rows (after allowed constants): "
             + ", ".join(dead)
             + ". Provide valid metadata or disable conditioning."
+        )
+    if dead and len(informative) > 0:
+        print(
+            "[cond] warning: some conditioning channels are constant, "
+            f"but proceeding because informative channels exist: {informative}. "
+            f"Constant channels: {dead}"
         )
 
 
@@ -886,11 +947,20 @@ OUTPUT_KEYS = {"points": "nodes", "U": "U", "W": "W"}
 
 
 def merge_frames() -> List[Path]:
+    if not RAW_ROOT.exists():
+        raise FileNotFoundError(
+            f"RAW_ROOT does not exist: {RAW_ROOT}. "
+            "Mount/check external drive or update RAW_ROOT."
+        )
+
     ensure_dir(MERGED_ROOT)
     merged: List[Path] = []
+    missing_dataset_dirs: List[str] = []
 
     for ds in DATASET_IDS:
         root = RAW_ROOT / ds
+        if not root.exists():
+            missing_dataset_dirs.append(str(root))
         in_h5 = sorted(root.glob(INPUT_H5_PATTERN))
         out_h5 = sorted(root.glob(OUTPUT_H5_PATTERN))
         vtk = {frame_id(p): p for p in sorted(root.glob(VTK_PATTERN))}
@@ -920,6 +990,15 @@ def merge_frames() -> List[Path]:
 
     merged = sorted(merged)
     print("[merge] total merged:", len(merged))
+    if len(merged) == 0:
+        msg = (
+            "No paired frames were merged. "
+            f"RAW_ROOT={RAW_ROOT}, DATASET_IDS={DATASET_IDS}, "
+            f"INPUT_H5_PATTERN={INPUT_H5_PATTERN}, OUTPUT_H5_PATTERN={OUTPUT_H5_PATTERN}."
+        )
+        if missing_dataset_dirs:
+            msg += " Missing dataset directories include: " + ", ".join(missing_dataset_dirs[:8])
+        raise RuntimeError(msg)
     return merged
 
 
@@ -1641,12 +1720,15 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
 def main() -> None:
     global ACTIVE_CASE_METADATA
     global ACTIVE_CONDITIONING_CHANNEL_NAMES
+    global RAW_ROOT
 
+    RAW_ROOT = _resolve_raw_root()
     ensure_dir(OUT_ROOT)
     ensure_dir(MERGED_ROOT)
 
     ACTIVE_CASE_METADATA = _prepare_case_metadata([str(c) for c in DATASET_IDS])
     ACTIVE_CONDITIONING_CHANNEL_NAMES = list(CONDITIONING_CHANNEL_NAMES) if USE_EXPLICIT_CONDITIONING else []
+    print("[data] resolved RAW_ROOT:", RAW_ROOT)
     print("[meta] validated metadata cases:", sorted(ACTIVE_CASE_METADATA.keys()))
     print("[meta] active conditioning channels:", ACTIVE_CONDITIONING_CHANNEL_NAMES)
 

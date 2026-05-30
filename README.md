@@ -53,12 +53,20 @@ If the test input is 64³ but output truth is 16³, or vice‑versa, you’re ef
 
 8. I have a concern in terms of the normalization. Is the feature scaling performed for individual datasets or collectively among the entire dataset, as differences in the datasets completely (in terms of say geometry) might cause different range of values for certain parameters.
 
+9. The mean errors associated with task1 for train test validate for both u and gradu are very different magnitudes.
+
+10. The geometry encoding and conditioning channels (metadata) were not proper before - trying to fix it.
+
 # Question:
-1. Are we gonna run simulations and validate for only static cases as in a aerofoil kept at an AOA or even for rotor, flapping cases? 
-2. Why do we do this grid embedding and positional embedding?
+1. Are we gonna run simulations and validate for only static cases as in a aerofoil kept at an AOA or even for rotor, flapping cases? (Generalization to unseen geometries and kinematics)
+
+2. Why do we do this grid embedding and positional embedding? (Has to be scraped - no more projections)
 Sol: Your raw VPM state is particles at irregular positions. FNO training expects tensors on a fixed regular grid (C, Nx, Ny). So this step deposits particle quantities (like gamma_mag, sigma, vol) onto grid cells and also grids target velocity.Hence, it converts unstructured particle data into a format neural operators can learn from efficiently and consistently.
 
 A regular grid index alone does not explicitly tell the model physical coordinates. Adding coordinate channels (x, y) gives absolute location information, which helps with boundary/location-dependent behavior. In your current repo, this is shown in dataset_gen_2D.py mostly for inspection/demo; the main training file neuraloperator_train.py does not currently add those channels explicitly.
 
+
 3. Explain in paper clearly why neuraloperators is the thing here - infinite dimensional, operator learning function spaces, super-resolution, not data hungry (zero-shot), etc...
+
+4. Explain in paper clearly how neuraloperators learn and what are they learning?
 
