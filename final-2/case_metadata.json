@@ -1,0 +1,59 @@
+{
+  "_schema_note": "Use either explicit freestream+dt OR auto formulas. Auto freestream: freestream = magVinf*[cosd(aoa_deg),0,sind(aoa_deg)]. Auto dt option A: dt=(ttot_constant/magVinf)/nsteps. Auto dt option B: dt=ttot_seconds/nsteps.",
+  "1": {
+    "aoa_deg": 20.0,
+    "magVinf": 49.7,
+    "nsteps": null,
+    "ttot_constant": null,
+    "ttot_seconds": null,
+    "dt": null
+  },
+  "2": {
+    "aoa_deg": null,
+    "magVinf": null,
+    "nsteps": null,
+    "ttot_constant": null,
+    "ttot_seconds": null,
+    "dt": null
+  },
+  "7": {
+    "aoa_deg": null,
+    "magVinf": null,
+    "nsteps": null,
+    "ttot_constant": null,
+    "ttot_seconds": null,
+    "dt": null
+  },
+  "8": {
+    "aoa_deg": null,
+    "magVinf": null,
+    "nsteps": null,
+    "ttot_constant": null,
+    "ttot_seconds": null,
+    "dt": null
+  },
+  "9": {
+    "aoa_deg": null,
+    "magVinf": null,
+    "nsteps": null,
+    "ttot_constant": null,
+    "ttot_seconds": null,
+    "dt": null
+  },
+  "10": {
+    "aoa_deg": null,
+    "magVinf": null,
+    "nsteps": null,
+    "ttot_constant": null,
+    "ttot_seconds": null,
+    "dt": null
+  },
+  "11": {
+    "aoa_deg": null,
+    "magVinf": null,
+    "nsteps": null,
+    "ttot_constant": null,
+    "ttot_seconds": null,
+    "dt": null
+  }
+}

@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import json
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import h5py
 import numpy as np
@@ -60,19 +61,52 @@ FIELD_INPUT_CHANNELS = [
     "Y",
     "Z",
 ]
+# Task-2 alignment prep (kept off for now): richer particle-side schema.
+TASK2_PARTICLE_INPUT_SCHEMA = [
+    "x",
+    "y",
+    "z",
+    "Gamma_x",
+    "Gamma_y",
+    "Gamma_z",
+    "sigma",
+    "velocity_x",
+    "velocity_y",
+    "velocity_z",
+    "gradUx_x",
+    "gradUx_y",
+    "gradUx_z",
+    "gradUy_x",
+    "gradUy_y",
+    "gradUy_z",
+    "gradUz_x",
+    "gradUz_y",
+    "gradUz_z",
+]
 
 # Task-1 evolution setup
 RANDOM_SEED = 42
 TASK1_TARGET_MODE = "ugradu"  # "delta" | "ugradu" | "both"
 
-# IMPORTANT: fill these with real metadata.
-# This removes fake placeholders and prevents silent leakage/assumptions.
+# Optional metadata table path for strict conditioning channels.
+# Expected JSON schema:
+# {
+#   "1": {"aoa_deg": 4.0, "freestream": [40.0, 0.0, 0.0], "dt": 0.01},
+#   ...
+# }
+CASE_METADATA_PATH = Path(__file__).resolve().parent / "case_metadata.json"
+STRICT_METADATA_VALIDATION = True
+
+# IMPORTANT: fill these with real metadata or provide CASE_METADATA_PATH.
+# We intentionally default to None to fail fast when conditioning is enabled.
 CASE_METADATA = {
     "1": {"aoa_deg": None, "freestream": None, "dt": None},
     "2": {"aoa_deg": None, "freestream": None, "dt": None},
     "7": {"aoa_deg": None, "freestream": None, "dt": None},
     "8": {"aoa_deg": None, "freestream": None, "dt": None},
     "9": {"aoa_deg": None, "freestream": None, "dt": None},
+    "10": {"aoa_deg": None, "freestream": None, "dt": None},
+    "11": {"aoa_deg": None, "freestream": None, "dt": None},
 }
 
 # Split by CASE (or AoA groups) to avoid temporal leakage.
@@ -145,6 +179,20 @@ if USE_GEOMETRY_CHANNELS:
     PARTICLE_INPUT_FEATURES = PARTICLE_INPUT_FEATURES + GEOMETRY_CHANNEL_NAMES
 if USE_EXPLICIT_CONDITIONING:
     PARTICLE_INPUT_FEATURES = PARTICLE_INPUT_FEATURES + CONDITIONING_CHANNEL_NAMES
+
+# Frame quality control.
+MIN_PARTICLES_PER_FRAME = 64
+EXPORT_FILTERED_FRAME_MANIFEST = True
+
+# Geometry QA control.
+STRICT_GEOMETRY_QA = True
+GEOM_MIN_NONZERO_FRAC = 1e-4
+GEOM_MIN_NEAR_FRAC = 1e-5
+
+# Dual split protocol (ID + OOD).
+USE_DUAL_SPLIT_PROTOCOL = True
+VAL_ID_FRACTION_FROM_TRAIN_CASES = 0.2
+VAL_ID_MIN_FRAMES_PER_TRAIN_CASE = 8
 
 
 # ==============================================================================
@@ -227,33 +275,190 @@ def _validate_case_split(all_cases: List[str]) -> None:
         raise ValueError(f"Some cases are not assigned to any split: {sorted(uncovered)}")
 
 
-def _case_meta(case: str) -> Dict[str, object]:
-    """Return case metadata with safe fallbacks.
+ACTIVE_CASE_METADATA: Dict[str, Dict[str, Any]] = {}
+ACTIVE_CONDITIONING_CHANNEL_NAMES: List[str] = []
 
-    Task-1 can run without external metadata when metadata channels are not used
-    as input features.
+
+def _load_case_metadata_overrides() -> Dict[str, Dict[str, Any]]:
+    if not CASE_METADATA_PATH.exists():
+        return {}
+    payload = json.loads(CASE_METADATA_PATH.read_text())
+    if not isinstance(payload, dict):
+        raise ValueError(f"CASE_METADATA_PATH must contain a JSON object: {CASE_METADATA_PATH}")
+    out: Dict[str, Dict[str, Any]] = {}
+    for k, v in payload.items():
+        out[str(k)] = dict(v) if isinstance(v, dict) else {}
+    return out
+
+
+def _resolve_case_metadata(meta: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Resolve one case metadata entry into canonical form.
+
+    Supported input forms:
+    - Explicit:
+      {"aoa_deg": 20, "freestream": [u, v, w], "dt": 0.001}
+    - Derived freestream from AoA + speed:
+      {"aoa_deg": 20, "magVinf": 49.7, "dt": 0.001}
+    - Derived dt from total time:
+      {"aoa_deg": 20, "magVinf": 49.7, "nsteps": 200, "ttot_constant": 100.0}
+      where dt = (ttot_constant / magVinf) / nsteps
+    - Alternate total-time form:
+      {"aoa_deg": 20, "magVinf": 49.7, "nsteps": 200, "ttot_seconds": 0.5}
+      where dt = ttot_seconds / nsteps
     """
-    meta = CASE_METADATA.get(case, {}) or {}
+    # AOA is mandatory.
+    if "aoa_deg" not in meta or meta["aoa_deg"] is None:
+        return None, "missing aoa_deg"
+    try:
+        aoa_deg = float(meta["aoa_deg"])
+    except Exception:
+        return None, "aoa_deg not numeric"
+    if not np.isfinite(aoa_deg):
+        return None, "aoa_deg non-finite"
 
-    aoa = meta.get("aoa_deg", 0.0)
-    fs = meta.get("freestream", [0.0, 0.0, 0.0])
-    dt = meta.get("dt", 1.0)
-
-    if aoa is None:
-        aoa = 0.0
-    if dt is None:
-        dt = 1.0
+    # Resolve freestream.
+    fs = meta.get("freestream", None)
+    mag_vinf = meta.get("magVinf", None)
     if fs is None:
-        fs = [0.0, 0.0, 0.0]
+        if mag_vinf is None:
+            return None, "missing freestream and magVinf"
+        try:
+            mag_vinf = float(mag_vinf)
+        except Exception:
+            return None, "magVinf not numeric"
+        if not np.isfinite(mag_vinf) or mag_vinf <= 0.0:
+            return None, "magVinf must be finite and >0"
+        # FLOWUnsteady convention used in user sim setup:
+        # Vinf = magVinf * [cosd(AOA), 0, sind(AOA)]
+        rad = np.deg2rad(aoa_deg)
+        fs_arr = np.asarray(
+            [mag_vinf * np.cos(rad), 0.0, mag_vinf * np.sin(rad)],
+            dtype=np.float64,
+        )
+    else:
+        try:
+            fs_arr = np.asarray(fs, dtype=np.float64).reshape(-1)
+        except Exception:
+            return None, "freestream not numeric"
+        if fs_arr.shape[0] != 3:
+            return None, "freestream must have 3 components"
+        if not np.all(np.isfinite(fs_arr)):
+            return None, "freestream has non-finite values"
+        # If user provided freestream but not speed, infer speed for dt formula path.
+        if mag_vinf is None:
+            mag_vinf = float(np.linalg.norm(fs_arr))
+        else:
+            try:
+                mag_vinf = float(mag_vinf)
+            except Exception:
+                return None, "magVinf not numeric"
 
-    fs_arr = np.asarray(fs, dtype=np.float64).reshape(-1)
-    if fs_arr.shape[0] != 3:
-        fs_arr = np.asarray([0.0, 0.0, 0.0], dtype=np.float64)
+    # Resolve dt.
+    dt_raw = meta.get("dt", None)
+    if dt_raw is not None:
+        try:
+            dt = float(dt_raw)
+        except Exception:
+            return None, "dt not numeric"
+        if not np.isfinite(dt) or dt <= 0.0:
+            return None, "dt must be finite and >0"
+    else:
+        nsteps = meta.get("nsteps", None)
+        if nsteps is None:
+            return None, "missing dt and nsteps"
+        try:
+            nsteps = int(nsteps)
+        except Exception:
+            return None, "nsteps not integer"
+        if nsteps <= 0:
+            return None, "nsteps must be >0"
 
-    return {
-        "aoa_deg": float(aoa),
-        "freestream": fs_arr,
+        if "ttot_seconds" in meta and meta["ttot_seconds"] is not None:
+            try:
+                ttot_seconds = float(meta["ttot_seconds"])
+            except Exception:
+                return None, "ttot_seconds not numeric"
+            if not np.isfinite(ttot_seconds) or ttot_seconds <= 0.0:
+                return None, "ttot_seconds must be finite and >0"
+            dt = ttot_seconds / float(nsteps)
+        elif "ttot_constant" in meta and meta["ttot_constant"] is not None:
+            try:
+                ttot_constant = float(meta["ttot_constant"])
+            except Exception:
+                return None, "ttot_constant not numeric"
+            if not np.isfinite(ttot_constant) or ttot_constant <= 0.0:
+                return None, "ttot_constant must be finite and >0"
+            if mag_vinf is None:
+                return None, "magVinf required for ttot_constant formula"
+            if not np.isfinite(float(mag_vinf)) or float(mag_vinf) <= 0.0:
+                return None, "magVinf must be finite and >0 for ttot_constant formula"
+            ttot_seconds = float(ttot_constant) / float(mag_vinf)
+            dt = ttot_seconds / float(nsteps)
+        else:
+            return None, "missing dt and no supported dt formula keys"
+
+    resolved = {
+        "aoa_deg": float(aoa_deg),
+        "freestream": fs_arr.astype(np.float64).reshape(3),
         "dt": float(dt),
+        "magVinf": float(np.linalg.norm(fs_arr)),
+    }
+    return resolved, "ok"
+
+
+def _prepare_case_metadata(all_cases: List[str]) -> Dict[str, Dict[str, Any]]:
+    merged: Dict[str, Dict[str, Any]] = {str(k): dict(v) for k, v in CASE_METADATA.items()}
+    overrides = _load_case_metadata_overrides()
+    merged.update(overrides)
+
+    # Ensure all required cases exist in mapping.
+    for c in all_cases:
+        merged.setdefault(str(c), {})
+
+    active: Dict[str, Dict[str, Any]] = {}
+    missing: Dict[str, str] = {}
+    for case in all_cases:
+        meta = merged.get(case, {}) or {}
+        resolved, why = _resolve_case_metadata(meta)
+        if resolved is None:
+            missing[str(case)] = why
+            continue
+        active[str(case)] = {
+            "aoa_deg": float(resolved["aoa_deg"]),
+            "freestream": np.asarray(resolved["freestream"], dtype=np.float64).reshape(3),
+            "dt": float(resolved["dt"]),
+            "magVinf": float(resolved["magVinf"]),
+        }
+
+    if USE_EXPLICIT_CONDITIONING and STRICT_METADATA_VALIDATION and missing:
+        details = ", ".join([f"{k}({v})" for k, v in sorted(missing.items())])
+        raise ValueError(
+            "Conditioning is enabled but metadata is incomplete/invalid for cases: "
+            f"{details}. Fill CASE_METADATA or provide {CASE_METADATA_PATH}."
+        )
+    if missing and not USE_EXPLICIT_CONDITIONING:
+        print(f"[meta] conditioning disabled, allowing missing metadata for cases: {sorted(missing.keys())}")
+    elif missing and not STRICT_METADATA_VALIDATION:
+        print(f"[meta] warning: metadata missing for cases: {sorted(missing.keys())}")
+
+    return active
+
+
+def _case_meta(case: str) -> Dict[str, object]:
+    meta = ACTIVE_CASE_METADATA.get(str(case), None)
+    if meta is None:
+        # This fallback is only valid when conditioning is disabled.
+        if USE_EXPLICIT_CONDITIONING and STRICT_METADATA_VALIDATION:
+            raise ValueError(f"Missing validated metadata for case={case}")
+        return {
+            "aoa_deg": 0.0,
+            "freestream": np.asarray([0.0, 0.0, 0.0], dtype=np.float64),
+            "dt": 1.0,
+        }
+    return {
+        "aoa_deg": float(meta["aoa_deg"]),
+        "freestream": np.asarray(meta["freestream"], dtype=np.float64).reshape(3),
+        "dt": float(meta["dt"]),
     }
 
 
@@ -494,6 +699,171 @@ def _print_geometry_channel_stats(X: np.ndarray, feature_names: List[str], tag: 
         print(
             f"[{tag}] warning: all geometry channels are zero. "
             "Check VTK paths, VTK parser backend, and GEOMETRY_NEAR_THRESHOLD."
+        )
+
+
+def _geometry_frame_report(case: str, frame: str, n_particles: int, vtk_path: str, geom_feat: Dict[str, np.ndarray]) -> Dict[str, Any]:
+    dist = np.asarray(geom_feat.get("geom_dist", np.zeros(n_particles)), dtype=np.float64)
+    nx = np.asarray(geom_feat.get("geom_nx", np.zeros(n_particles)), dtype=np.float64)
+    ny = np.asarray(geom_feat.get("geom_ny", np.zeros(n_particles)), dtype=np.float64)
+    nz = np.asarray(geom_feat.get("geom_nz", np.zeros(n_particles)), dtype=np.float64)
+    near = np.asarray(geom_feat.get("geom_body_near", np.zeros(n_particles)), dtype=np.float64)
+    nrm_mag = np.sqrt(nx * nx + ny * ny + nz * nz)
+
+    return {
+        "case": str(case),
+        "frame": str(frame),
+        "n_particles": int(n_particles),
+        "vtk_path": str(vtk_path),
+        "geom_dist_mean": float(np.mean(dist)) if dist.size else 0.0,
+        "geom_dist_p95": float(np.percentile(dist, 95)) if dist.size else 0.0,
+        "geom_dist_nonzero_frac": float(np.mean(dist > 0.0)) if dist.size else 0.0,
+        "geom_body_near_frac": float(np.mean(near > 0.5)) if near.size else 0.0,
+        "normal_mag_mean": float(np.mean(nrm_mag)) if nrm_mag.size else 0.0,
+        "normal_mag_var": float(np.var(nrm_mag)) if nrm_mag.size else 0.0,
+        "normal_nx_var": float(np.var(nx)) if nx.size else 0.0,
+        "normal_ny_var": float(np.var(ny)) if ny.size else 0.0,
+        "normal_nz_var": float(np.var(nz)) if nz.size else 0.0,
+    }
+
+
+def _geometry_case_summary(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    by_case: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for e in entries:
+        by_case[str(e["case"])].append(e)
+    out: Dict[str, Any] = {}
+    for case, arr in sorted(by_case.items()):
+        dist_nonzero = np.asarray([a["geom_dist_nonzero_frac"] for a in arr], dtype=np.float64)
+        near_frac = np.asarray([a["geom_body_near_frac"] for a in arr], dtype=np.float64)
+        nx_var = np.asarray([a["normal_nx_var"] for a in arr], dtype=np.float64)
+        ny_var = np.asarray([a["normal_ny_var"] for a in arr], dtype=np.float64)
+        nz_var = np.asarray([a["normal_nz_var"] for a in arr], dtype=np.float64)
+        out[case] = {
+            "n_frames": int(len(arr)),
+            "geom_dist_nonzero_frac_mean": float(np.mean(dist_nonzero)),
+            "geom_body_near_frac_mean": float(np.mean(near_frac)),
+            "normal_var_mean": float(np.mean(nx_var + ny_var + nz_var)),
+        }
+    return out
+
+
+def _validate_geometry_report(entries: List[Dict[str, Any]]) -> None:
+    if not USE_GEOMETRY_CHANNELS or len(entries) == 0:
+        return
+    case_sum = _geometry_case_summary(entries)
+    bad_cases: List[str] = []
+    for case, s in case_sum.items():
+        if s["geom_dist_nonzero_frac_mean"] < GEOM_MIN_NONZERO_FRAC:
+            bad_cases.append(f"{case}:geom_dist_nonzero={s['geom_dist_nonzero_frac_mean']:.3e}")
+        if s["geom_body_near_frac_mean"] < GEOM_MIN_NEAR_FRAC:
+            bad_cases.append(f"{case}:near_frac={s['geom_body_near_frac_mean']:.3e}")
+    if bad_cases:
+        msg = "Geometry channels appear collapsed for cases -> " + ", ".join(bad_cases)
+        if STRICT_GEOMETRY_QA:
+            raise RuntimeError(msg)
+        print(f"[geom] warning: {msg}")
+
+
+def _frame_is_usable(n_particles: int) -> Tuple[bool, str]:
+    if n_particles < int(MIN_PARTICLES_PER_FRAME):
+        return False, f"n_particles<{MIN_PARTICLES_PER_FRAME}"
+    return True, "ok"
+
+
+def _train_id_val_id_split_by_case(frame_ranges: List[Tuple], train_frame_ids: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Split training cases into train-ID and val-ID by frame index order per case."""
+    if not USE_DUAL_SPLIT_PROTOCOL or train_frame_ids.size == 0:
+        return train_frame_ids, np.zeros((0,), dtype=np.int64)
+
+    by_case: Dict[str, List[int]] = defaultdict(list)
+    for i in train_frame_ids.tolist():
+        case = str(frame_ranges[int(i)][0])
+        by_case[case].append(int(i))
+
+    train_out: List[int] = []
+    val_id_out: List[int] = []
+    for case, ids in sorted(by_case.items()):
+        ids_sorted = sorted(ids, key=lambda j: int(frame_ranges[int(j)][1]))
+        n = len(ids_sorted)
+        n_val = max(VAL_ID_MIN_FRAMES_PER_TRAIN_CASE, int(round(VAL_ID_FRACTION_FROM_TRAIN_CASES * n)))
+        n_val = min(max(1, n - 1), n_val) if n > 1 else 0
+        if n_val <= 0:
+            train_out.extend(ids_sorted)
+            continue
+        val_id_out.extend(ids_sorted[-n_val:])
+        train_out.extend(ids_sorted[:-n_val])
+
+    return np.asarray(sorted(train_out), dtype=np.int64), np.asarray(sorted(val_id_out), dtype=np.int64)
+
+
+def _split_stats_from_rows(
+    Y: np.ndarray,
+    frame_ranges: List[Tuple],
+    split_ids: np.ndarray,
+    split_name: str,
+) -> Dict[str, Any]:
+    if split_ids.size == 0:
+        return {"split": split_name, "n_frames": 0}
+    rows = []
+    case_counts: Dict[str, int] = defaultdict(int)
+    n_particles = []
+    for i in split_ids.tolist():
+        case, _, s, e, n = frame_ranges[int(i)]
+        s = int(s)
+        e = int(e)
+        rows.append(np.arange(s, e, dtype=np.int64))
+        case_counts[str(case)] += 1
+        n_particles.append(int(n))
+    idx = np.concatenate(rows) if rows else np.zeros((0,), dtype=np.int64)
+    yy = Y[idx]
+    vel = np.linalg.norm(yy[:, :3], axis=1)
+    grd = np.linalg.norm(yy[:, 3:], axis=1)
+
+    def _q(v: np.ndarray, q: float) -> float:
+        return float(np.quantile(v, q)) if v.size else float("nan")
+
+    return {
+        "split": split_name,
+        "n_frames": int(split_ids.size),
+        "case_counts": dict(case_counts),
+        "n_particles": {
+            "min": int(np.min(n_particles)),
+            "median": float(np.median(n_particles)),
+            "p90": float(np.quantile(n_particles, 0.9)),
+            "max": int(np.max(n_particles)),
+        },
+        "u_mag": {
+            "mean": float(np.mean(vel)),
+            "p50": _q(vel, 0.5),
+            "p95": _q(vel, 0.95),
+            "max": float(np.max(vel)),
+        },
+        "grad_u_mag": {
+            "mean": float(np.mean(grd)),
+            "p50": _q(grd, 0.5),
+            "p95": _q(grd, 0.95),
+            "max": float(np.max(grd)),
+        },
+    }
+
+
+def _assert_conditioning_variance(X: np.ndarray, feature_names: List[str], train_rows: np.ndarray) -> None:
+    if not USE_EXPLICIT_CONDITIONING:
+        return
+    dead = []
+    for ch in ACTIVE_CONDITIONING_CHANNEL_NAMES:
+        if ch not in feature_names:
+            dead.append(f"{ch}(missing)")
+            continue
+        idx = feature_names.index(ch)
+        v = float(np.var(X[train_rows, idx]))
+        if v <= 1e-12:
+            dead.append(f"{ch}(var~0)")
+    if dead:
+        raise RuntimeError(
+            "Conditioning channels are non-informative on train rows: "
+            + ", ".join(dead)
+            + ". Provide valid metadata or disable conditioning."
         )
 
 
@@ -1041,6 +1411,8 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
     frame_targets_raw: List[np.ndarray] = []
     frame_ranges: List[Tuple] = []
     frame_contexts: List[Dict[str, object]] = []
+    geom_reports: List[Dict[str, Any]] = []
+    filtered_frames: List[Dict[str, Any]] = []
 
     start = 0
     for case in all_cases:
@@ -1067,12 +1439,24 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
                 gy.shape[0],
                 gz.shape[0],
             )
-            if n <= 0:
+            fr = str(np.asarray(data["frame_id"]).reshape(-1)[0])
+            vtk_path = str(np.asarray(data.get("source_vtk_path", "")).reshape(-1)[0])
+            usable, reason = _frame_is_usable(n)
+            if not usable:
+                filtered_frames.append(
+                    {
+                        "case": str(case),
+                        "frame": str(fr),
+                        "n_particles": int(n),
+                        "reason": reason,
+                        "source": str(p),
+                    }
+                )
                 continue
 
             phase = 0.0 if T <= 1 else float(i) / float(T - 1)
-            vtk_path = str(np.asarray(data.get("source_vtk_path", "")).reshape(-1)[0])
             geom_feat = _particle_geometry_features(xyz, vtk_path, n)
+            geom_reports.append(_geometry_frame_report(case, fr, n, vtk_path, geom_feat))
             x_feat = _feature_matrix_from_state(
                 state=state,
                 n=n,
@@ -1084,7 +1468,6 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
             y = np.concatenate([vel[:n], grad[:n]], axis=1).astype(np.float32)
 
             end = start + n
-            fr = str(np.asarray(data["frame_id"]).reshape(-1)[0])
             frame_ranges.append((case, fr, start, end, n))
             frame_contexts.append(
                 {
@@ -1101,19 +1484,29 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
                 }
             )
 
-            x_this = x_feat.astype(np.float32)
-            y_this = y.astype(np.float32)
-            frame_inputs_raw.append(x_this)
-            frame_targets_raw.append(y_this)
-
+            frame_inputs_raw.append(x_feat.astype(np.float32))
+            frame_targets_raw.append(y.astype(np.float32))
             start = end
 
     if not frame_inputs_raw:
-        raise RuntimeError("No Task-1 u/gradU samples were built")
+        raise RuntimeError("No Task-1 u/gradU samples were built after filtering.")
 
-    frame_ids_train = np.array([i for i, r in enumerate(frame_ranges) if _case_split_label(r[0]) == "train"], dtype=np.int64)
-    frame_ids_val = np.array([i for i, r in enumerate(frame_ranges) if _case_split_label(r[0]) == "val"], dtype=np.int64)
-    frame_ids_test = np.array([i for i, r in enumerate(frame_ranges) if _case_split_label(r[0]) == "test"], dtype=np.int64)
+    _validate_geometry_report(geom_reports)
+
+    # OOD case splits stay fixed by user intent.
+    frame_ids_train_all = np.array(
+        [i for i, r in enumerate(frame_ranges) if _case_split_label(r[0]) == "train"], dtype=np.int64
+    )
+    frame_ids_val_ood = np.array(
+        [i for i, r in enumerate(frame_ranges) if _case_split_label(r[0]) == "val"], dtype=np.int64
+    )
+    frame_ids_test_ood = np.array(
+        [i for i, r in enumerate(frame_ranges) if _case_split_label(r[0]) == "test"], dtype=np.int64
+    )
+
+    frame_ids_train, frame_ids_val_id = _train_id_val_id_split_by_case(frame_ranges, frame_ids_train_all)
+    if frame_ids_train.size == 0:
+        raise RuntimeError("Train-ID split became empty. Reduce VAL_ID_FRACTION_FROM_TRAIN_CASES or filtering.")
 
     def rows_from_frame_ids(fid: np.ndarray) -> np.ndarray:
         chunks = []
@@ -1123,10 +1516,15 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
         return np.concatenate(chunks) if chunks else np.zeros((0,), dtype=np.int64)
 
     train_rows = rows_from_frame_ids(frame_ids_train)
-    val_rows = rows_from_frame_ids(frame_ids_val)
-    test_rows = rows_from_frame_ids(frame_ids_test)
+    val_id_rows = rows_from_frame_ids(frame_ids_val_id)
+    val_ood_rows = rows_from_frame_ids(frame_ids_val_ood)
+    test_ood_rows = rows_from_frame_ids(frame_ids_test_ood)
 
-    # Normalize using ONLY training-frame particles.
+    # Backward-compatible keys.
+    val_rows = val_ood_rows
+    test_rows = test_ood_rows
+
+    # Normalize using ONLY train-ID rows.
     X_train = np.concatenate([frame_inputs_raw[int(i)] for i in frame_ids_train], axis=0).astype(np.float32)
     Y_train = np.concatenate([frame_targets_raw[int(i)] for i in frame_ids_train], axis=0).astype(np.float32)
     in_mean = np.mean(X_train, axis=0, keepdims=True)
@@ -1142,6 +1540,29 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
     Y = np.concatenate(frame_targets_raw, axis=0).astype(np.float32)
     Xn = np.concatenate(frame_inputs_norm, axis=0).astype(np.float32)
     Yn = np.concatenate(frame_targets_norm, axis=0).astype(np.float32)
+
+    _assert_conditioning_variance(X, PARTICLE_INPUT_FEATURES, train_rows)
+
+    split_stats = {
+        "train_id": _split_stats_from_rows(Y, frame_ranges, frame_ids_train, "train_id"),
+        "val_id": _split_stats_from_rows(Y, frame_ranges, frame_ids_val_id, "val_id"),
+        "val_ood": _split_stats_from_rows(Y, frame_ranges, frame_ids_val_ood, "val_ood"),
+        "test_ood": _split_stats_from_rows(Y, frame_ranges, frame_ids_test_ood, "test_ood"),
+    }
+    geom_case_summary = _geometry_case_summary(geom_reports)
+
+    filtered_manifest_path = OUT_ROOT / "task1_ugradu_filtered_frames.json"
+    if EXPORT_FILTERED_FRAME_MANIFEST:
+        filtered_manifest_path.write_text(
+            json.dumps(
+                {
+                    "min_particles_per_frame": int(MIN_PARTICLES_PER_FRAME),
+                    "n_filtered": int(len(filtered_frames)),
+                    "filtered_frames": filtered_frames,
+                },
+                indent=2,
+            )
+        )
 
     out_path = OUT_ROOT / "particle_ugradu_dataset.npz"
     np.savez_compressed(
@@ -1160,18 +1581,32 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
         target_names=np.asarray(TARGET_UGRADU_NAMES, dtype=object),
         frame_ranges=np.asarray(frame_ranges, dtype=object),
         frame_contexts=np.asarray(frame_contexts, dtype=object),
+        # Backward-compatible split keys (val/test are OOD here).
         train_frame_ids=frame_ids_train,
-        val_frame_ids=frame_ids_val,
-        test_frame_ids=frame_ids_test,
+        val_frame_ids=frame_ids_val_ood,
+        test_frame_ids=frame_ids_test_ood,
         train_rows=train_rows,
         val_rows=val_rows,
         test_rows=test_rows,
+        # Explicit dual split keys.
+        train_frame_ids_all_train_cases=frame_ids_train_all,
+        train_id_frame_ids=frame_ids_train,
+        val_id_frame_ids=frame_ids_val_id,
+        val_ood_frame_ids=frame_ids_val_ood,
+        test_ood_frame_ids=frame_ids_test_ood,
+        val_id_rows=val_id_rows,
+        val_ood_rows=val_ood_rows,
+        test_ood_rows=test_ood_rows,
+        split_stats=np.asarray(split_stats, dtype=object),
+        geometry_case_summary=np.asarray(geom_case_summary, dtype=object),
+        filtered_frames=np.asarray(filtered_frames, dtype=object),
         train_cases=np.asarray(TRAIN_CASES, dtype=object),
         val_cases=np.asarray(VAL_CASES, dtype=object),
         test_cases=np.asarray(TEST_CASES, dtype=object),
-        case_metadata=np.asarray(CASE_METADATA, dtype=object),
+        case_metadata=np.asarray(ACTIVE_CASE_METADATA, dtype=object),
         use_explicit_conditioning=np.asarray(USE_EXPLICIT_CONDITIONING),
         conditioning_channel_names=np.asarray(CONDITIONING_CHANNEL_NAMES, dtype=object),
+        conditioning_active_channel_names=np.asarray(ACTIVE_CONDITIONING_CHANNEL_NAMES, dtype=object),
         use_geometry_channels=np.asarray(USE_GEOMETRY_CHANNELS),
         geometry_channel_names=np.asarray(GEOMETRY_CHANNEL_NAMES, dtype=object),
         in_mean=in_mean.astype(np.float32),
@@ -1182,17 +1617,19 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
 
     print("\n[task1-ugradu] dataset built")
     print("  n_graph_frames            :", len(frame_inputs_raw))
+    print("  filtered_frames           :", len(filtered_frames))
     print("  first graph shapes        :", frame_inputs_raw[0].shape, frame_targets_raw[0].shape)
     print("  inputs_t shape (legacy)   :", X.shape)
     print("  targets_ugradu (legacy)   :", Y.shape)
     print("  n_frames                  :", len(frame_ranges))
     print("  feature_names             :", PARTICLE_INPUT_FEATURES)
     print("  use_explicit_conditioning :", USE_EXPLICIT_CONDITIONING)
-    print("  conditioning_channels     :", CONDITIONING_CHANNEL_NAMES if USE_EXPLICIT_CONDITIONING else [])
+    print("  conditioning_channels     :", ACTIVE_CONDITIONING_CHANNEL_NAMES)
     print("  use_geometry_channels     :", USE_GEOMETRY_CHANNELS)
     print("  target_names              :", TARGET_UGRADU_NAMES)
-    print("  split(train/val/test) rows:", len(train_rows), len(val_rows), len(test_rows))
-    print("  split(train/val/test) cases:", TRAIN_CASES, VAL_CASES, TEST_CASES)
+    print("  split rows train_id/val_id/val_ood/test_ood:",
+          len(train_rows), len(val_id_rows), len(val_ood_rows), len(test_ood_rows))
+    print("  filtered manifest         :", filtered_manifest_path if EXPORT_FILTERED_FRAME_MANIFEST else "disabled")
     _print_geometry_channel_stats(X, PARTICLE_INPUT_FEATURES, "task1-ugradu")
     return out_path
 
@@ -1202,8 +1639,16 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
 # ==============================================================================
 
 def main() -> None:
+    global ACTIVE_CASE_METADATA
+    global ACTIVE_CONDITIONING_CHANNEL_NAMES
+
     ensure_dir(OUT_ROOT)
     ensure_dir(MERGED_ROOT)
+
+    ACTIVE_CASE_METADATA = _prepare_case_metadata([str(c) for c in DATASET_IDS])
+    ACTIVE_CONDITIONING_CHANNEL_NAMES = list(CONDITIONING_CHANNEL_NAMES) if USE_EXPLICIT_CONDITIONING else []
+    print("[meta] validated metadata cases:", sorted(ACTIVE_CASE_METADATA.keys()))
+    print("[meta] active conditioning channels:", ACTIVE_CONDITIONING_CHANNEL_NAMES)
 
     merged = merge_frames()
 
@@ -1235,14 +1680,32 @@ def main() -> None:
         "run_task2_field": RUN_TASK2_FIELD,
         "use_explicit_conditioning": USE_EXPLICIT_CONDITIONING,
         "conditioning_channel_names": CONDITIONING_CHANNEL_NAMES if USE_EXPLICIT_CONDITIONING else [],
+        "conditioning_active_channel_names": ACTIVE_CONDITIONING_CHANNEL_NAMES,
         "use_geometry_channels": USE_GEOMETRY_CHANNELS,
         "geometry_channel_names": GEOMETRY_CHANNEL_NAMES,
         "geometry_near_threshold": GEOMETRY_NEAR_THRESHOLD,
+        "strict_geometry_qa": STRICT_GEOMETRY_QA,
+        "geom_min_nonzero_frac": GEOM_MIN_NONZERO_FRAC,
+        "geom_min_near_frac": GEOM_MIN_NEAR_FRAC,
+        "min_particles_per_frame": MIN_PARTICLES_PER_FRAME,
+        "dual_split_enabled": USE_DUAL_SPLIT_PROTOCOL,
+        "val_id_fraction_from_train_cases": VAL_ID_FRACTION_FROM_TRAIN_CASES,
+        "val_id_min_frames_per_train_case": VAL_ID_MIN_FRAMES_PER_TRAIN_CASE,
         "pyvista_available": PYVISTA_AVAILABLE,
         "scipy_available": SCIPY_AVAILABLE,
         "train_cases": TRAIN_CASES,
         "val_cases": VAL_CASES,
         "test_cases": TEST_CASES,
+        "task2_alignment_prep": {
+            "run_task2_field": RUN_TASK2_FIELD,
+            "field_input_channels_current": FIELD_INPUT_CHANNELS,
+            "particle_input_schema_target": TASK2_PARTICLE_INPUT_SCHEMA,
+            "interface_contract": {
+                "task1_output_for_integrator": list(TARGET_UGRADU_NAMES),
+                "task2_consumes_particle_state": True,
+                "task2_target_is_eulerian_field": True,
+            },
+        },
     }
     (OUT_ROOT / "preprocess_summary.json").write_text(json.dumps(summary, indent=2))
     print("\n[done] preprocess summary")
