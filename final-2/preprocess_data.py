@@ -216,10 +216,15 @@ STRICT_GEOMETRY_QA = True
 GEOM_MIN_NONZERO_FRAC = 1e-4
 GEOM_MIN_NEAR_FRAC = 1e-5
 
-# Optional internal validation split from training cases.
-USE_DUAL_SPLIT_PROTOCOL = False
+# Internal same-distribution validation split from training cases.
+# This split is used for tuning/early stopping because it preserves the same
+# AoA/time/particle-count distribution as training more closely than a held-out
+# angle-only validation set.
+USE_DUAL_SPLIT_PROTOCOL = True
 VAL_ID_FRACTION_FROM_TRAIN_CASES = 0.2
 VAL_ID_MIN_FRAMES_PER_TRAIN_CASE = 8
+VAL_ID_FRAME_STRIDE = 5
+VAL_ID_FRAME_OFFSET = 2
 
 # Conditioning channels that are allowed to be constant by design for a setup.
 # Example: freestream_y is exactly zero when inflow is in x-z plane.
@@ -978,7 +983,21 @@ def _frame_is_usable(n_particles: int) -> Tuple[bool, str]:
 
 
 def _train_id_val_id_split_by_case(frame_ranges: List[Tuple], train_frame_ids: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Split training cases into train-ID and val-ID by frame index order per case."""
+    """Split training cases into training and same-distribution validation frames.
+
+    We keep whole test cases held out, but for model selection we need a
+    validation split whose AoA/time/particle-count distribution resembles the
+    training distribution. Taking the last 20% of each trajectory would make
+    validation contain mostly late, high-particle-count frames. Instead, this
+    uses an interleaved stride inside every training case:
+
+        validation = frames[offset::stride]
+        training   = all remaining frames
+
+    This is for optimizer/model selection only. The separate held-out angle,
+    super-resolution, and unseen-angle test sets remain the final generalization
+    checks.
+    """
     if not USE_DUAL_SPLIT_PROTOCOL or train_frame_ids.size == 0:
         return train_frame_ids, np.zeros((0,), dtype=np.int64)
 
@@ -992,13 +1011,31 @@ def _train_id_val_id_split_by_case(frame_ranges: List[Tuple], train_frame_ids: n
     for case, ids in sorted(by_case.items()):
         ids_sorted = sorted(ids, key=lambda j: int(frame_ranges[int(j)][1]))
         n = len(ids_sorted)
-        n_val = max(VAL_ID_MIN_FRAMES_PER_TRAIN_CASE, int(round(VAL_ID_FRACTION_FROM_TRAIN_CASES * n)))
-        n_val = min(max(1, n - 1), n_val) if n > 1 else 0
-        if n_val <= 0:
+        if n <= 1:
             train_out.extend(ids_sorted)
             continue
-        val_id_out.extend(ids_sorted[-n_val:])
-        train_out.extend(ids_sorted[:-n_val])
+
+        stride = max(int(VAL_ID_FRAME_STRIDE), 2)
+        offset = min(max(int(VAL_ID_FRAME_OFFSET), 0), stride - 1)
+        val_ids = ids_sorted[offset::stride]
+
+        # Keep at least a small validation sample per case, but never consume
+        # all frames from a case.
+        min_val = min(max(int(VAL_ID_MIN_FRAMES_PER_TRAIN_CASE), 1), max(n - 1, 1))
+        if len(val_ids) < min_val:
+            needed = min_val - len(val_ids)
+            existing = set(val_ids)
+            supplement = [j for j in ids_sorted if j not in existing][:needed]
+            val_ids.extend(supplement)
+
+        val_set = set(val_ids)
+        train_ids = [j for j in ids_sorted if j not in val_set]
+        if not train_ids:
+            train_ids = ids_sorted[:-1]
+            val_ids = ids_sorted[-1:]
+
+        val_id_out.extend(val_ids)
+        train_out.extend(train_ids)
 
     return np.asarray(sorted(train_out), dtype=np.int64), np.asarray(sorted(val_id_out), dtype=np.int64)
 
@@ -1813,8 +1850,10 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
     val_ood_rows = rows_from_frame_ids(frame_ids_val_ood)
     test_ood_rows = rows_from_frame_ids(frame_ids_test_ood)
 
-    # Backward-compatible keys.
-    val_rows = val_ood_rows
+    # Backward-compatible keys now point to the same-distribution validation
+    # split used for training curves/model selection. The held-out AoA
+    # validation cases are saved separately as validation_angle_*.
+    val_rows = val_id_rows
     test_rows = test_ood_rows
 
     # Normalize using ONLY train-ID rows.
@@ -1874,9 +1913,10 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
         target_names=np.asarray(TARGET_UGRADU_NAMES, dtype=object),
         frame_ranges=np.asarray(frame_ranges, dtype=object),
         frame_contexts=np.asarray(frame_contexts, dtype=object),
-        # Backward-compatible split keys (val/test are OOD here).
+        # Backward-compatible split keys: validation is same-distribution;
+        # test remains the complete held-out test collection.
         train_frame_ids=frame_ids_train,
-        val_frame_ids=frame_ids_val_ood,
+        val_frame_ids=frame_ids_val_id,
         test_frame_ids=frame_ids_test_ood,
         train_rows=train_rows,
         val_rows=val_rows,
@@ -1886,12 +1926,14 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
         train_id_frame_ids=frame_ids_train,
         val_id_frame_ids=frame_ids_val_id,
         val_ood_frame_ids=frame_ids_val_ood,
+        validation_angle_frame_ids=frame_ids_val_ood,
         test_ood_frame_ids=frame_ids_test_ood,
         test_normal_frame_ids=frame_ids_test_normal,
         test_super_resolution_frame_ids=frame_ids_test_super_resolution,
         test_unseen_angle_frame_ids=frame_ids_test_unseen_angle,
         val_id_rows=val_id_rows,
         val_ood_rows=val_ood_rows,
+        validation_angle_rows=val_ood_rows,
         test_ood_rows=test_ood_rows,
         test_normal_rows=rows_from_frame_ids(frame_ids_test_normal),
         test_super_resolution_rows=rows_from_frame_ids(frame_ids_test_super_resolution),
@@ -1928,6 +1970,8 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
     print("  target_names              :", TARGET_UGRADU_NAMES)
     print("  split rows train_id/val_id/val_ood/test_ood:",
           len(train_rows), len(val_id_rows), len(val_ood_rows), len(test_ood_rows))
+    print("  validation_frame_stride/offset:",
+          VAL_ID_FRAME_STRIDE, VAL_ID_FRAME_OFFSET)
     print("  test frames normal/super-resolution/unseen-angle:",
           len(frame_ids_test_normal), len(frame_ids_test_super_resolution), len(frame_ids_test_unseen_angle))
     print("  filtered manifest         :", filtered_manifest_path if EXPORT_FILTERED_FRAME_MANIFEST else "disabled")
