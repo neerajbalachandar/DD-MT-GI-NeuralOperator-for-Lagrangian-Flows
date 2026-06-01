@@ -121,9 +121,9 @@ CASE_METADATA = {
 #   TRAIN_CASES = ["1", "2", "7"]
 #   VAL_CASES   = ["8"]
 #   TEST_CASES  = ["9"]
-TRAIN_CASES = ["1", "2","10","11"]
-VAL_CASES = ["8","7"]
-TEST_CASES = ["9"]
+TRAIN_CASES = ["8", "11","1","10"]
+VAL_CASES = ["9","7"]
+TEST_CASES = ["2"]
 
 # Feature/state definitions for Task-1
 STATE_NAMES = ["x", "y", "z", "Gamma_x", "Gamma_y", "Gamma_z", "sigma"]
