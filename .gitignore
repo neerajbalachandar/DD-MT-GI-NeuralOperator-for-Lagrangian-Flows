@@ -20,9 +20,9 @@ torch_extensions/
 data/
 
 
-final-2/output/
+/final-2/output/
 
 
-final-2/output_initial_direct_particle/
-final-2/output_ugradu_nogeom/
-final-2/output_flattening_latest
+# final-2/output_initial_direct_particle/
+# final-2/output_ugradu_nogeom/
+# final-2/output_flattening_latest
