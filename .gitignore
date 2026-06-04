@@ -10,7 +10,6 @@ __pycache__/
 
 # ML artifacts
 *.pth
-*.pt
 torch_extensions/
 
 # OS files
@@ -19,9 +18,7 @@ torch_extensions/
 # Data Path
 data/
 
-
-/final-2/output/
-
+final-2/processed_data/
 
 # final-2/output_initial_direct_particle/
 # final-2/output_ugradu_nogeom/
