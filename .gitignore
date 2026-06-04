@@ -20,10 +20,7 @@ torch_extensions/
 data/
 
 
-final-2/output/merged_frames/
-final-2/output/particle_ugradu_dataset.npz
-final-2/output/preprocess_summary.json
-final-2/output/task1_ugradu_filtered_frames.json
+final-2/output/
 
 
 final-2/output_initial_direct_particle/
