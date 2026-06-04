@@ -53,3 +53,12 @@ In `preprocess_data.py`:
 - Package imports are split cleanly:
   - runtime runner imports `FLOWUnsteady`
   - case-specific sim file imports `FLOWVPM`/`FLOWVLM`/vehicle modules as needed.
+
+
+
+Next Set of Tasks to update:
+
+1. Remove geometric encoding for task1 - refer snippet [6]
+2. Discuss with Hari whether normalization can be done for entire dataset or just train?
+3. Fix the split between train and validate in the preprocess_data.py - it is still according to the G Sheets
+4. Normalization between 
