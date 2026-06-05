@@ -19,8 +19,8 @@ torch_extensions/
 data/
 
 final-2/processed_data/
-final-2/result/plot/
-final-2/result/plots/
+final-2/result/
+
 
 # final-2/output_initial_direct_particle/
 # final-2/output_ugradu_nogeom/
