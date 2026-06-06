@@ -1,3 +1,5 @@
+# Scrap delta mode for task 1
+
 from __future__ import annotations
 import json
 import os
@@ -25,8 +27,7 @@ except Exception:
     PYVISTA_AVAILABLE = False
 
 
-# Preferred Task-1 dataset root. The current preprocessing pipeline expects
-# generated Task-1 case folders directly under this directory.
+# Task-1 dataset root
 RAW_ROOT = Path("/media/dysco/New Volume/Neeraj/neuralop/data/task1")
 RAW_ROOT_CANDIDATES = [
     RAW_ROOT,
@@ -65,46 +66,6 @@ INCLUDE_STATIC_PARTICLES = True
 
 OUT_ROOT = Path(__file__).resolve().parent / "output"
 MERGED_ROOT = OUT_ROOT / "merged_frames"
-
-
-
-
-# Task-2 path is optional and currently off (user requested Task-1 focus).
-RUN_TASK2_FIELD = False
-GRID_RESOLUTION = (32, 32, 32)
-OUTPUT_MODE = "UW"
-FIELD_INPUT_CHANNELS = [
-    "Gamma_x",
-    "Gamma_y",
-    "Gamma_z",
-    "sigma",
-    "density",
-    "X",
-    "Y",
-    "Z",
-]
-# Task-2 alignment prep (kept off for now): richer particle-side schema.
-TASK2_PARTICLE_INPUT_SCHEMA = [
-    "x",
-    "y",
-    "z",
-    "Gamma_x",
-    "Gamma_y",
-    "Gamma_z",
-    "sigma",
-    "velocity_x",
-    "velocity_y",
-    "velocity_z",
-    "gradUx_x",
-    "gradUx_y",
-    "gradUx_z",
-    "gradUy_x",
-    "gradUy_y",
-    "gradUy_z",
-    "gradUz_x",
-    "gradUz_y",
-    "gradUz_z",
-]
 
 
 
@@ -1141,9 +1102,6 @@ INPUT_KEYS = {
     "vol": "vol",
     "static": "static",
 }
-OUTPUT_KEYS = {"points": "nodes", "U": "U", "W": "W"}
-
-
 def _merge_particle_payloads(dynamic_payload: Dict[str, np.ndarray], static_payload: Optional[Dict[str, np.ndarray]]) -> Dict[str, np.ndarray]:
     """Concatenate wake particles and static body particles for one frame."""
     if static_payload is None or not INCLUDE_STATIC_PARTICLES:
@@ -1221,176 +1179,6 @@ def merge_frames() -> List[Path]:
             msg += " Missing dataset directories include: " + ", ".join(missing_dataset_dirs[:8])
         raise RuntimeError(msg)
     return merged
-
-
-# ==============================================================================
-# Task-2 (optional, unchanged style)
-# ==============================================================================
-
-def build_grid(bounds, res):
-    xmin, xmax, ymin, ymax, zmin, zmax = bounds
-    nx, ny, nz = res
-    xs = np.linspace(xmin, xmax, nx)
-    ys = np.linspace(ymin, ymax, ny)
-    zs = np.linspace(zmin, zmax, nz)
-    xg, yg, zg = np.meshgrid(xs, ys, zs, indexing="ij")
-    return np.stack([xg, yg, zg], axis=-1)
-
-
-def project_nearest(pxyz: np.ndarray, values: np.ndarray, grid_xyz: np.ndarray):
-    flat = grid_xyz.reshape(-1, 3)
-    if SCIPY_AVAILABLE:
-        tree = cKDTree(flat)
-        _, j = tree.query(pxyz, k=1)
-    else:
-        diff = pxyz[:, None, :] - flat[None, :, :]
-        d2 = np.sum(diff * diff, axis=2)
-        j = np.argmin(d2, axis=1)
-
-    m = flat.shape[0]
-    c = values.shape[1]
-    acc = np.zeros((m, c), dtype=np.float64)
-    cnt = np.zeros((m, 1), dtype=np.float64)
-    for i, k in enumerate(j):
-        acc[int(k)] += values[i]
-        cnt[int(k)] += 1.0
-    out = acc / np.maximum(cnt, 1.0)
-    nx, ny, nz, _ = grid_xyz.shape
-    return out.reshape(nx, ny, nz, c).astype(np.float32)
-
-
-def compute_bounds(merged: List[Path]):
-    mn = np.array([np.inf, np.inf, np.inf])
-    mx = np.array([-np.inf, -np.inf, -np.inf])
-    for p in merged:
-        with np.load(p, allow_pickle=True) as d:
-            xyz = as_xyz(d["particle_xyz"])
-        mn = np.minimum(mn, xyz.min(axis=0))
-        mx = np.maximum(mx, xyz.max(axis=0))
-    span = np.maximum(mx - mn, 1e-9)
-    pad = 0.05 * span
-    mn -= pad
-    mx += pad
-    return float(mn[0]), float(mx[0]), float(mn[1]), float(mx[1]), float(mn[2]), float(mx[2])
-
-
-def _channel_norm_grid(x: np.ndarray, train_idx: np.ndarray):
-    axes = tuple(i for i in range(x.ndim) if i != 1)
-    mean = np.mean(x[train_idx], axis=axes, keepdims=True)
-    std = np.std(x[train_idx], axis=axes, keepdims=True)
-    std = np.maximum(std, 1e-8)
-    return mean.astype(np.float32), std.astype(np.float32), ((x - mean) / std).astype(np.float32)
-
-
-def _split_idx(n: int, seed: int = 42, train: float = 0.7, val: float = 0.15):
-    rng = np.random.default_rng(seed)
-    p = rng.permutation(n)
-    nt = int(round(train * n))
-    nv = int(round(val * n))
-    tr = np.sort(p[:nt])
-    va = np.sort(p[nt : nt + nv])
-    te = np.sort(p[nt + nv :])
-    return tr.astype(np.int64), va.astype(np.int64), te.astype(np.int64)
-
-
-def build_field_dataset(merged: List[Path]) -> Path:
-    bounds = compute_bounds(merged)
-    grid = build_grid(bounds, GRID_RESOLUTION)
-
-    Xs, Ys = [], []
-    cases, frames = [], []
-
-    for p in merged:
-        with np.load(p, allow_pickle=True) as d:
-            data = {k: d[k] for k in d.files}
-
-        xyz = as_xyz(data["particle_xyz"])
-        gamma = as_xyz(data["Gamma_vec"])
-        n = xyz.shape[0]
-        sigma = _fit_scalar(data["sigma"], n, 1e-2)
-        vol = _fit_scalar(data["vol"], n, 1.0)
-        density = vol / max(float(np.mean(vol)), 1e-12)
-
-        chans = {
-            "Gamma_x": gamma[:, 0],
-            "Gamma_y": gamma[:, 1],
-            "Gamma_z": gamma[:, 2],
-            "sigma": sigma,
-            "density": density,
-        }
-        coord = {"X": grid[..., 0], "Y": grid[..., 1], "Z": grid[..., 2]}
-
-        projected = {}
-        for k, v in chans.items():
-            g = project_nearest(xyz, v.reshape(-1, 1), grid)
-            projected[k] = g[..., 0]
-
-        merged_channels = {**projected, **coord}
-        channel_order = [c for c in FIELD_INPUT_CHANNELS if c in merged_channels]
-        x = np.stack([merged_channels[c] for c in channel_order], axis=0).astype(np.float32)
-
-        src_pts = as_xyz(data["points"]) if "points" in data else None
-        yparts = []
-        if OUTPUT_MODE in ("U", "UW"):
-            U = as_vec_field(data["U"])
-            if U.ndim == 4 and U.shape[:3] == GRID_RESOLUTION:
-                yparts.append(np.moveaxis(U, -1, 0))
-            elif U.ndim == 2 and src_pts is not None and U.shape[0] == src_pts.shape[0]:
-                Ug = project_nearest(src_pts, U, grid)
-                yparts.append(np.moveaxis(Ug, -1, 0))
-            else:
-                raise RuntimeError(f"Cannot map U shape {U.shape}")
-
-        if OUTPUT_MODE in ("W", "UW"):
-            W = as_vec_field(data["W"])
-            if W.ndim == 4 and W.shape[:3] == GRID_RESOLUTION:
-                yparts.append(np.moveaxis(W, -1, 0))
-            elif W.ndim == 2 and src_pts is not None and W.shape[0] == src_pts.shape[0]:
-                Wg = project_nearest(src_pts, W, grid)
-                yparts.append(np.moveaxis(Wg, -1, 0))
-            else:
-                raise RuntimeError(f"Cannot map W shape {W.shape}")
-
-        y = np.concatenate(yparts, axis=0).astype(np.float32)
-        Xs.append(x)
-        Ys.append(y)
-        cases.append(str(np.asarray(data["source_dataset"]).reshape(-1)[0]))
-        frames.append(str(np.asarray(data["frame_id"]).reshape(-1)[0]))
-
-    X = np.stack(Xs).astype(np.float32)
-    Y = np.stack(Ys).astype(np.float32)
-
-    tr, va, te = _split_idx(len(X), RANDOM_SEED)
-    in_mean, in_std, Xn = _channel_norm_grid(X, tr)
-    out_mean, out_std, Yn = _channel_norm_grid(Y, tr)
-
-    target_channels = ["U_x", "U_y", "U_z"] if OUTPUT_MODE == "U" else ["W_x", "W_y", "W_z"]
-    if OUTPUT_MODE == "UW":
-        target_channels = ["U_x", "U_y", "U_z", "W_x", "W_y", "W_z"]
-
-    out_path = OUT_ROOT / "field_dataset.npz"
-    np.savez_compressed(
-        out_path,
-        inputs=X,
-        targets=Y,
-        inputs_norm=Xn,
-        targets_norm=Yn,
-        input_channels=np.asarray(FIELD_INPUT_CHANNELS, dtype=object),
-        target_channels=np.asarray(target_channels, dtype=object),
-        grid_xyz=grid.astype(np.float32),
-        bounds=np.asarray(bounds, dtype=np.float32),
-        case_names=np.asarray(cases, dtype=object),
-        frame_ids=np.asarray(frames, dtype=object),
-        train_idx=tr,
-        val_idx=va,
-        test_idx=te,
-        in_mean=in_mean,
-        in_std=in_std,
-        out_mean=out_mean,
-        out_std=out_std,
-    )
-    print("[field] wrote", out_path, "shape", X.shape, Y.shape)
-    return out_path
 
 
 # ==============================================================================
@@ -2006,10 +1794,6 @@ def main() -> None:
 
     merged = merge_frames()
 
-    field_path = None
-    if RUN_TASK2_FIELD:
-        field_path = build_field_dataset(merged)
-
     particle_evolution_path = None
     particle_ugradu_path = None
     mode = str(TASK1_TARGET_MODE).lower()
@@ -2030,8 +1814,6 @@ def main() -> None:
         "task1_target_mode": mode,
         "task1_particle_evolution_dataset": None if particle_evolution_path is None else str(particle_evolution_path),
         "task1_particle_ugradu_dataset": None if particle_ugradu_path is None else str(particle_ugradu_path),
-        "task2_field_dataset": None if field_path is None else str(field_path),
-        "run_task2_field": RUN_TASK2_FIELD,
         "use_explicit_conditioning": USE_EXPLICIT_CONDITIONING,
         "conditioning_channel_names": CONDITIONING_CHANNEL_NAMES if USE_EXPLICIT_CONDITIONING else [],
         "conditioning_active_channel_names": ACTIVE_CONDITIONING_CHANNEL_NAMES,
@@ -2050,16 +1832,6 @@ def main() -> None:
         "train_cases": TRAIN_CASES,
         "val_cases": VAL_CASES,
         "test_cases": TEST_CASES,
-        "task2_alignment_prep": {
-            "run_task2_field": RUN_TASK2_FIELD,
-            "field_input_channels_current": FIELD_INPUT_CHANNELS,
-            "particle_input_schema_target": TASK2_PARTICLE_INPUT_SCHEMA,
-            "interface_contract": {
-                "task1_output_for_integrator": list(TARGET_UGRADU_NAMES),
-                "task2_consumes_particle_state": True,
-                "task2_target_is_eulerian_field": True,
-            },
-        },
     }
     (OUT_ROOT / "preprocess_summary.json").write_text(json.dumps(summary, indent=2))
     print("\n[done] preprocess summary")

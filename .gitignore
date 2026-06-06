@@ -18,9 +18,10 @@ torch_extensions/
 # Data Path
 data/
 
-final-2/processed_data/
+final-2/processed_data_task1/
 final-2/result/
-
+final-2/result-gen-gpu/
+final-2/preprocessed_data_task2/
 
 # final-2/output_initial_direct_particle/
 # final-2/output_ugradu_nogeom/

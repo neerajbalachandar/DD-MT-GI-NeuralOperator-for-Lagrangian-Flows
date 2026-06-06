@@ -62,3 +62,27 @@ Next Set of Tasks to update:
 2. Discuss with Hari whether normalization can be done for entire dataset or just train?
 3. Fix the split between train and validate in the preprocess_data.py - it is still according to the G Sheets
 4. Normalization between 
+
+
+
+Concern:
+
+1. The temporal resolution in task1 is that you train with data at every time step (200) without a skip and prediction happens for u and gradu at 200 time steps so that it can be inputed to the time integration at every time step without cultivating for temporal super resolution (can be tried)... temporal sr should be tried and inputed to the intergator at every time step even if particle states at every step are not given but prediction of u and grad u is done at every step, but isn't those states also required at every time step for forward integration which does not involve P2P interaction and hence does not use sr.
+
+AFTER VERIFICATION - TEMPORAL SR IS NOT TRIVIAL HERE
+(temporal sr or sr in general is done if one cannot generate that much of input-output pairs (every step), but if it requires states of particles itself which are input pair, for the time integration, then there is no point) - still think about it.
+
+-Because, even if you avoid expensive FMM evaluations at intermediate timesteps,
+you STILL need particle states at those timesteps, and those states must still be evolved. So, the expensive temporal evolution loop still exists.
+
+
+2. Temporal resolution for task2 implies you are not utilizing all the processing steps for (50/200) for FMM - instead train on only certain skipped steps temporally even for training, and ask to predict at every step in between - which is temporal sr, and not training on every time step and then asking for every time step output by giving only certain skipped time step during test data.
+
+sparse train, dense test - true temporal SR
+dense train, sparse test - robustness/interpolation
+
+Current Task 1:
+replaces expensive interaction operator.
+
+Temporal SR Task:
+replaces temporal evolution itself.
