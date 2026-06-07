@@ -29,7 +29,7 @@ FIELD_ROOT_CANDIDATES = [
     Path(__file__).resolve().parents[1] / "data" / "task2",
 ]
 
-OUT_ROOT = Path(__file__).resolve().parent / "output"
+OUT_ROOT = Path(__file__).resolve().parent / "processed_data_task2"
 TASK2_OUT_ROOT = OUT_ROOT / "task2_gino_frames"
 
 DYNAMIC_PARTICLE_H5_PATTERN = "static_airfoil_pfield.*.h5"
@@ -37,7 +37,14 @@ STATIC_PARTICLE_H5_PATTERN = "static_airfoil_staticpfield.*.h5"
 FIELD_H5_PATTERN = "static_airfoil_fdom.*.h5"
 INCLUDE_STATIC_PARTICLES = True
 
-CASE_RE = re.compile(r"^(?P<aoa>\d+(?:\.\d+)?)deg_static_airfoil_(?P<speed>\d+(?:\.\d+)?)u_(?P<particles>\d+)p$")
+# CASE_RE = re.compile(r"^(?P<aoa>\d+(?:\.\d+)?)deg_static_airfoil_(?P<speed>\d+(?:\.\d+)?)u_(?P<particles>\d+)p$")
+CASE_RE = re.compile(
+    r"^(?P<aoa>\d+(?:\.\d+)?)deg_static_airfoil_"
+    r"(?P<speed>\d+(?:\.\d+)?)u_"
+    r"(?P<particles>\d+)p"
+    r"(?:_(?P<variant>tsr|ssr))?$"
+)
+
 FRAME_RE = re.compile(r"(\d+)(?!.*\d)")
 
 RANDOM_SEED = 42
@@ -94,16 +101,27 @@ def frame_id(path: Path) -> str:
     return m.group(1).zfill(6) if m else path.stem
 
 
-def parse_case_name(case: str) -> Optional[Dict[str, float]]:
-    m = CASE_RE.match(str(case))
-    if not m:
-        return None
-    return {
-        "aoa_deg": float(m.group("aoa")),
-        "magVinf": float(m.group("speed")),
-        "particles_per_step": float(m.group("particles")),
-    }
+# def parse_case_name(case: str) -> Optional[Dict[str, float]]:
+#     m = CASE_RE.match(str(case))
+#     if not m:
+#         return None
+#     return {
+#         "aoa_deg": float(m.group("aoa")),
+#         "magVinf": float(m.group("speed")),
+#         "particles_per_step": float(m.group("particles")),
+#     }
 
+def parse_case_name(case):
+    match = CASE_RE.match(case)
+    if match is None:
+        return None
+
+    return {
+        "aoa_deg": float(match.group("aoa")),
+        "speed": float(match.group("speed")),
+        "particles": int(match.group("particles")),
+        "variant": match.group("variant"),
+    }
 
 def resolve_field_root() -> Path:
     env_root = os.environ.get("FINAL2_TASK2_FIELD_ROOT", "").strip()
@@ -136,34 +154,63 @@ def case_metadata(case: str, n_frames: int, frame_index: int) -> Dict[str, Any]:
     if parsed is None:
         raise ValueError(f"Cannot parse case metadata from {case}")
     aoa = float(parsed["aoa_deg"])
-    mag = float(parsed["magVinf"])
+    # mag = float(parsed["magVinf"])
+    mag = float(parsed["speed"])
     rad = np.deg2rad(aoa)
     phase = 0.0 if n_frames <= 1 else float(frame_index) / float(n_frames - 1)
     return {
         "aoa_deg": aoa,
         "magVinf": mag,
         "freestream": [mag * np.cos(rad), 0.0, mag * np.sin(rad)],
-        "particles_per_step": int(round(parsed["particles_per_step"])),
+        "particles_per_step": int(round(parsed["particles"])),
         "dt": DEFAULT_DT,
         "phase": phase,
     }
 
 
+# def split_role(case: str) -> str:
+#     parsed = parse_case_name(case)
+#     if parsed is None:
+#         return "unassigned"
+#     aoa = int(round(parsed["aoa_deg"]))
+#     if aoa in TRAIN_AOA_DEGREES:
+#         return "train_case"
+#     if aoa in VAL_AOA_DEGREES:
+#         return "validation_angle"
+#     if aoa in TEST_NORMAL_AOA_DEGREES:
+#         return "testing_normal"
+#     if aoa in TEST_SUPER_RESOLUTION_AOA_DEGREES:
+#         return "testing_super_resolution_case"
+#     if aoa in TEST_UNSEEN_AOA_DEGREES:
+#         return "testing_unseen_angle"
+#     return "unassigned"
+
 def split_role(case: str) -> str:
     parsed = parse_case_name(case)
     if parsed is None:
         return "unassigned"
+
     aoa = int(round(parsed["aoa_deg"]))
+    variant = parsed.get("variant", None)
+
     if aoa in TRAIN_AOA_DEGREES:
         return "train_case"
+
     if aoa in VAL_AOA_DEGREES:
         return "validation_angle"
+
     if aoa in TEST_NORMAL_AOA_DEGREES:
         return "testing_normal"
-    if aoa in TEST_SUPER_RESOLUTION_AOA_DEGREES:
-        return "testing_super_resolution_case"
+
     if aoa in TEST_UNSEEN_AOA_DEGREES:
         return "testing_unseen_angle"
+
+    if variant == "ssr":
+        return "testing_spatial_sr"
+
+    if variant == "tsr":
+        return "testing_temporal_sr"
+
     return "unassigned"
 
 
@@ -286,6 +333,13 @@ def compute_channel_stats(sample_paths: List[Path], key: str, train_ids: np.ndar
     for idx in train_ids.tolist():
         with np.load(sample_paths[int(idx)], allow_pickle=True) as d:
             arr = np.asarray(d[key], dtype=np.float64).reshape(-1, len(d[f"{key}_names"]) if f"{key}_names" in d else np.asarray(d[key]).shape[-1])
+        finite = np.all(np.isfinite(arr), axis=1)
+        if not np.all(finite):
+            bad = int(arr.shape[0] - np.count_nonzero(finite))
+            print(f"[stats] warning: dropping {bad} non-finite rows from {sample_paths[int(idx)].name}:{key}")
+            arr = arr[finite]
+        if arr.size == 0:
+            continue
         if s1 is None:
             s1 = arr.sum(axis=0)
             s2 = (arr * arr).sum(axis=0)
@@ -293,6 +347,8 @@ def compute_channel_stats(sample_paths: List[Path], key: str, train_ids: np.ndar
             s1 += arr.sum(axis=0)
             s2 += (arr * arr).sum(axis=0)
         n += arr.shape[0]
+    if s1 is None or n == 0:
+        raise RuntimeError(f"No finite rows available to compute stats for key={key}")
     mean = s1 / max(n, 1)
     var = s2 / max(n, 1) - mean * mean
     std = np.sqrt(np.maximum(var, 1e-8))
@@ -353,8 +409,18 @@ def build_dataset() -> Path:
         field_files = sorted((field_root / case).glob(FIELD_H5_PATTERN), key=frame_id)
         if MAX_FRAMES_PER_CASE > 0:
             field_files = field_files[:MAX_FRAMES_PER_CASE]
-        dynamic_map = {frame_id(p): p for p in sorted((PARTICLE_ROOT / case).glob(DYNAMIC_PARTICLE_H5_PATTERN))}
-        static_map = {frame_id(p): p for p in sorted((PARTICLE_ROOT / case).glob(STATIC_PARTICLE_H5_PATTERN))}
+        
+        particle_case = case
+        # SR field folders reuse the same particle dataset
+        if particle_case.endswith("_ssr"):
+            particle_case = particle_case[:-4]
+
+        if particle_case.endswith("_tsr"):
+            particle_case = particle_case[:-4]
+        
+        dynamic_map = {frame_id(p): p for p in sorted((PARTICLE_ROOT / particle_case).glob(DYNAMIC_PARTICLE_H5_PATTERN))}
+
+        static_map = {frame_id(p): p for p in sorted((PARTICLE_ROOT / particle_case).glob(STATIC_PARTICLE_H5_PATTERN))}
         if not dynamic_map:
             print(f"[warn] no particle files for case={case}; skipping field outputs")
             continue
@@ -377,8 +443,8 @@ def build_dataset() -> Path:
 
             field = read_h5(fp, ["nodes", "U", "W"])
             nodes = as_xyz(field["nodes"])
-            U = as_xyz(field["U"])
-            W = as_xyz(field["W"])
+            U = np.nan_to_num(as_xyz(field["U"]), nan=0.0, posinf=0.0, neginf=0.0)
+            W = np.nan_to_num(as_xyz(field["W"]), nan=0.0, posinf=0.0, neginf=0.0)
             grid_xyz_full, U_grid_full = reshape_field(nodes, U)
             _, W_grid_full = reshape_field(nodes, W)
 
@@ -433,7 +499,17 @@ def build_dataset() -> Path:
     train_ids, val_id_ids = make_same_distribution_val(contexts, train_case_ids)
     val_angle_ids = np.asarray([i for i, c in enumerate(contexts) if c["split_role"] == "validation_angle"], dtype=np.int64)
     test_normal_ids = np.asarray([i for i, c in enumerate(contexts) if c["split_role"] == "testing_normal"], dtype=np.int64)
-    test_sr_case_ids = np.asarray([i for i, c in enumerate(contexts) if c["split_role"] == "testing_super_resolution_case"], dtype=np.int64)
+    # test_sr_case_ids = np.asarray([i for i, c in enumerate(contexts) if c["split_role"] == "testing_super_resolution_case"], dtype=np.int64)
+    test_spatial_sr_ids = np.asarray(
+    [i for i, c in enumerate(contexts)
+     if c["split_role"] == "testing_spatial_sr"],
+    dtype=np.int64)
+
+    test_temporal_sr_ids = np.asarray(
+        [i for i, c in enumerate(contexts)
+        if c["split_role"] == "testing_temporal_sr"],
+        dtype=np.int64
+        )
     test_unseen_ids = np.asarray([i for i, c in enumerate(contexts) if c["split_role"] == "testing_unseen_angle"], dtype=np.int64)
 
     coord_span = np.maximum(coord_max - coord_min, 1e-12).astype(np.float32)
@@ -454,7 +530,9 @@ def build_dataset() -> Path:
         val_id_frame_ids=val_id_ids,
         val_angle_frame_ids=val_angle_ids,
         test_normal_frame_ids=test_normal_ids,
-        test_super_resolution_frame_ids=test_sr_case_ids,
+        # test_super_resolution_frame_ids=test_sr_case_ids,
+        test_spatial_sr_frame_ids=test_spatial_sr_ids,
+        test_temporal_sr_frame_ids=test_temporal_sr_ids,
         test_unseen_angle_frame_ids=test_unseen_ids,
         coord_min=coord_min,
         coord_span=coord_span,
@@ -479,7 +557,9 @@ def build_dataset() -> Path:
             "val_id": int(val_id_ids.size),
             "val_angle": int(val_angle_ids.size),
             "test_normal": int(test_normal_ids.size),
-            "test_super_resolution": int(test_sr_case_ids.size),
+            # "test_super_resolution": int(test_sr_case_ids.size),
+            "test_spatial_sr": int(test_spatial_sr_ids.size),
+            "test_temporal_sr": int(test_temporal_sr_ids.size),
             "test_unseen_angle": int(test_unseen_ids.size),
         },
         "coord_min": coord_min.tolist(),
