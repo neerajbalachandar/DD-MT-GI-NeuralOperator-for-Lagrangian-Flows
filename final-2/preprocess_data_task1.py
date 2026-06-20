@@ -27,11 +27,15 @@ except Exception:
     PYVISTA_AVAILABLE = False
 
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+
 # Task-1 dataset root
 RAW_ROOT = Path("/media/dysco/New Volume/Neeraj/neuralop/data/task1")
 RAW_ROOT_CANDIDATES = [
     RAW_ROOT,
-    Path(__file__).resolve().parents[1] / "data" / "task1",
+    Path("/media/neerajc/New Volume/Neeraj/neuralop/data/task1"),
+    SCRIPT_DIR / "data" / "task1",
+    SCRIPT_DIR.parent / "data" / "task1",
 ]
 
 # Leave empty when AUTO_DISCOVER_TASK1_CASES=True.
@@ -64,7 +68,7 @@ STATIC_PARTICLE_H5_PATTERN = "static_airfoil_staticpfield.*.h5"
 VTK_PATTERN = "static_airfoil_Wing_vlm.*.vtk"
 INCLUDE_STATIC_PARTICLES = True
 
-OUT_ROOT = Path(__file__).resolve().parent / "output"
+OUT_ROOT = SCRIPT_DIR / "processed_data_task1"
 MERGED_ROOT = OUT_ROOT / "merged_frames"
 
 
@@ -88,7 +92,7 @@ TASK1_TARGET_MODE = "ugradu"  # "delta" | "ugradu" | "both"
 #   "10deg_static_airfoil_10u_1p": {"aoa_deg": 10.0, "magVinf": 10.0, "dt": 0.0034},
 #   "custom_case_name": {"aoa_deg": 18.0, "freestream": [9.51, 0.0, 3.09], "dt": 0.0034}
 # }
-CASE_METADATA_PATH = Path(__file__).resolve().parent / "case_metadata.json"
+CASE_METADATA_PATH = SCRIPT_DIR / "case_metadata.json"
 STRICT_METADATA_VALIDATION = True
 
 # Inline table for manual metadata overrides. Leave empty for the current

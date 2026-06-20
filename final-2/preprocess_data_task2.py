@@ -19,34 +19,23 @@ except Exception:
 
 
 
-REPO_ROOT = Path(__file__).resolve().parent
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 # ============================================================
 # RAW DATA LOCATION (Navier external drive)
 # ============================================================
 
-BASE_ROOT = Path(
-    "/media/neerajc/New Volume/Neeraj/neuralop/data"
-)
-
-FIELD_ROOT = BASE_ROOT / "task2"
-
-PARTICLE_ROOT = Path(
-    os.environ.get(
-        "FINAL2_TASK2_PARTICLE_ROOT",
-        str(BASE_ROOT / "task1")
-    )
-)
-
-FIELD_ROOT_CANDIDATES = [
-    FIELD_ROOT,
+BASE_ROOT_CANDIDATES = [
+    Path("/media/neerajc/New Volume/Neeraj/neuralop/data"),
+    Path("/media/dysco/New Volume/Neeraj/neuralop/data"),
+    SCRIPT_DIR / "data",
+    SCRIPT_DIR.parent / "data",
 ]
 
-# OUT_ROOT = Path(__file__).resolve().parent / "processed_data_task2"
+FIELD_ROOT_CANDIDATES = [p / "task2" for p in BASE_ROOT_CANDIDATES]
+PARTICLE_ROOT_CANDIDATES = [p / "task1" for p in BASE_ROOT_CANDIDATES]
 
-REPO_ROOT = Path(__file__).resolve().parent
-
-OUT_ROOT = REPO_ROOT / "processed_data" / "task2"
+OUT_ROOT = SCRIPT_DIR / "processed_data_task2"
 
 TASK2_OUT_ROOT = OUT_ROOT / "task2_gino_frames"
 
@@ -114,6 +103,13 @@ def ensure_dir(path: Path) -> Path:
     return path
 
 
+def portable_path(path: Path, root: Path) -> str:
+    try:
+        return str(path.relative_to(root))
+    except Exception:
+        return str(path)
+
+
 def frame_id(path: Path) -> str:
     m = FRAME_RE.search(path.stem)
     return m.group(1).zfill(6) if m else path.stem
@@ -153,6 +149,20 @@ def resolve_field_root() -> Path:
             return cand
     tried = ", ".join(str(p) for p in FIELD_ROOT_CANDIDATES)
     raise FileNotFoundError(f"Could not locate Task-2 field root. Tried: {tried}")
+
+
+def resolve_particle_root() -> Path:
+    env_root = os.environ.get("FINAL2_TASK2_PARTICLE_ROOT", "").strip()
+    if env_root:
+        p = Path(env_root)
+        if p.is_dir():
+            return p
+        raise FileNotFoundError(f"FINAL2_TASK2_PARTICLE_ROOT is invalid: {p}")
+    for cand in PARTICLE_ROOT_CANDIDATES:
+        if cand.is_dir():
+            return cand
+    tried = ", ".join(str(p) for p in PARTICLE_ROOT_CANDIDATES)
+    raise FileNotFoundError(f"Could not locate Task-1 particle root for Task-2 pairing. Tried: {tried}")
 
 
 def discover_cases(field_root: Path) -> List[str]:
@@ -468,11 +478,7 @@ def make_same_distribution_val(frame_contexts: List[Dict[str, Any]], train_ids: 
 
 def build_dataset() -> Path:
     field_root = resolve_field_root()
-    if not PARTICLE_ROOT.is_dir():
-        raise FileNotFoundError(
-            f"Particle root does not exist: {PARTICLE_ROOT}. "
-            "Set FINAL2_TASK2_PARTICLE_ROOT if Task-2 particle files live elsewhere."
-        )
+    particle_root = resolve_particle_root()
 
     ensure_dir(OUT_ROOT)
     ensure_dir(TASK2_OUT_ROOT)
@@ -501,9 +507,9 @@ def build_dataset() -> Path:
         if particle_case.endswith("_tsr"):
             particle_case = particle_case[:-4]
         
-        dynamic_map = {frame_id(p): p for p in sorted((PARTICLE_ROOT / particle_case).glob(DYNAMIC_PARTICLE_H5_PATTERN))}
+        dynamic_map = {frame_id(p): p for p in sorted((particle_root / particle_case).glob(DYNAMIC_PARTICLE_H5_PATTERN))}
 
-        static_map = {frame_id(p): p for p in sorted((PARTICLE_ROOT / particle_case).glob(STATIC_PARTICLE_H5_PATTERN))}
+        static_map = {frame_id(p): p for p in sorted((particle_root / particle_case).glob(STATIC_PARTICLE_H5_PATTERN))}
         if not dynamic_map:
             print(f"[warn] no particle files for case={case}; skipping field outputs")
             continue
@@ -612,9 +618,8 @@ def build_dataset() -> Path:
     manifest = OUT_ROOT / "task2_gino_dataset.npz"
     np.savez_compressed(
         manifest,
-        # sample_paths=np.asarray([str(p) for p in sample_paths], dtype=object),
         sample_paths=np.asarray(
-            [str(p) for p in sample_paths],
+            [portable_path(p, OUT_ROOT) for p in sample_paths],
             dtype=object
         ),
         frame_contexts=np.asarray(contexts, dtype=object),
@@ -636,14 +641,14 @@ def build_dataset() -> Path:
         out_mean=out_mean,
         out_std=out_std,
         field_root=np.asarray(str(field_root), dtype=object),
-        particle_root=np.asarray(str(PARTICLE_ROOT), dtype=object),
+        particle_root=np.asarray(str(particle_root), dtype=object),
     )
 
     summary = {
-        "dataset": str(manifest),
+        "dataset": portable_path(manifest, SCRIPT_DIR),
         "n_samples": len(sample_paths),
         "field_root": str(field_root),
-        "particle_root": str(PARTICLE_ROOT),
+        "particle_root": str(particle_root),
         "feature_names": PARTICLE_INPUT_FEATURES,
         "target_names": TARGET_NAMES,
         "grid_resolution": list(TARGET_GRID_RESOLUTION),
