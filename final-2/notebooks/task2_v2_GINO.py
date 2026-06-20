@@ -970,11 +970,17 @@ for epoch in range(1, CFG['epochs'] + 1):
     )
 
     for local_step, batch in enumerate(train_loader, start=1):
+        print(f"[epoch {epoch}] batch {local_step} loaded", flush=True)
         batch = move_batch(batch)
+        print(f"[epoch {epoch}] batch {local_step} moved to device", flush=True)
         with torch.autocast(**autocast_options):
+            print(f"[epoch {epoch}] batch {local_step} forward start", flush=True)
             pred = predict(MODEL, batch)
+            print(f"[epoch {epoch}] batch {local_step} forward done", flush=True)
             loss, vel_loss, vort_loss = weighted_training_loss(pred, batch['y'])
+            print(f"[epoch {epoch}] batch {local_step} loss={loss.item():.4e}", flush=True)
             loss_for_backward = loss / accumulation_steps
+            print(f"[epoch {epoch}] batch {local_step} backward done", flush=True)
 
         if not torch.isfinite(loss):
             bad_batches += 1
