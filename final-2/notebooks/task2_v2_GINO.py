@@ -176,7 +176,7 @@ CFG = {
     'fno_n_layers': 4,
     'projection_channel_ratio': 2,
     'gno_use_open3d': False,
-    'gno_use_torch_scatter': True,
+    'gno_use_torch_scatter': False,
     'debug_dataset_index': 0,
     'debug_batch_every_eval': False,
 }
