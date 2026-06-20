@@ -18,18 +18,36 @@ except Exception:
     SCIPY_AVAILABLE = False
 
 
-BASE_ROOT = Path("/media/dysco/New Volume/Neeraj/neuralop/data")
+
+REPO_ROOT = Path(__file__).resolve().parent
+
+# ============================================================
+# RAW DATA LOCATION (Navier external drive)
+# ============================================================
+
+BASE_ROOT = Path(
+    "/media/neerajc/New Volume/Neeraj/neuralop/data"
+)
+
 FIELD_ROOT = BASE_ROOT / "task2"
 
-# Task-2 field files currently contain only Eulerian outputs. The particle
-# state is paired from the matching case/frame in Task-1 by default.
-PARTICLE_ROOT = Path(os.environ.get("FINAL2_TASK2_PARTICLE_ROOT", str(BASE_ROOT / "task1")))
+PARTICLE_ROOT = Path(
+    os.environ.get(
+        "FINAL2_TASK2_PARTICLE_ROOT",
+        str(BASE_ROOT / "task1")
+    )
+)
+
 FIELD_ROOT_CANDIDATES = [
     FIELD_ROOT,
-    Path(__file__).resolve().parents[1] / "data" / "task2",
 ]
 
-OUT_ROOT = Path(__file__).resolve().parent / "processed_data_task2"
+# OUT_ROOT = Path(__file__).resolve().parent / "processed_data_task2"
+
+REPO_ROOT = Path(__file__).resolve().parent
+
+OUT_ROOT = REPO_ROOT / "processed_data" / "task2"
+
 TASK2_OUT_ROOT = OUT_ROOT / "task2_gino_frames"
 
 DYNAMIC_PARTICLE_H5_PATTERN = "static_airfoil_pfield.*.h5"
@@ -326,32 +344,97 @@ def normalize_points(xyz: np.ndarray, coord_min: np.ndarray, coord_span: np.ndar
     return np.clip((xyz - coord_min) / coord_span, 0.0, 1.0).astype(np.float32)
 
 
-def compute_channel_stats(sample_paths: List[Path], key: str, train_ids: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+# def compute_channel_stats(sample_paths, key, train_ids):
+#     s1 = None
+#     s2 = None
+#     n = 0
+
+#     for idx in train_ids.tolist():
+
+#         sample_file = sample_paths[int(idx)]
+
+#         if not Path(sample_file).is_absolute():
+#             sample_file = OUT_ROOT / sample_file
+
+#         with np.load(sample_file, allow_pickle=True) as d:
+#             arr = np.asarray(d[key], dtype=np.float64).reshape(-1, len(d[f"{key}_names"]) if f"{key}_names" in d else np.asarray(d[key]).shape[-1])
+#         finite = np.all(np.isfinite(arr), axis=1)
+#         if not np.all(finite):
+#             bad = int(arr.shape[0] - np.count_nonzero(finite))
+#             print(f"[stats] warning: dropping {bad} non-finite rows from {sample_paths[int(idx)].name}:{key}")
+#             arr = arr[finite]
+#         if arr.size == 0:
+#             continue
+#         if s1 is None:
+#             s1 = arr.sum(axis=0)
+#             s2 = (arr * arr).sum(axis=0)
+#         else:
+#             s1 += arr.sum(axis=0)
+#             s2 += (arr * arr).sum(axis=0)
+#         n += arr.shape[0]
+#     if s1 is None or n == 0:
+#         raise RuntimeError(f"No finite rows available to compute stats for key={key}")
+#     mean = s1 / max(n, 1)
+#     var = s2 / max(n, 1) - mean * mean
+#     std = np.sqrt(np.maximum(var, 1e-8))
+#     return mean.astype(np.float32), std.astype(np.float32)
+
+
+def compute_channel_stats(sample_paths, key, train_ids):
     s1 = None
     s2 = None
     n = 0
+
     for idx in train_ids.tolist():
-        with np.load(sample_paths[int(idx)], allow_pickle=True) as d:
-            arr = np.asarray(d[key], dtype=np.float64).reshape(-1, len(d[f"{key}_names"]) if f"{key}_names" in d else np.asarray(d[key]).shape[-1])
-        finite = np.all(np.isfinite(arr), axis=1)
-        if not np.all(finite):
-            bad = int(arr.shape[0] - np.count_nonzero(finite))
-            print(f"[stats] warning: dropping {bad} non-finite rows from {sample_paths[int(idx)].name}:{key}")
-            arr = arr[finite]
-        if arr.size == 0:
-            continue
-        if s1 is None:
-            s1 = arr.sum(axis=0)
-            s2 = (arr * arr).sum(axis=0)
-        else:
-            s1 += arr.sum(axis=0)
-            s2 += (arr * arr).sum(axis=0)
-        n += arr.shape[0]
+
+        sample_file = sample_paths[int(idx)]
+
+        if not Path(sample_file).is_absolute():
+            sample_file = OUT_ROOT / sample_file
+
+        with np.load(sample_file, allow_pickle=True) as d:
+
+            arr = np.asarray(
+                d[key],
+                dtype=np.float64
+            ).reshape(
+                -1,
+                len(d[f"{key}_names"])
+                if f"{key}_names" in d
+                else np.asarray(d[key]).shape[-1]
+            )
+
+            finite = np.all(np.isfinite(arr), axis=1)
+
+            if not np.all(finite):
+                bad = int(arr.shape[0] - np.count_nonzero(finite))
+                print(
+                    f"[stats] warning: dropping {bad} non-finite rows "
+                    f"from {Path(sample_file).name}:{key}"
+                )
+                arr = arr[finite]
+
+            if arr.size == 0:
+                continue
+
+            if s1 is None:
+                s1 = arr.sum(axis=0)
+                s2 = (arr * arr).sum(axis=0)
+            else:
+                s1 += arr.sum(axis=0)
+                s2 += (arr * arr).sum(axis=0)
+
+            n += arr.shape[0]
+
     if s1 is None or n == 0:
-        raise RuntimeError(f"No finite rows available to compute stats for key={key}")
+        raise RuntimeError(
+            f"No finite rows available to compute stats for key={key}"
+        )
+
     mean = s1 / max(n, 1)
     var = s2 / max(n, 1) - mean * mean
     std = np.sqrt(np.maximum(var, 1e-8))
+
     return mean.astype(np.float32), std.astype(np.float32)
 
 
@@ -477,7 +560,11 @@ def build_dataset() -> Path:
                 save_kwargs["targets_full"] = np.concatenate([U_grid_full, W_grid_full], axis=-1).reshape(-1, 6).astype(np.float32)
                 save_kwargs["full_grid_resolution"] = np.asarray(grid_xyz_full.shape[:3], dtype=np.int64)
             np.savez_compressed(out_path, **save_kwargs)
-            sample_paths.append(out_path)
+            # sample_paths.append(out_path)
+
+            relative_path = out_path.relative_to(OUT_ROOT)
+            sample_paths.append(relative_path)
+            
             contexts.append(
                 {
                     "case": case,
@@ -515,13 +602,21 @@ def build_dataset() -> Path:
     coord_span = np.maximum(coord_max - coord_min, 1e-12).astype(np.float32)
     coord_min = coord_min.astype(np.float32)
 
+    print("Number of samples:", len(sample_paths))
+    print("First sample:", sample_paths[0])
+    print("OUT_ROOT:", OUT_ROOT)
+
     in_mean, in_std = compute_channel_stats(sample_paths, "input_features", train_ids)
     out_mean, out_std = compute_channel_stats(sample_paths, "targets", train_ids)
 
     manifest = OUT_ROOT / "task2_gino_dataset.npz"
     np.savez_compressed(
         manifest,
-        sample_paths=np.asarray([str(p) for p in sample_paths], dtype=object),
+        # sample_paths=np.asarray([str(p) for p in sample_paths], dtype=object),
+        sample_paths=np.asarray(
+            [str(p) for p in sample_paths],
+            dtype=object
+        ),
         frame_contexts=np.asarray(contexts, dtype=object),
         feature_names=np.asarray(PARTICLE_INPUT_FEATURES, dtype=object),
         target_names=np.asarray(TARGET_NAMES, dtype=object),
