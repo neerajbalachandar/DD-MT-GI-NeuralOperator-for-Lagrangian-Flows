@@ -79,9 +79,9 @@ MAX_FRAMES_PER_CASE = int(os.environ.get("FINAL2_TASK2_MAX_FRAMES_PER_CASE", "0"
 # Match Task1-v2 channel selection: keep particle state, useful geometry, AoA,
 # and phase; do not keep geom_body_near or deterministic freestream_x/z.
 PARTICLE_INPUT_FEATURES = [
-    "x",
-    "y",
-    "z",
+    # "x",
+    # "y",
+    # "z",
     "Gamma_x",
     "Gamma_y",
     "Gamma_z",
@@ -93,6 +93,8 @@ PARTICLE_INPUT_FEATURES = [
     "angle_of_attack",
     "phase",
 ]
+
+
 
 TARGET_NAMES = ["U_x", "U_y", "U_z", "W_x", "W_y", "W_z"]
 MIN_PARTICLES_PER_FRAME = 64
