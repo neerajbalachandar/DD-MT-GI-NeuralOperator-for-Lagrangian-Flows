@@ -984,28 +984,26 @@ for epoch in range(1, CFG['epochs'] + 1):
     start_time = time.time()
     accumulation_steps = max(int(CFG['gradient_accumulation_steps']), 1)
     optimizer.zero_grad(set_to_none=True)
-    accumulated_batches = 0
+
+    # --- INITIALISE LOSS LISTS ---
+    train_losses, train_rels, vel_losses, vort_losses = [], [], [], []
+    bad_batches = 0
     optimizer_steps = 0
     good_batches = 0
-    bad_batches = 0
+    accumulated_batches = 0
 
     print(f"Epoch {epoch}: entering train_loader loop...", flush=True)
     for local_step, batch in enumerate(train_loader, start=1):
-        print(f"  Batch {local_step}: load complete", flush=True)
         batch = move_batch(batch)
-        print(f"  Batch {local_step}: moved to device", flush=True)
 
         with torch.autocast(**autocast_options):
-            print(f"  Batch {local_step}: forward start...", flush=True)
             pred = predict(MODEL, batch)
-            print(f"  Batch {local_step}: forward done", flush=True)
             loss, vel_loss, vort_loss = weighted_training_loss(pred, batch['y'])
-            print(f"  Batch {local_step}: loss = {loss.item():.4e}", flush=True)
             loss_for_backward = loss / accumulation_steps
 
         if not torch.isfinite(loss):
             bad_batches += 1
-            print(f"  Batch {local_step}: non-finite loss, skipping", flush=True)
+            # Skip this batch – do NOT accumulate it
             continue
 
         # Backward
@@ -1014,9 +1012,8 @@ for epoch in range(1, CFG['epochs'] + 1):
         else:
             loss_for_backward.backward()
         accumulated_batches += 1
-        print(f"  Batch {local_step}: backward done, accumulated={accumulated_batches}", flush=True)
 
-        # Record metrics
+        # Record metrics for this valid batch
         with torch.no_grad():
             train_losses.append(float(loss.item()))
             train_rels.append(float(relative_l2(pred, batch['y']).mean().item()))
@@ -1026,7 +1023,6 @@ for epoch in range(1, CFG['epochs'] + 1):
 
         # Step if accumulated enough
         if accumulated_batches % accumulation_steps == 0:
-            print(f"  Batch {local_step}: stepping optimizer...", flush=True)
             if scaler.is_enabled():
                 scaler.unscale_(optimizer)
             if CFG['grad_clip_norm'] is not None and CFG['grad_clip_norm'] > 0:
@@ -1039,11 +1035,9 @@ for epoch in range(1, CFG['epochs'] + 1):
             optimizer.zero_grad(set_to_none=True)
             optimizer_steps += 1
             accumulated_batches = 0
-            print(f"  Batch {local_step}: step complete, optimizer_steps={optimizer_steps}", flush=True)
 
     # After epoch: handle leftover gradients
     if accumulated_batches > 0:
-        print(f"  Epoch {epoch}: handling leftover gradients ({accumulated_batches} batches)", flush=True)
         if scaler.is_enabled():
             scaler.unscale_(optimizer)
         if CFG['grad_clip_norm'] is not None and CFG['grad_clip_norm'] > 0:
@@ -1062,13 +1056,13 @@ for epoch in range(1, CFG['epochs'] + 1):
     if good_batches == 0:
         raise RuntimeError('All training batches were non‑finite. Inspect preprocessing, normalization, and model configuration.')
 
-    # ---- Evaluation and logging (unchanged) ----
+    # ---- Evaluation and logging ----
     if epoch % CFG['eval_every'] == 0 or epoch == CFG['epochs']:
         val_id_metrics = evaluate(MODEL, val_id_loader)
         val_angle_metrics = evaluate(MODEL, val_angle_loader)
         test_metrics = evaluate(MODEL, test_loader)
-        train_loss = float(np.mean(train_losses))
-        train_rel = float(np.mean(train_rels))
+        train_loss = float(np.mean(train_losses)) if train_losses else float('nan')
+        train_rel = float(np.mean(train_rels)) if train_rels else float('nan')
         score = val_id_metrics['rel_l2_phys']
         if not np.isfinite(score):
             score = val_angle_metrics['rel_l2_phys'] if np.isfinite(val_angle_metrics['rel_l2_phys']) else test_metrics['rel_l2_phys']
@@ -1077,8 +1071,8 @@ for epoch in range(1, CFG['epochs'] + 1):
         history['epoch'].append(epoch)
         history['train_loss'].append(train_loss)
         history['train_rel_l2_norm'].append(train_rel)
-        history['train_velocity_loss'].append(float(np.mean(vel_losses)))
-        history['train_vorticity_loss'].append(float(np.mean(vort_losses)))
+        history['train_velocity_loss'].append(float(np.mean(vel_losses)) if vel_losses else float('nan'))
+        history['train_vorticity_loss'].append(float(np.mean(vort_losses)) if vort_losses else float('nan'))
         history['val_id_rel_l2_phys'].append(val_id_metrics['rel_l2_phys'])
         history['val_angle_rel_l2_phys'].append(val_angle_metrics['rel_l2_phys'])
         history['test_rel_l2_phys'].append(test_metrics['rel_l2_phys'])
