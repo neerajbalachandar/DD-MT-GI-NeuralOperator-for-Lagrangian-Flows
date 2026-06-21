@@ -154,10 +154,10 @@ CFG = {
     'seed': SEED,
     'file_tag': 'task2_gino',
     'epochs': 60,
-    'lr': 3e-4,
+    'lr': 1e-4,
     'weight_decay': 1e-4,
     'eval_every': 5,
-    'gradient_accumulation_steps': 4,
+    'gradient_accumulation_steps': 8,
     'grad_clip_norm': 1.0,
     'maximum_input_particles': 8000,
     'maximum_train_output_points': 8192,
@@ -834,11 +834,38 @@ def relative_l2(pred, target, eps=1e-12):
 #     vort_loss = torch.mean((pred[..., 3:] - target[..., 3:]) ** 2)
 #     return vel_loss + vort_loss, vel_loss.detach(), vort_loss.detach()
 
+# Compute task variances from the training targets (physical units)
+# target_std is already available from dataset_file['out_std'] as a numpy array of shape (6,)
+# It represents the standard deviation of each output channel (Ux, Uy, Uz, Wx, Wy, Wz) 
+# computed from the training split.
+
+target_std_np = dataset_file['out_std'].astype(np.float32)  # shape (6,)
+velocity_std = torch.tensor(target_std_np[:3], dtype=torch.float32, device=DEVICE)   # for Ux, Uy, Uz
+vorticity_std = torch.tensor(target_std_np[3:], dtype=torch.float32, device=DEVICE)  # for Wx, Wy, Wz
+
+# We want a single scalar variance per task to scale the MSE.
+# Using the mean of squared standard deviations gives a total variance per task.
+velocity_var = torch.mean(velocity_std ** 2)      # scalar
+vorticity_var = torch.mean(vorticity_std ** 2)    # scalar
+
+print(f"Velocity variance (scalar): {velocity_var.item():.6e}")
+print(f"Vorticity variance (scalar): {vorticity_var.item():.6e}")
+
 # While both are normalized to unit variance, the vorticity magnitude is often much larger than velocity in physical space
 def weighted_training_loss(pred, target):
-    vel_loss = torch.mean((pred[..., :3] - target[..., :3]) ** 2)
-    vort_loss = torch.mean((pred[..., 3:] - target[..., 3:]) ** 2)
-    return 0.5 * vel_loss + 0.5 * vort_loss, vel_loss.detach(), vort_loss.detach()
+    # pred and target are normalized outputs (mean 0, std 1 per channel)
+    # Convert to physical units for the MSE
+    pred_phys = denormalize_target(pred)   # uses out_mean/out_std
+    target_phys = denormalize_target(target)
+
+    # Compute MSE for each task in physical units
+    vel_mse = torch.mean((pred_phys[:, :3] - target_phys[:, :3]) ** 2)
+    vort_mse = torch.mean((pred_phys[:, 3:] - target_phys[:, 3:]) ** 2)
+
+    # Scale each MSE by its variance to equalize the contribution
+    total_loss = vel_mse / velocity_var + vort_mse / vorticity_var
+
+    return total_loss, vel_mse.detach(), vort_mse.detach()
 
 
 def prediction_debug(label, pred, target):
