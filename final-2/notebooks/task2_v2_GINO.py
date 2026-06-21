@@ -178,7 +178,7 @@ CFG = {
     # 'gno_use_open3d': DEVICE.type == 'cuda',
     # 'gno_use_torch_scatter': DEVICE.type == 'cuda',
     'gno_use_open3d': False,
-    'gno_use_torch_scatter': True,
+    'gno_use_torch_scatter': False,
     'debug_dataset_index': 0,
     'debug_batch_every_eval': False,
 }
@@ -979,48 +979,44 @@ def save_history():
 
 
 for epoch in range(1, CFG['epochs'] + 1):
+    print(f"\n>>> Starting epoch {epoch} <<<", flush=True)
     MODEL.train()
     start_time = time.time()
     accumulation_steps = max(int(CFG['gradient_accumulation_steps']), 1)
-
-    train_losses, train_rels, vel_losses, vort_losses = [], [], [], []
-    bad_batches = 0
+    optimizer.zero_grad(set_to_none=True)
+    accumulated_batches = 0
     optimizer_steps = 0
     good_batches = 0
+    bad_batches = 0
 
-    # Reset gradients at the start of the epoch
-    optimizer.zero_grad(set_to_none=True)
-    accumulated_batches = 0   # number of valid batches accumulated since last step
-
-    print(f"Training samples={len(train_loader.dataset)} "
-          f"Validation ID={len(val_id_loader.dataset)} "
-          f"Validation Angle={len(val_angle_loader.dataset)} "
-          f"Test={len(test_loader.dataset)}")
-    print(f"Input particles cap={CFG['maximum_input_particles']}")
-    print(f"Output points cap={CFG['maximum_train_output_points']}")
-
+    print(f"Epoch {epoch}: entering train_loader loop...", flush=True)
     for local_step, batch in enumerate(train_loader, start=1):
+        print(f"  Batch {local_step}: load complete", flush=True)
         batch = move_batch(batch)
+        print(f"  Batch {local_step}: moved to device", flush=True)
 
-        # ----- Forward pass and loss -----
         with torch.autocast(**autocast_options):
+            print(f"  Batch {local_step}: forward start...", flush=True)
             pred = predict(MODEL, batch)
+            print(f"  Batch {local_step}: forward done", flush=True)
             loss, vel_loss, vort_loss = weighted_training_loss(pred, batch['y'])
+            print(f"  Batch {local_step}: loss = {loss.item():.4e}", flush=True)
+            loss_for_backward = loss / accumulation_steps
 
-        # Skip non‑finite batches
         if not torch.isfinite(loss):
             bad_batches += 1
+            print(f"  Batch {local_step}: non-finite loss, skipping", flush=True)
             continue
 
-        # Scale loss for accumulation and backpropagate
-        loss_for_backward = loss / accumulation_steps
+        # Backward
         if scaler.is_enabled():
             scaler.scale(loss_for_backward).backward()
         else:
             loss_for_backward.backward()
         accumulated_batches += 1
+        print(f"  Batch {local_step}: backward done, accumulated={accumulated_batches}", flush=True)
 
-        # Record metrics for this valid batch
+        # Record metrics
         with torch.no_grad():
             train_losses.append(float(loss.item()))
             train_rels.append(float(relative_l2(pred, batch['y']).mean().item()))
@@ -1028,8 +1024,9 @@ for epoch in range(1, CFG['epochs'] + 1):
             vort_losses.append(float(vort_loss.item()))
             good_batches += 1
 
-        # Step if we have accumulated enough valid batches
+        # Step if accumulated enough
         if accumulated_batches % accumulation_steps == 0:
+            print(f"  Batch {local_step}: stepping optimizer...", flush=True)
             if scaler.is_enabled():
                 scaler.unscale_(optimizer)
             if CFG['grad_clip_norm'] is not None and CFG['grad_clip_norm'] > 0:
@@ -1041,10 +1038,12 @@ for epoch in range(1, CFG['epochs'] + 1):
                 optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             optimizer_steps += 1
-            accumulated_batches = 0   # reset after a full step
+            accumulated_batches = 0
+            print(f"  Batch {local_step}: step complete, optimizer_steps={optimizer_steps}", flush=True)
 
-    # After the epoch, step any leftover gradients (if accumulated_batches > 0)
+    # After epoch: handle leftover gradients
     if accumulated_batches > 0:
+        print(f"  Epoch {epoch}: handling leftover gradients ({accumulated_batches} batches)", flush=True)
         if scaler.is_enabled():
             scaler.unscale_(optimizer)
         if CFG['grad_clip_norm'] is not None and CFG['grad_clip_norm'] > 0:
@@ -1058,6 +1057,7 @@ for epoch in range(1, CFG['epochs'] + 1):
         optimizer_steps += 1
 
     scheduler.step()
+    print(f"Epoch {epoch} finished, good_batches={good_batches}, bad={bad_batches}", flush=True)
 
     if good_batches == 0:
         raise RuntimeError('All training batches were non‑finite. Inspect preprocessing, normalization, and model configuration.')
