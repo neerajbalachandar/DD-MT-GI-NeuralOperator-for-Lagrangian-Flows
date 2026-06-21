@@ -979,50 +979,55 @@ def save_history():
 
 
 for epoch in range(1, CFG['epochs'] + 1):
-    print(f"\n>>> Starting epoch {epoch} <<<", flush=True)
     MODEL.train()
     start_time = time.time()
     accumulation_steps = max(int(CFG['gradient_accumulation_steps']), 1)
     optimizer.zero_grad(set_to_none=True)
 
-    # --- INITIALISE LOSS LISTS ---
     train_losses, train_rels, vel_losses, vort_losses = [], [], [], []
     bad_batches = 0
     optimizer_steps = 0
     good_batches = 0
-    accumulated_batches = 0
 
-    print(f"Epoch {epoch}: entering train_loader loop...", flush=True)
+    print(
+    f"Training samples={len(train_loader.dataset)} "
+    f"Validation ID={len(val_id_loader.dataset)} "
+    f"Validation Angle={len(val_angle_loader.dataset)} "
+    f"Test={len(test_loader.dataset)}"
+    )
+
+    print(
+        f"Input particles cap={CFG['maximum_input_particles']}"
+    )
+    print(
+        f"Output points cap={CFG['maximum_train_output_points']}"
+    )
+
     for local_step, batch in enumerate(train_loader, start=1):
+        print(f"[epoch {epoch}] batch {local_step} loaded", flush=True)
         batch = move_batch(batch)
-
+        print(f"[epoch {epoch}] batch {local_step} moved to device", flush=True)
         with torch.autocast(**autocast_options):
+            print(f"[epoch {epoch}] batch {local_step} forward start", flush=True)
             pred = predict(MODEL, batch)
+            print(f"[epoch {epoch}] batch {local_step} forward done", flush=True)
             loss, vel_loss, vort_loss = weighted_training_loss(pred, batch['y'])
+            print(f"[epoch {epoch}] batch {local_step} loss={loss.item():.4e}", flush=True)
             loss_for_backward = loss / accumulation_steps
+            print(f"[epoch {epoch}] batch {local_step} backward done", flush=True)
 
         if not torch.isfinite(loss):
             bad_batches += 1
-            # Skip this batch – do NOT accumulate it
+            optimizer.zero_grad(set_to_none=True)
             continue
 
-        # Backward
         if scaler.is_enabled():
             scaler.scale(loss_for_backward).backward()
         else:
             loss_for_backward.backward()
-        accumulated_batches += 1
 
-        # Record metrics for this valid batch
-        with torch.no_grad():
-            train_losses.append(float(loss.item()))
-            train_rels.append(float(relative_l2(pred, batch['y']).mean().item()))
-            vel_losses.append(float(vel_loss.item()))
-            vort_losses.append(float(vort_loss.item()))
-            good_batches += 1
-
-        # Step if accumulated enough
-        if accumulated_batches % accumulation_steps == 0:
+        should_step = local_step % accumulation_steps == 0 or local_step == len(train_loader)
+        if should_step:
             if scaler.is_enabled():
                 scaler.unscale_(optimizer)
             if CFG['grad_clip_norm'] is not None and CFG['grad_clip_norm'] > 0:
@@ -1034,21 +1039,13 @@ for epoch in range(1, CFG['epochs'] + 1):
                 optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             optimizer_steps += 1
-            accumulated_batches = 0
 
-    # After epoch: handle leftover gradients
-    if accumulated_batches > 0:
-        if scaler.is_enabled():
-            scaler.unscale_(optimizer)
-        if CFG['grad_clip_norm'] is not None and CFG['grad_clip_norm'] > 0:
-            torch.nn.utils.clip_grad_norm_(MODEL.parameters(), CFG['grad_clip_norm'])
-        if scaler.is_enabled():
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
-        optimizer_steps += 1
+        with torch.no_grad():
+            train_losses.append(float(loss.item()))
+            train_rels.append(float(relative_l2(pred, batch['y']).mean().item()))
+            vel_losses.append(float(vel_loss.item()))
+            vort_losses.append(float(vort_loss.item()))
+            good_batches += 1
 
     scheduler.step()
     print(f"Epoch {epoch} finished, good_batches={good_batches}, bad={bad_batches}", flush=True)
