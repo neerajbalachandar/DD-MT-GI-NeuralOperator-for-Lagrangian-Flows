@@ -154,7 +154,7 @@ CFG = {
     'seed': SEED,
     'file_tag': 'task2_gino',
     'epochs': 60,
-    'lr': 1e-4,
+    'lr': 3e-4,
     'weight_decay': 1e-4,
     'eval_every': 5,
     'gradient_accumulation_steps': 4,
