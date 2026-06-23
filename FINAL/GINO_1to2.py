@@ -29,9 +29,8 @@
 # used. Coordinates are always supplied through `input_geom`; include x/y/z as
 # feature channels only if you explicitly want them duplicated.
 
-# In[ ]:
+# In[1]:
 
-from __future__ import annotations
 
 import socket
 
@@ -42,6 +41,9 @@ print(socket.gethostname())
 # Check if all the required parameters are saved in the .pt file and required plots should be put in a new file, including loading the trained model. 
 
 # In[ ]:
+
+
+from __future__ import annotations
 
 import inspect
 import json
@@ -183,40 +185,87 @@ DEFAULT_FIELD_CHANNELS = DEFAULT_PARTICLE_CHANNELS
 # In[ ]:
 
 
+# CFG = {
+#     "seed": SEED,
+#     "task": TASK,
+#     "field_decoder": FIELD_DECODER,
+#     "file_tag": os.environ.get(
+#         "GINO_FILE_TAG",
+#         "task1_particle_ugradu_gino" if TASK == "particle_ugradu" else f"task2_gino_{FIELD_DECODER}",
+#     ),
+#     "epochs": int(os.environ.get("GINO_EPOCHS", "60")),
+#     "lr": float(os.environ.get("GINO_LR", "3e-4")),
+#     "weight_decay": float(os.environ.get("GINO_WEIGHT_DECAY", "1e-4")),
+#     "eval_every": int(os.environ.get("GINO_EVAL_EVERY", "5")),
+#     "gradient_accumulation_steps": int(os.environ.get("GINO_ACCUM_STEPS", "4")),
+#     "grad_clip_norm": float(os.environ.get("GINO_GRAD_CLIP", "1.0")),
+#     "maximum_input_particles": _int_or_none(os.environ.get("GINO_MAX_INPUT_PARTICLES", "2000")),
+#     "maximum_train_output_points": _int_or_none(os.environ.get("GINO_MAX_TRAIN_OUTPUT_POINTS", "2048")),
+#     "maximum_eval_output_points": _int_or_none(os.environ.get("GINO_MAX_EVAL_OUTPUT_POINTS", "32768")),
+#     "batch_size": 1,
+#     "num_workers": int(os.environ.get("GINO_NUM_WORKERS", "0")),
+#     "use_amp": _bool_env("GINO_USE_AMP", True),
+#     "latent_res": int(os.environ.get("GINO_LATENT_RES", "16")),
+#     "in_gno_radius": float(os.environ.get("GINO_IN_RADIUS", "0.35")),
+#     "out_gno_radius": float(os.environ.get("GINO_OUT_RADIUS", "0.40")),
+#     "in_gno_transform_type": os.environ.get("GINO_IN_TRANSFORM", "nonlinear_kernelonly"),
+#     "out_gno_transform_type": os.environ.get("GINO_OUT_TRANSFORM", "linear"),
+#     "gno_embed_channels": int(os.environ.get("GINO_EMBED_CHANNELS", "32")),
+#     "fno_n_modes": tuple(int(x) for x in os.environ.get("GINO_FNO_MODES", "4,4,4").split(",")),
+#     "fno_hidden_channels": int(os.environ.get("GINO_FNO_HIDDEN", "32")),
+#     "fno_n_layers": int(os.environ.get("GINO_FNO_LAYERS", "4")),
+#     "projection_channel_ratio": int(os.environ.get("GINO_PROJ_RATIO", "2")),
+#     "gno_use_open3d": _bool_env("GINO_USE_OPEN3D", True),
+#     "gno_use_torch_scatter": _bool_env("GINO_USE_TORCH_SCATTER", True),
+#     "pointwise_hidden": int(os.environ.get("GINO_POINTWISE_HIDDEN", "96")),
+#     "pointwise_layers": int(os.environ.get("GINO_POINTWISE_LAYERS", "3")),
+# }
+
+
 CFG = {
+    # ===== Basic =====
     "seed": SEED,
-    "task": TASK,
-    "field_decoder": FIELD_DECODER,
-    "file_tag": os.environ.get(
-        "GINO_FILE_TAG",
-        "task1_particle_ugradu_gino" if TASK == "particle_ugradu" else f"task2_gino_{FIELD_DECODER}",
-    ),
-    "epochs": int(os.environ.get("GINO_EPOCHS", "60")),
-    "lr": float(os.environ.get("GINO_LR", "3e-4")),
-    "weight_decay": float(os.environ.get("GINO_WEIGHT_DECAY", "1e-4")),
-    "eval_every": int(os.environ.get("GINO_EVAL_EVERY", "5")),
-    "gradient_accumulation_steps": int(os.environ.get("GINO_ACCUM_STEPS", "4")),
-    "grad_clip_norm": float(os.environ.get("GINO_GRAD_CLIP", "1.0")),
-    "maximum_input_particles": _int_or_none(os.environ.get("GINO_MAX_INPUT_PARTICLES", "2000")),
-    "maximum_train_output_points": _int_or_none(os.environ.get("GINO_MAX_TRAIN_OUTPUT_POINTS", "2048")),
-    "maximum_eval_output_points": _int_or_none(os.environ.get("GINO_MAX_EVAL_OUTPUT_POINTS", "32768")),
+    "task": "particle_ugradu",                      # force particle task
+    "field_decoder": "pointwise",                   # lightweight decoder (no output GNO)
+    "file_tag": "task1_particle_ugradu_gino_pointwise",
+
+    # ===== Training =====
+    "epochs": 30,                                   # quick test; increase later
+    "lr": 1e-3,                                     # slightly higher for faster start
+    "weight_decay": 1e-4,
+    "eval_every": 5,
+    "gradient_accumulation_steps": 4,
+    "grad_clip_norm": 1.0,
     "batch_size": 1,
-    "num_workers": int(os.environ.get("GINO_NUM_WORKERS", "0")),
-    "use_amp": _bool_env("GINO_USE_AMP", False),
-    "latent_res": int(os.environ.get("GINO_LATENT_RES", "12")),
-    "in_gno_radius": float(os.environ.get("GINO_IN_RADIUS", "0.35")),
-    "out_gno_radius": float(os.environ.get("GINO_OUT_RADIUS", "0.40")),
-    "in_gno_transform_type": os.environ.get("GINO_IN_TRANSFORM", "nonlinear_kernelonly"),
-    "out_gno_transform_type": os.environ.get("GINO_OUT_TRANSFORM", "linear"),
-    "gno_embed_channels": int(os.environ.get("GINO_EMBED_CHANNELS", "32")),
-    "fno_n_modes": tuple(int(x) for x in os.environ.get("GINO_FNO_MODES", "4,4,4").split(",")),
-    "fno_hidden_channels": int(os.environ.get("GINO_FNO_HIDDEN", "32")),
-    "fno_n_layers": int(os.environ.get("GINO_FNO_LAYERS", "4")),
-    "projection_channel_ratio": int(os.environ.get("GINO_PROJ_RATIO", "2")),
-    "gno_use_open3d": _bool_env("GINO_USE_OPEN3D", False),
-    "gno_use_torch_scatter": _bool_env("GINO_USE_TORCH_SCATTER", False),
-    "pointwise_hidden": int(os.environ.get("GINO_POINTWISE_HIDDEN", "96")),
-    "pointwise_layers": int(os.environ.get("GINO_POINTWISE_LAYERS", "3")),
+    "num_workers": 0,
+
+    # ===== Sampling (memory & speed) =====
+    "maximum_input_particles": 1000,                # was 2000
+    "maximum_train_output_points": 512,             # was 2048
+    "maximum_eval_output_points": 4096,             # enough for validation
+
+    # ===== Mixed precision (disable to avoid complex‑dtype issues) =====
+    "use_amp": False,                               # critical
+
+    # ===== GINO architecture =====
+    "latent_res": 8,                                # was 16 → 8× less memory
+    "in_gno_radius": 0.35,
+    "out_gno_radius": 0.40,                         # not used for pointwise, but kept
+    "in_gno_transform_type": "nonlinear_kernelonly",
+    "out_gno_transform_type": "linear",
+    "gno_embed_channels": 32,
+    "fno_n_modes": (4, 4, 4),
+    "fno_hidden_channels": 32,
+    "fno_n_layers": 4,
+    "projection_channel_ratio": 2,
+
+    # ===== Dependencies (disable to avoid install issues) =====
+    "gno_use_open3d": False,
+    "gno_use_torch_scatter": False,
+
+    # ===== Pointwise decoder (only used when field_decoder='pointwise') =====
+    "pointwise_hidden": 96,
+    "pointwise_layers": 3,
 }
 
 
@@ -678,21 +727,31 @@ def relative_l2(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-12) ->
     return torch.linalg.norm(diff, dim=1) / torch.linalg.norm(ref, dim=1).clamp_min(eps)
 
 
-def grouped_training_loss(pred: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+# def grouped_training_loss(pred: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+#     pred_phys = denormalize_target(pred)
+#     target_phys = denormalize_target(target)
+#     mse_per_channel = torch.mean((pred_phys - target_phys) ** 2, dim=(0, 1))
+#     scaled = mse_per_channel / target_var_t.reshape(-1)
+#     if len(target_names) == 12:
+#         primary = torch.mean(scaled[:3])
+#         secondary = torch.mean(scaled[3:])
+#     elif len(target_names) >= 6:
+#         primary = torch.mean(scaled[:3])
+#         secondary = torch.mean(scaled[3:6])
+#     else:
+#         primary = torch.mean(scaled)
+#         secondary = torch.zeros((), dtype=primary.dtype, device=primary.device)
+#     return primary + secondary, primary.detach(), secondary.detach()
+
+
+def grouped_training_loss(pred, target):
     pred_phys = denormalize_target(pred)
     target_phys = denormalize_target(target)
-    mse_per_channel = torch.mean((pred_phys - target_phys) ** 2, dim=(0, 1))
-    scaled = mse_per_channel / target_var_t.reshape(-1)
-    if len(target_names) == 12:
-        primary = torch.mean(scaled[:3])
-        secondary = torch.mean(scaled[3:])
-    elif len(target_names) >= 6:
-        primary = torch.mean(scaled[:3])
-        secondary = torch.mean(scaled[3:6])
-    else:
-        primary = torch.mean(scaled)
-        secondary = torch.zeros((), dtype=primary.dtype, device=primary.device)
-    return primary + secondary, primary.detach(), secondary.detach()
+    mse = torch.mean((pred_phys - target_phys) ** 2)
+    # Optional: separate losses for logging velocity / gradient
+    vel_mse = torch.mean((pred_phys[:, :3] - target_phys[:, :3]) ** 2)
+    grad_mse = torch.mean((pred_phys[:, 3:] - target_phys[:, 3:]) ** 2)
+    return mse, vel_mse.detach(), grad_mse.detach()
 
 
 # In[ ]:
