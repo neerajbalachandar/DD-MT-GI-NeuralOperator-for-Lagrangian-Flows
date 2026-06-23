@@ -36,6 +36,7 @@ function build_runtime_callback(cfg::UGradUSettings)
         X, Gamma, sigma = get_particle_state(pfield)
         feats = build_input_features(
             X, Gamma, sigma;
+            feature_names=cfg.input_feature_names,
             use_context_channels=cfg.use_context_channels,
             phase=cfg.phase,
             aoa_deg=cfg.aoa_deg,
