@@ -96,7 +96,7 @@ STRICT_METADATA_VALIDATION = True
 # generated data because _prepare_case_metadata() auto-fills AoA/freestream
 # from folder names and uses DEFAULT_TASK1_DT.
 CASE_METADATA: Dict[str, Dict[str, Any]] = {}
-DEFAULT_TASK1_DT = 0.0034
+DEFAULT_TASK1_DT = 0.0034 # Find out if this is the case.
 
 # Split by CASE (or AoA groups) to avoid temporal leakage.
 # Example desired pattern:
@@ -106,8 +106,9 @@ DEFAULT_TASK1_DT = 0.0034
 TRAIN_CASES: List[str] = []
 VAL_CASES: List[str] = []
 TEST_CASES: List[str] = []
+# AUTO_ASSIGN_SPLITS_FROM_CASE_NAMES = True - above will be assigned automatically.
 
-# Feature/state definitions for Task-1
+# Feature/state definitions for Task - ignore if we are using ugradu
 STATE_NAMES = ["x", "y", "z", "Gamma_x", "Gamma_y", "Gamma_z", "sigma"]
 TARGET_DELTA_NAMES = [
     "dx",
@@ -170,7 +171,8 @@ if USE_EXPLICIT_CONDITIONING:
     PARTICLE_INPUT_FEATURES = PARTICLE_INPUT_FEATURES + CONDITIONING_CHANNEL_NAMES
 
 # Frame quality control.
-MIN_PARTICLES_PER_FRAME = 64
+MIN_PARTICLES_PER_FRAME = 64 # See what is the use and keep a value > 300
+MIN_UGRADU_TARGET_NORM = 1.0e-12 # See the global min and dynamically keep a value during run based on that min of u and gradu
 EXPORT_FILTERED_FRAME_MANIFEST = True
 
 # Geometry QA control.
@@ -182,6 +184,8 @@ GEOM_MIN_NEAR_FRAC = 1e-5
 # This split is used for tuning/early stopping because it preserves the same
 # AoA/time/particle-count distribution as training more closely than a held-out
 # angle-only validation set.
+
+#Check out what these are? and what are angle only validation set?
 USE_DUAL_SPLIT_PROTOCOL = True
 VAL_ID_FRACTION_FROM_TRAIN_CASES = 0.2
 VAL_ID_MIN_FRAMES_PER_TRAIN_CASE = 8
@@ -193,9 +197,8 @@ VAL_ID_FRAME_OFFSET = 2
 CONDITIONING_ALLOWED_CONSTANT_CHANNELS: set = set()
 
 
-# ==============================================================================
 # Basic helpers
-# ==============================================================================
+
 FRAME_RE = re.compile(r"(\d+)(?!.*\d)")
 
 
@@ -302,13 +305,13 @@ def _load_case_metadata_overrides() -> Tuple[Dict[str, Dict[str, Any]], Dict[str
 
 
 def _resolve_raw_root() -> Path:
-    env_raw = os.environ.get("FINAL2_RAW_ROOT", "").strip()
+    env_raw = os.environ.get("RAW_ROOT", "").strip()
     if env_raw:
         p = Path(env_raw)
         if p.exists() and p.is_dir():
             return p
         raise FileNotFoundError(
-            f"FINAL2_RAW_ROOT is set but invalid: {p}. "
+            f"RAW_ROOT is set but invalid: {p}. "
             "Fix the env var or unset it."
         )
 
@@ -788,7 +791,7 @@ def _load_vtk_geom(vtk_path: str):
                         if m >= 3:
                             cells.append(np.asarray(faces[i + 1 : i + 1 + m], dtype=np.int64))
                         i += 1 + m
-                    nrm = _point_normals_from_cells(pts, cells) if len(cells) > 0 else np.zeros_like(pts)
+                    nrm = _point_normals_from_cells(pGINO_ugraduts, cells) if len(cells) > 0 else np.zeros_like(pts)
                 else:
                     # Last-resort parser for legacy ASCII VTK.
                     pts2, nrm2 = _load_legacy_vtk_ascii(vp)
@@ -1557,6 +1560,19 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
                 geom_feat=geom_feat,
             )
             y = np.concatenate([vel[:n], grad[:n]], axis=1).astype(np.float32)
+            target_norm = float(np.linalg.norm(np.nan_to_num(y).reshape(-1)))
+            if (not np.isfinite(target_norm)) or target_norm <= MIN_UGRADU_TARGET_NORM:
+                filtered_frames.append(
+                    {
+                        "case": str(case),
+                        "frame": str(fr),
+                        "n_particles": int(n),
+                        "reason": "tiny_ugradu_target",
+                        "target_norm": target_norm,
+                        "source": str(p),
+                    }
+                )
+                continue
 
             end = start + n
             frame_ranges.append((case, fr, start, end, n))
@@ -1683,6 +1699,7 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
             json.dumps(
                 {
                     "min_particles_per_frame": int(MIN_PARTICLES_PER_FRAME),
+                    "min_ugradu_target_norm": float(MIN_UGRADU_TARGET_NORM),
                     "n_filtered": int(len(filtered_frames)),
                     "filtered_frames": filtered_frames,
                 },
@@ -1766,6 +1783,16 @@ def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
     print("  target_names              :", TARGET_UGRADU_NAMES)
     print("  split rows train_id/val_id/val_ood/test_ood:",
           len(train_rows), len(val_id_rows), len(val_ood_rows), len(test_ood_rows))
+    print("  zero/tiny target filter   :", MIN_UGRADU_TARGET_NORM)
+    print("  split frame counts        :",
+          {
+              "train": int(len(frame_ids_train)),
+              "val_id": int(len(frame_ids_val_id)),
+              "val_angle": int(len(frame_ids_val_ood)),
+              "test_normal": int(len(frame_ids_test_normal)),
+              "test_sr": int(len(frame_ids_test_super_resolution)),
+              "test_unseen": int(len(frame_ids_test_unseen_angle)),
+          })
     print("  validation_frame_stride/offset:",
           VAL_ID_FRAME_STRIDE, VAL_ID_FRAME_OFFSET)
     print("  test frames normal/super-resolution/unseen-angle:",
