@@ -30,7 +30,7 @@
 # feature channels only if you explicitly want them duplicated.
 
 # In[1]:
-
+from __future__ import annotations
 
 import socket
 
@@ -41,9 +41,6 @@ print(socket.gethostname())
 # Check if all the required parameters are saved in the .pt file and required plots should be put in a new file, including loading the trained model. 
 
 # In[ ]:
-
-
-from __future__ import annotations
 
 import inspect
 import json
