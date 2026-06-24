@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 # coding: utf-8
 
+
+# %% [markdown]
 # # Updated GINO model - 23 June 2026
 # 
 # Targets - $u_x, u_y, u_z$, $\nabla{u}_x, \nabla{u}_y, \nabla{u}_z$
@@ -8,6 +10,7 @@
 # 
 # From the predicted particle velocity - use either sr, or a pointwise decoder from latent space for reconstructing flow field. Use the predicted values to propogate the states
 
+# %% [markdown]
 # Unified GINO training for particle U/gradU and Eulerian reconstruction.
 # 
 # Modes
@@ -29,19 +32,17 @@
 # used. Coordinates are always supplied through `input_geom`; include x/y/z as
 # feature channels only if you explicitly want them duplicated.
 
-# In[1]:
+# %% cell 2
 from __future__ import annotations
-
 import socket
 
 print(socket.gethostname())
 
-
+# %% [markdown]
 # Include processing and visualizing data snippets from final-2/task1 notebook.
 # Check if all the required parameters are saved in the .pt file and required plots should be put in a new file, including loading the trained model. 
 
-# In[ ]:
-
+# %% cell 4
 import inspect
 import json
 import math
@@ -57,6 +58,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 from torch import nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
 try:
@@ -73,6 +75,14 @@ except Exception as error:  # pragma: no cover - depends on runtime env
     GNOBlock = None
     GNOBLOCK_IMPORT_ERROR = error
 
+
+try:
+    from neuralop.layers.neighbor_search import NeighborSearch
+    NEIGHBOR_SEARCH_IMPORT_ERROR = None
+except Exception as error:  # pragma: no cover - depends on runtime env
+    NeighborSearch = None
+    NEIGHBOR_SEARCH_IMPORT_ERROR = error
+
 try:
     from neuralop.utils import count_model_params
 except Exception:  # pragma: no cover
@@ -83,10 +93,7 @@ print('Torch       :', torch.__version__)
 print('CUDA build  :', torch.version.cuda)
 print('CUDA usable :', torch.cuda.is_available())
 
-
-# In[ ]:
-
-
+# %% cell 5
 SEED = int(os.environ.get("GINO_SEED", "42"))
 random.seed(SEED)
 np.random.seed(SEED)
@@ -155,15 +162,12 @@ TASK = os.environ.get("GINO_TASK", "particle_ugradu").strip().lower()
 FIELD_DECODER = os.environ.get("GINO_FIELD_DECODER", "super_resolution").strip().lower()
 if TASK not in {"particle_ugradu", "field_reconstruction"}:
     raise ValueError("GINO_TASK must be particle_ugradu or field_reconstruction")
-if FIELD_DECODER not in {"super_resolution", "pointwise"}:
+if FIELD_DECODER not in {"pointwise","super_resolution"}:
     raise ValueError("GINO_FIELD_DECODER must be super_resolution or pointwise")
 
-print(REPO_ROOT, FINAL_DIR, DEVICE)
+print(TASK,FIELD_DECODER,REPO_ROOT, FINAL_DIR, DEVICE)
 
-
-# In[ ]:
-
-
+# %% cell 6
 DEFAULT_PARTICLE_CHANNELS = [
     "Gamma_x",
     "Gamma_y",
@@ -173,107 +177,98 @@ DEFAULT_PARTICLE_CHANNELS = [
     "geom_nx",
     "geom_ny",
     "geom_nz",
+    "geom_body_near",
     "angle_of_attack",
+    "freestream_x",
+    "freestream_z",
     "phase",
 ]
 DEFAULT_FIELD_CHANNELS = DEFAULT_PARTICLE_CHANNELS
 
-
-# In[ ]:
-
-
-# CFG = {
-#     "seed": SEED,
-#     "task": TASK,
-#     "field_decoder": FIELD_DECODER,
-#     "file_tag": os.environ.get(
-#         "GINO_FILE_TAG",
-#         "task1_particle_ugradu_gino" if TASK == "particle_ugradu" else f"task2_gino_{FIELD_DECODER}",
-#     ),
-#     "epochs": int(os.environ.get("GINO_EPOCHS", "60")),
-#     "lr": float(os.environ.get("GINO_LR", "3e-4")),
-#     "weight_decay": float(os.environ.get("GINO_WEIGHT_DECAY", "1e-4")),
-#     "eval_every": int(os.environ.get("GINO_EVAL_EVERY", "5")),
-#     "gradient_accumulation_steps": int(os.environ.get("GINO_ACCUM_STEPS", "4")),
-#     "grad_clip_norm": float(os.environ.get("GINO_GRAD_CLIP", "1.0")),
-#     "maximum_input_particles": _int_or_none(os.environ.get("GINO_MAX_INPUT_PARTICLES", "2000")),
-#     "maximum_train_output_points": _int_or_none(os.environ.get("GINO_MAX_TRAIN_OUTPUT_POINTS", "2048")),
-#     "maximum_eval_output_points": _int_or_none(os.environ.get("GINO_MAX_EVAL_OUTPUT_POINTS", "32768")),
-#     "batch_size": 1,
-#     "num_workers": int(os.environ.get("GINO_NUM_WORKERS", "0")),
-#     "use_amp": _bool_env("GINO_USE_AMP", True),
-#     "latent_res": int(os.environ.get("GINO_LATENT_RES", "16")),
-#     "in_gno_radius": float(os.environ.get("GINO_IN_RADIUS", "0.35")),
-#     "out_gno_radius": float(os.environ.get("GINO_OUT_RADIUS", "0.40")),
-#     "in_gno_transform_type": os.environ.get("GINO_IN_TRANSFORM", "nonlinear_kernelonly"),
-#     "out_gno_transform_type": os.environ.get("GINO_OUT_TRANSFORM", "linear"),
-#     "gno_embed_channels": int(os.environ.get("GINO_EMBED_CHANNELS", "32")),
-#     "fno_n_modes": tuple(int(x) for x in os.environ.get("GINO_FNO_MODES", "4,4,4").split(",")),
-#     "fno_hidden_channels": int(os.environ.get("GINO_FNO_HIDDEN", "32")),
-#     "fno_n_layers": int(os.environ.get("GINO_FNO_LAYERS", "4")),
-#     "projection_channel_ratio": int(os.environ.get("GINO_PROJ_RATIO", "2")),
-#     "gno_use_open3d": _bool_env("GINO_USE_OPEN3D", True),
-#     "gno_use_torch_scatter": _bool_env("GINO_USE_TORCH_SCATTER", True),
-#     "pointwise_hidden": int(os.environ.get("GINO_POINTWISE_HIDDEN", "96")),
-#     "pointwise_layers": int(os.environ.get("GINO_POINTWISE_LAYERS", "3")),
-# }
-
-
+# %% cell 7
 CFG = {
     # ===== Basic =====
     "seed": SEED,
-    "task": "particle_ugradu",                      # force particle task
-    "field_decoder": "pointwise",                   # lightweight decoder (no output GNO)
-    "file_tag": "task1_particle_ugradu_gino_pointwise",
+    "task": os.environ.get("GINO_TASK", "particle_ugradu").strip().lower(),
+    "field_decoder": os.environ.get("GINO_FIELD_DECODER", "super_resolution").strip().lower(),
+    # Task 1 defaults to the vortex-inspired edge GNO because the current NeuralOperator
+    # GINO run is unstable for particle U/gradU. Set GINO_MODEL_FAMILY=gino for ablations
+    # or for the field-reconstruction task.
+    "model_family": os.environ.get("GINO_MODEL_FAMILY", "edge_gno").strip().lower(),
+    "file_tag": os.environ.get("GINO_FILE_TAG", "task1_particle_ugradu_edge_gno"),
 
     # ===== Training =====
-    "epochs": 30,                                   # quick test; increase later
-    "lr": 1e-3,                                     # slightly higher for faster start
-    "weight_decay": 1e-4,
-    "eval_every": 5,
-    "gradient_accumulation_steps": 4,
-    "grad_clip_norm": 1.0,
+    "epochs": int(os.environ.get("GINO_EPOCHS", "60")),
+    "lr": float(os.environ.get("GINO_LR", "3e-4")),
+    "min_lr": float(os.environ.get("GINO_MIN_LR", "5e-6")),
+    "weight_decay": float(os.environ.get("GINO_WEIGHT_DECAY", "3e-5")),
+    "eval_every": int(os.environ.get("GINO_EVAL_EVERY", "2")),
+    "gradient_accumulation_steps": int(os.environ.get("GINO_ACCUM_STEPS", "4")),
+    "grad_clip_norm": float(os.environ.get("GINO_GRAD_CLIP", "1.0")),
     "batch_size": 1,
-    "num_workers": 0,
+    "num_workers": int(os.environ.get("GINO_NUM_WORKERS", "0")),
 
-    # ===== Sampling (memory & speed) =====
-    "maximum_input_particles": 1000,                # was 2000
-    "maximum_train_output_points": 512,             # was 2048
-    "maximum_eval_output_points": 4096,             # enough for validation
+    # ===== Particle curriculum / evaluation caps =====
+    "particles_per_frame_start": int(os.environ.get("GINO_PARTICLES_START", "1024")),
+    "particles_per_frame_final": int(os.environ.get("GINO_PARTICLES_FINAL", "4096")),
+    "maximum_input_particles": int(os.environ.get("GINO_MAX_INPUT_PARTICLES", "4096")),
+    "maximum_train_output_points": int(os.environ.get("GINO_MAX_TRAIN_OUTPUT_POINTS", "4096")),
+    "maximum_eval_output_points": int(os.environ.get("GINO_MAX_EVAL_OUTPUT_POINTS", "4096")),
+    "eval_max_frames": int(os.environ.get("GINO_EVAL_MAX_FRAMES", "16")),
+    "minimum_target_norm_for_relative_error": float(os.environ.get("GINO_MIN_REL_TARGET_NORM", "1e-6")),
+    "minimum_target_norm_to_keep": float(os.environ.get("GINO_MIN_KEEP_TARGET_NORM", "1e-12")),
 
-    # ===== Mixed precision (disable to avoid complex‑dtype issues) =====
-    "use_amp": False,                               # critical
+    # ===== Loss =====
+    "loss_balance_mode": os.environ.get("GINO_LOSS_BALANCE", "variance_normalized_physical_mse"),
+    "loss_name": os.environ.get("GINO_LOSS_NAME", "mse"),
+    "smooth_l1_beta": float(os.environ.get("GINO_SMOOTH_L1_BETA", "0.06")),
 
-    # ===== GINO architecture =====
-    "latent_res": 8,                                # was 16 → 8× less memory
-    "in_gno_radius": 0.35,
-    "out_gno_radius": 0.40,                         # not used for pointwise, but kept
-    "in_gno_transform_type": "nonlinear_kernelonly",
-    "out_gno_transform_type": "linear",
-    "gno_embed_channels": 32,
-    "fno_n_modes": (4, 4, 4),
-    "fno_hidden_channels": 32,
-    "fno_n_layers": 4,
-    "projection_channel_ratio": 2,
+    # ===== Mixed precision =====
+    "use_amp": _bool_env("GINO_USE_AMP", True),
 
-    # ===== Dependencies (disable to avoid install issues) =====
-    "gno_use_open3d": False,
-    "gno_use_torch_scatter": False,
+    # ===== Vortex-inspired edge GNO for Task 1 =====
+    "edge_hidden_size": int(os.environ.get("GINO_EDGE_HIDDEN", "128")),
+    "edge_graph_layers": int(os.environ.get("GINO_EDGE_LAYERS", "3")),
+    "edge_neighbor_radius": float(os.environ.get("GINO_EDGE_RADIUS", "0.12")),
+    "edge_dropout": float(os.environ.get("GINO_EDGE_DROPOUT", "0.06")),
+    "edge_use_physical_features": _bool_env("GINO_EDGE_PHYSICAL_FEATURES", True),
 
-    # ===== Pointwise decoder (only used when field_decoder='pointwise') =====
-    "pointwise_hidden": 96,
-    "pointwise_layers": 3,
+    # ===== NeuralOperator GINO / latent field path =====
+    "latent_res": int(os.environ.get("GINO_LATENT_RES", "12")),
+    "in_gno_radius": float(os.environ.get("GINO_IN_RADIUS", "0.10")),
+    "out_gno_radius": float(os.environ.get("GINO_OUT_RADIUS", "0.12")),
+    "in_gno_transform_type": os.environ.get("GINO_IN_TRANSFORM", "nonlinear_kernelonly"),
+    "out_gno_transform_type": os.environ.get("GINO_OUT_TRANSFORM", "linear"),
+    "gno_embed_channels": int(os.environ.get("GINO_EMBED_CHANNELS", "24")),
+    "fno_n_modes": tuple(int(x) for x in os.environ.get("GINO_FNO_MODES", "4,4,4").split(",")),
+    "fno_hidden_channels": int(os.environ.get("GINO_FNO_HIDDEN", "24")),
+    "fno_n_layers": int(os.environ.get("GINO_FNO_LAYERS", "4")),
+    "projection_channel_ratio": int(os.environ.get("GINO_PROJ_RATIO", "2")),
+    "gno_use_open3d": _bool_env("GINO_USE_OPEN3D", False),
+    "gno_use_torch_scatter": _bool_env("GINO_USE_TORCH_SCATTER", False),
+    "pointwise_hidden": int(os.environ.get("GINO_POINTWISE_HIDDEN", "96")),
+    "pointwise_layers": int(os.environ.get("GINO_POINTWISE_LAYERS", "3")),
 }
 
+TASK = CFG["task"]
+FIELD_DECODER = CFG["field_decoder"]
+if TASK not in {"particle_ugradu", "field_reconstruction"}:
+    raise ValueError("GINO_TASK must be particle_ugradu or field_reconstruction")
+if FIELD_DECODER not in {"super_resolution", "pointwise"}:
+    raise ValueError("GINO_FIELD_DECODER must be super_resolution or pointwise")
+if CFG["model_family"] not in {"edge_gno", "gino"}:
+    raise ValueError("GINO_MODEL_FAMILY must be edge_gno or gino")
+if TASK != "particle_ugradu" and CFG["model_family"] == "edge_gno":
+    print("[info] edge_gno is particle-only; switching field task to model_family='gino'.")
+    CFG["model_family"] = "gino"
 
-# In[ ]:
-
-
+# %% cell 8
 def _find_task2_dataset() -> Path:
     env = os.environ.get("BACKUP_TASK_DATASET", "").strip()
     candidates = [Path(env)] if env else []
     candidates += [
-        FINAL_DIR / "processed_data" / "Backup Data"/ "task2_fdom_dataset.npz",
+        FINAL_DIR / "processed_data" / "Backup Data" / "task2_fdom_dataset.npz",
+        REPO_ROOT / "final-2" / "processed_data_task2" / "task2_gino_dataset.npz",
     ]
     for candidate in candidates:
         if candidate.exists():
@@ -286,13 +281,14 @@ def _find_particle_dataset() -> Path:
     candidates = [Path(env)] if env else []
     candidates += [
         FINAL_DIR / "processed_data" / "particle_ugradu_dataset.npz",
+        FINAL_DIR / "processed_data" / "task1" / "particle_ugradu_dataset.npz",
+        REPO_ROOT / "final-2" / "processed_data_task1" / "particle_ugradu_dataset.npz",
+        Path("/media/dysco/New Volume1/Neeraj/neuralop/processed_data/particle_ugradu_dataset.npz"),
     ]
     for candidate in candidates:
         if candidate.exists():
             return candidate.resolve()
-    raise FileNotFoundError(
-        "Could not find particle_ugradu_dataset.npz."
-    )
+    raise FileNotFoundError("Could not find particle_ugradu_dataset.npz.")
 
 
 DATASET_PATH = _find_particle_dataset() if TASK == "particle_ugradu" else _find_task2_dataset()
@@ -303,9 +299,18 @@ LAST_CKPT_PATH = RESULTS_DIR / f"{CFG['file_tag']}_last_model.pt"
 HISTORY_PATH = RESULTS_DIR / f"{CFG['file_tag']}_history.json"
 
 
-# In[ ]:
+print("=" * 60)
+print("DATASET_PATH      :", DATASET_PATH)
+print("RESULTS_DIR       :", RESULTS_DIR)
+print("CKPT_PATH         :", CKPT_PATH)
+print("LAST_CKPT_PATH    :", LAST_CKPT_PATH)
+print("HISTORY_PATH      :", HISTORY_PATH)
+print("FINAL_DIR         :", FINAL_DIR)
+print("TASK              :", TASK)
+print("FIELD_DECODER     :", FIELD_DECODER)
+print("=" * 60)
 
-
+# %% cell 9
 def portable_path(path: Path, root: Path) -> str:
     try:
         return str(Path(path).resolve().relative_to(Path(root).resolve()))
@@ -335,10 +340,7 @@ def split_ids(ds, key: str) -> np.ndarray:
         return np.asarray(ds[key], dtype=np.int64)
     return np.zeros((0,), dtype=np.int64)
 
-
-# In[ ]:
-
-
+# %% cell 10
 class BaseGraphDataset(Dataset):
     feature_names_all: List[str]
     target_names: List[str]
@@ -379,8 +381,10 @@ class ParticleUGradUDataset(BaseGraphDataset):
         y = (targets_all[query_idx] - target_mean[None, :]) / target_std[None, :]
         return {
             "input_geom": torch.from_numpy(input_geom),
+            "input_geom_physical": torch.from_numpy(input_features[:, coord_feature_indices].astype(np.float32)),
             "x": torch.from_numpy(np.clip(np.nan_to_num(x), -8.0, 8.0).astype(np.float32)),
             "output_queries": torch.from_numpy(output_queries),
+            "output_indices": torch.from_numpy(out_idx.astype(np.int64)),
             "y": torch.from_numpy(np.nan_to_num(y).astype(np.float32)),
             "frame_id": torch.tensor(frame_id, dtype=torch.long),
         }
@@ -405,16 +409,14 @@ class FieldReconstructionDataset(BaseGraphDataset):
         y = (targets_raw[out_idx] - target_mean[None, :]) / target_std[None, :]
         return {
             "input_geom": torch.from_numpy(normalize_xyz(input_geom_raw[in_idx])),
+            "input_geom_physical": torch.from_numpy(input_geom_raw[in_idx].astype(np.float32)),
             "x": torch.from_numpy(np.clip(np.nan_to_num(x), -8.0, 8.0).astype(np.float32)),
             "output_queries": torch.from_numpy(normalize_xyz(queries_raw[out_idx])),
             "y": torch.from_numpy(np.nan_to_num(y).astype(np.float32)),
             "frame_id": torch.tensor(frame_id, dtype=torch.long),
         }
 
-
-# In[ ]:
-
-
+# %% cell 11
 def resolve_sample_path(path_like, base: Path) -> Path:
     raw = Path(str(path_like))
     candidates = [raw] if raw.is_absolute() else []
@@ -427,14 +429,14 @@ def resolve_sample_path(path_like, base: Path) -> Path:
 
 dataset_file = _safe_np_load(DATASET_PATH)
 
-
-# In[ ]:
-
-
+# %% cell 12
 if TASK == "particle_ugradu":
+
     feature_names_all = [str(x) for x in dataset_file["feature_names"].tolist()]
     target_names = [str(x) for x in dataset_file["target_names"].tolist()]
-    requested_channels = _csv_env("FINAL2_GINO_INPUT_CHANNELS", DEFAULT_PARTICLE_CHANNELS)
+
+    requested_channels = _csv_env("GINO_INPUT_CHANNELS", DEFAULT_PARTICLE_CHANNELS)
+
     train_frame_ids = split_ids(dataset_file, "train_frame_ids")
     val_id_frame_ids = split_ids(dataset_file, "val_id_frame_ids")
     val_angle_frame_ids = split_ids(dataset_file, "validation_angle_frame_ids")
@@ -443,10 +445,14 @@ if TASK == "particle_ugradu":
     test_normal_frame_ids = split_ids(dataset_file, "test_normal_frame_ids")
     if len(test_normal_frame_ids) == 0:
         test_normal_frame_ids = split_ids(dataset_file, "test_frame_ids")
+
+    
     test_spatial_sr_frame_ids = split_ids(dataset_file, "test_super_resolution_frame_ids")
     test_temporal_sr_frame_ids = np.zeros((0,), dtype=np.int64)
     test_unseen_angle_frame_ids = split_ids(dataset_file, "test_unseen_angle_frame_ids")
+   
     coord_feature_indices = np.asarray([feature_names_all.index(k) for k in ("x", "y", "z")], dtype=np.int64)
+    
     if "coord_min" in dataset_file.files and "coord_span" in dataset_file.files:
         coord_min = np.asarray(dataset_file["coord_min"], dtype=np.float32).reshape(3)
         coord_span = np.asarray(dataset_file["coord_span"], dtype=np.float32).reshape(3)
@@ -455,10 +461,12 @@ if TASK == "particle_ugradu":
         coord_min = np.min(xyz_flat, axis=0).astype(np.float32)
         coord_span = np.ptp(xyz_flat, axis=0).astype(np.float32)
     grid_resolution = (0, 0, 0)
+
+
 else:
     feature_names_all = [str(x) for x in dataset_file["feature_names"].tolist()]
     target_names = [str(x) for x in dataset_file["target_names"].tolist()]
-    requested_channels = _csv_env("FINAL2_GINO_INPUT_CHANNELS", DEFAULT_FIELD_CHANNELS)
+    requested_channels = _csv_env("GINO_INPUT_CHANNELS", DEFAULT_FIELD_CHANNELS)
     sample_paths = [resolve_sample_path(p, DATASET_PATH.parent) for p in dataset_file["sample_paths"].tolist()]
     train_frame_ids = split_ids(dataset_file, "train_frame_ids")
     val_id_frame_ids = split_ids(dataset_file, "val_id_frame_ids")
@@ -474,12 +482,13 @@ else:
 
 missing_channels = [name for name in requested_channels if name not in feature_names_all]
 if missing_channels:
-    raise KeyError(f"Requested input channels not in processed data: {missing_channels}. Available: {feature_names_all}")
+    env_channels = os.environ.get("GINO_INPUT_CHANNELS", "").strip()
+    if env_channels:
+        raise KeyError(f"Requested input channels not in processed data: {missing_channels}. Available: {feature_names_all}")
+    print(f"[warn] Default channels missing from this dataset and will be skipped: {missing_channels}")
+    requested_channels = [name for name in requested_channels if name in feature_names_all]
 
-
-# In[ ]:
-
-
+# %% cell 13
 active_input_feature_indices = [feature_names_all.index(name) for name in requested_channels]
 feature_names = [feature_names_all[i] for i in active_input_feature_indices]
 removed_input_features = [name for name in feature_names_all if name not in feature_names]
@@ -492,37 +501,55 @@ target_mean = np.asarray(dataset_file["out_mean"], dtype=np.float32).reshape(-1)
 target_std = np.maximum(np.asarray(dataset_file["out_std"], dtype=np.float32).reshape(-1), 1e-8)
 coord_span = np.maximum(np.asarray(coord_span, dtype=np.float32), 1e-8)
 
+# %% [markdown]
+# Snippet to see the input channels and the output channels
 
-# In[ ]:
+# %% cell 15
+print('All stored input features:')
+print(feature_names_all)
+print()
+print('Model input features after channel selection:')
+print(feature_names)
+print()
+print('Removed input features:')
+print(removed_input_features if removed_input_features else 'none')
+print()
+print('Output target names:')
+print(target_names)
+print()
 
-
-# print('Number of frames      :', len(inputs_by_frame_normalized))
-# print('Input feature count   :', input_dimension)
-# print('Output target count   :', output_dimension)
-# print('Training frames       :', len(training_frame_ids))
-# print('Validation frames     :', len(validation_frame_ids), '(same-distribution frames from training cases)')
-# print('Held-out angle validation frames:', len(validation_angle_frame_ids))
-# print('Testing frames        :', len(testing_frame_ids))
-# print('  normal test frames  :', len(testing_normal_frame_ids))
-# print('  super-res test frames:', len(testing_super_resolution_frame_ids))
-# print('  unseen-angle frames :', len(testing_unseen_angle_frame_ids))
-# print('Input feature names   :', feature_names)
-# print('Freestream vector channels used:', use_freestream_vector_features_as_model_input)
-# print('Removed input features:', removed_input_features if removed_input_features else 'none')
-# print('Output target names   :', target_names)
-# if not has_validation_data:
-#     print('[info] No validation frames yet. The notebook will skip validation plots/metrics until those cases exist.')
-# if not has_testing_data:
-#     print('[info] No testing frames yet. The notebook will skip testing plots/metrics until those cases exist.')
-
-
-
-
-# In[ ]:
-
-
+# %% cell 16
 def normalize_xyz(xyz: np.ndarray) -> np.ndarray:
     return np.clip((xyz.astype(np.float32) - coord_min[None, :]) / coord_span[None, :], 0.0, 1.0).astype(np.float32)
+
+
+def target_norm_for_frame(frame_id: int) -> float:
+    target = np.asarray(dataset_file["targets_by_frame"][int(frame_id)], dtype=np.float32)
+    return float(np.linalg.norm(np.nan_to_num(target).reshape(-1)))
+
+
+def filter_zero_target_frames(frame_ids: np.ndarray, split_name: str, minimum_norm: float) -> np.ndarray:
+    kept, removed = [], []
+    for frame_id in np.asarray(frame_ids, dtype=np.int64):
+        norm_value = target_norm_for_frame(int(frame_id))
+        if np.isfinite(norm_value) and norm_value > minimum_norm:
+            kept.append(int(frame_id))
+        else:
+            context = as_context(dataset_file["frame_contexts"][int(frame_id)]) if "frame_contexts" in dataset_file.files else {}
+            removed.append((int(frame_id), context.get("case", "unknown"), context.get("frame", "unknown"), norm_value))
+    if removed:
+        print(f"[filter] {split_name}: removed {len(removed)} tiny/zero-target frames; examples={removed[:3]}")
+    return np.asarray(kept, dtype=np.int64)
+
+
+minimum_target_norm_to_keep = float(CFG["minimum_target_norm_to_keep"])
+if TASK == "particle_ugradu":
+    train_frame_ids = filter_zero_target_frames(train_frame_ids, "train", minimum_target_norm_to_keep)
+    val_id_frame_ids = filter_zero_target_frames(val_id_frame_ids, "val_id", minimum_target_norm_to_keep)
+    val_angle_frame_ids = filter_zero_target_frames(val_angle_frame_ids, "val_angle", minimum_target_norm_to_keep)
+    test_normal_frame_ids = filter_zero_target_frames(test_normal_frame_ids, "test_normal", minimum_target_norm_to_keep)
+    test_spatial_sr_frame_ids = filter_zero_target_frames(test_spatial_sr_frame_ids, "test_spatial_sr", minimum_target_norm_to_keep)
+    test_unseen_angle_frame_ids = filter_zero_target_frames(test_unseen_angle_frame_ids, "test_unseen_angle", minimum_target_norm_to_keep)
 
 
 def make_dataset(frame_ids: np.ndarray, split_name: str, shuffle: bool, max_output_points: Optional[int]):
@@ -545,6 +572,7 @@ test_ds, test_loader = make_dataset(testing_frame_ids, "test", False, CFG["maxim
 
 print("=" * 72)
 print("Task        :", TASK)
+print("Model family:", CFG["model_family"])
 print("Field decoder:", FIELD_DECODER if TASK == "field_reconstruction" else "n/a")
 print("Dataset     :", DATASET_PATH)
 print("Results dir :", RESULTS_DIR)
@@ -564,10 +592,150 @@ print("Splits      :", {k: len(v) for k, v in {
 print("Config      :", json.dumps(CFG, indent=2))
 print("=" * 72)
 
+# %% [markdown]
+# should be run in the preprocessing script as removal occurs in that file
 
-# In[ ]:
+# %% cell 18
+import numpy as np
+from collections import defaultdict
 
+# ------------------------------------------------------------
+# 1. Helper: get case name and per‑case frame number from a frame_id
+# ------------------------------------------------------------
+def get_case_and_frame(frame_id: int):
+    # Access frame_contexts from the dataset file
+    contexts = list(dataset_file["frame_contexts"])
+    context = as_context(contexts[frame_id])
+    case = context.get("case", context.get("case_name", "unknown"))
+    # Per‑case frame number (may be stored as 'frame' or 'fr')
+    frame_num = int(context.get("frame", context.get("fr", 0)))
+    return case, frame_num
 
+# ------------------------------------------------------------
+# 2. Collect all original frame IDs from all splits (before filtering)
+# ------------------------------------------------------------
+all_original_ids = np.concatenate([
+    split_ids(dataset_file, "train_frame_ids"),
+    split_ids(dataset_file, "val_id_frame_ids"),
+    split_ids(dataset_file, "validation_angle_frame_ids"),
+    split_ids(dataset_file, "test_normal_frame_ids"),
+    split_ids(dataset_file, "test_super_resolution_frame_ids"),
+    split_ids(dataset_file, "test_unseen_angle_frame_ids"),
+])
+# Remove duplicates and sort
+all_original_ids = np.unique(all_original_ids)
+
+# Current kept frames (after zero‑target filtering) – these are your current split arrays
+kept_ids = set(train_frame_ids.tolist() + val_id_frame_ids.tolist() +
+               val_angle_frame_ids.tolist() + test_normal_frame_ids.tolist() +
+               test_spatial_sr_frame_ids.tolist() + test_unseen_angle_frame_ids.tolist())
+
+# Removed frames = all_original_ids - kept_ids
+removed_ids = sorted(set(all_original_ids) - kept_ids)
+
+# ------------------------------------------------------------
+# 3. Group kept/removed per case
+# ------------------------------------------------------------
+case_kept = defaultdict(list)
+case_removed = defaultdict(list)
+
+for fid in all_original_ids:
+    case, fnum = get_case_and_frame(fid)
+    if fid in kept_ids:
+        case_kept[case].append(fnum)
+    else:
+        case_removed[case].append((fnum, fid))
+
+# Sort per‑case lists
+for case in case_kept:
+    case_kept[case].sort()
+for case in case_removed:
+    case_removed[case].sort(key=lambda x: x[0])
+
+# ------------------------------------------------------------
+# 4. Print statistics and examples
+# ------------------------------------------------------------
+print("=" * 80)
+print("DIAGNOSTIC: Frame filtering analysis")
+print("=" * 80)
+
+print(f"Total original frames (all splits): {len(all_original_ids)}")
+print(f"Total kept frames (after filtering): {len(kept_ids)}")
+print(f"Total removed frames: {len(removed_ids)}")
+print()
+
+print("Per‑case kept frame counts (expected ~200 per case, minus early transients):")
+for case, frames in sorted(case_kept.items()):
+    print(f"  {case}: {len(frames)} frames kept")
+
+print("\nPer‑case removed frame count and examples:")
+for case, removed in sorted(case_removed.items()):
+    print(f"  {case}: {len(removed)} frames removed")
+    if removed:
+        # Show first few removed frames with their per‑case frame number and particle count / target norm
+        examples = removed[:5]
+        for fnum, fid in examples:
+            # Get particle count and target norm for this frame
+            try:
+                features = np.asarray(dataset_file["inputs_by_frame"][fid], dtype=np.float32)
+                targets = np.asarray(dataset_file["targets_by_frame"][fid], dtype=np.float32)
+                n_particles = features.shape[0]
+                target_norm = np.linalg.norm(targets.reshape(-1))
+                # Get context to see the physical frame number
+                context = as_context(list(dataset_file["frame_contexts"])[fid])
+                phys_frame = context.get("frame", context.get("fr", "?"))
+                print(f"      frame {fnum} (global {fid}, phys {phys_frame}) | particles={n_particles}, target_norm={target_norm:.2e}")
+            except Exception as e:
+                print(f"      frame {fnum} (global {fid}) -> error retrieving data: {e}")
+        if len(removed) > 5:
+            print(f"      ... and {len(removed)-5} more removed frames.")
+
+# ------------------------------------------------------------
+# 5. Count zero‑particle and zero‑target removed frames
+# ------------------------------------------------------------
+print("\nDetailed check for removed frames that might be startup / zero‑target:")
+zero_particle = []
+zero_target = []
+for fid in removed_ids:
+    try:
+        features = np.asarray(dataset_file["inputs_by_frame"][fid], dtype=np.float32)
+        targets = np.asarray(dataset_file["targets_by_frame"][fid], dtype=np.float32)
+        n_particles = features.shape[0]
+        target_norm = np.linalg.norm(targets.reshape(-1))
+        if n_particles == 0:
+            zero_particle.append(fid)
+        if target_norm < 1e-12:
+            zero_target.append(fid)
+    except:
+        pass
+
+print(f"  Removed frames with zero particles: {len(zero_particle)}")
+print(f"  Removed frames with zero target norm: {len(zero_target)}")
+if zero_target:
+    print("    Examples (global frame IDs):", zero_target[:10])
+
+# %% [markdown]
+# Reasons for mismatching frame ids and frame reset ids
+# - Start-up frames
+# - No particle frames
+# - Zero target frames (early transients)
+# - Validation and test case removal?
+
+# %% cell 20
+sample = train_ds[100]
+print("input_geom shape:", sample["input_geom"].shape)
+print("input_geom min/max:", sample["input_geom"].min().item(), sample["input_geom"].max().item())
+print("x shape:", sample["x"].shape)
+print("output_queries shape:", sample["output_queries"].shape)
+print("y shape:", sample["y"].shape)
+print("frame_id:", sample["frame_id"].item())
+
+# %% [markdown]
+# Output queries - matrix of dimension N (particles) with spatial coordinates of each particle. Locations where the y (N,12) is queried
+# 
+# Input_geom - (N,3) of spatial coordinates of particles. See where is it inputted to the model instead of the input channel?
+
+# %% cell 22
 # Loader sanity check: catches stale dataset definitions before the long training loop.
 _probe_batch = next(iter(train_loader))
 print("loader sanity input_geom", tuple(_probe_batch["input_geom"].shape))
@@ -575,10 +743,7 @@ print("loader sanity x", tuple(_probe_batch["x"].shape))
 print("loader sanity output_queries", tuple(_probe_batch["output_queries"].shape))
 print("loader sanity y", tuple(_probe_batch["y"].shape))
 
-
-# In[ ]:
-
-
+# %% cell 23
 def make_latent_queries(res: int, device: torch.device) -> torch.Tensor:
     line = torch.linspace(0.0, 1.0, int(res), dtype=torch.float32, device=device)
     xx, yy, zz = torch.meshgrid(line, line, line, indexing="ij")
@@ -587,10 +752,7 @@ def make_latent_queries(res: int, device: torch.device) -> torch.Tensor:
 
 LATENT_QUERIES = make_latent_queries(CFG["latent_res"], DEVICE)
 
-
-# In[ ]:
-
-
+# %% cell 24
 def build_neuralop_gino(cfg: Dict) -> nn.Module:
     if GINO is None:
         raise RuntimeError("neuralop.models.GINO is not available") from GINO_IMPORT_ERROR
@@ -614,10 +776,7 @@ def build_neuralop_gino(cfg: Dict) -> nn.Module:
     return GINO(**{k: v for k, v in kwargs.items() if k in accepted}).to(DEVICE)
 
 
-
-# In[ ]:
-
-
+# %% cell 25
 class PointwiseLatentGINO(nn.Module):
     """GNO encoder + latent grid + trilinear pointwise decoder.
 
@@ -678,10 +837,140 @@ class PointwiseLatentGINO(nn.Module):
         return torch.stack(outs, dim=0)
 
 
-# In[ ]:
+class EdgeFeatureMessageBlock(nn.Module):
+    """Radius-graph block with vortex-inspired pairwise features."""
+
+    def __init__(self, hidden_size: int, neighbor_radius: float, use_open3d_neighbor_search: bool = False, dropout: float = 0.04):
+        super().__init__()
+        if NeighborSearch is None:
+            raise RuntimeError("neuralop.layers.neighbor_search.NeighborSearch is not available") from NEIGHBOR_SEARCH_IMPORT_ERROR
+        self.neighbor_radius = float(neighbor_radius)
+        self.neighbor_search = NeighborSearch(use_open3d=bool(use_open3d_neighbor_search), return_norm=False)
+        edge_feature_size = 2 * int(hidden_size) + 14
+        self.message_network = nn.Sequential(
+            nn.Linear(edge_feature_size, hidden_size),
+            nn.GELU(),
+            nn.Dropout(float(dropout)),
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, hidden_size),
+        )
+        self.normalization = nn.LayerNorm(hidden_size)
+
+    def forward(self, hidden: torch.Tensor, search_positions: torch.Tensor, edge_positions: torch.Tensor, gamma_values: torch.Tensor, sigma_values: torch.Tensor) -> torch.Tensor:
+        neighbors = self.neighbor_search(data=search_positions, queries=search_positions, radius=self.neighbor_radius)
+        source_index = neighbors["neighbors_index"].long()
+        row_splits = neighbors["neighbors_row_splits"].long()
+        neighbor_counts = row_splits[1:] - row_splits[:-1]
+        if source_index.numel() == 0:
+            return hidden
+        target_index = torch.repeat_interleave(torch.arange(search_positions.shape[0], device=search_positions.device), neighbor_counts)
+        relative_position = edge_positions[source_index] - edge_positions[target_index]
+        distance = torch.linalg.norm(relative_position, dim=-1, keepdim=True)
+        sigma_source = sigma_values[source_index].abs().clamp_min(1.0e-8)
+        sigma_target = sigma_values[target_index].abs().clamp_min(1.0e-8)
+        edge_features = torch.cat([
+            hidden[source_index],
+            hidden[target_index],
+            relative_position,
+            distance,
+            distance / sigma_source,
+            distance / sigma_target,
+            gamma_values[source_index],
+            gamma_values[target_index],
+            sigma_source,
+            sigma_target,
+        ], dim=-1)
+        messages = self.message_network(edge_features)
+        aggregated = torch.zeros_like(hidden)
+        aggregated.index_add_(0, target_index, messages)
+        aggregated = aggregated / neighbor_counts.to(hidden.dtype).clamp_min(1.0).unsqueeze(-1)
+        return self.normalization(hidden + aggregated)
 
 
+class ParticleEdgeGNO(nn.Module):
+    """Particle U/gradU model used for stable Task-1 training.
+
+    It predicts all input particles, then gathers the requested query subset. This
+    matches the Task-1 dataset where output queries are sampled from input particles.
+    """
+
+    uses_output_indices = True
+
+    def __init__(self, in_channels: int, out_channels: int, cfg: Dict, feature_names: Sequence[str], input_mean_np: np.ndarray, input_std_np: np.ndarray):
+        super().__init__()
+        hidden = int(cfg["edge_hidden_size"])
+        dropout = float(cfg["edge_dropout"])
+        self.feature_names = list(feature_names)
+        self.use_physical_features = bool(cfg["edge_use_physical_features"])
+        self.register_buffer("input_mean", torch.as_tensor(input_mean_np, dtype=torch.float32).reshape(1, -1))
+        self.register_buffer("input_std", torch.as_tensor(input_std_np, dtype=torch.float32).reshape(1, -1))
+        self.sigma_index = self.feature_names.index("sigma") if "sigma" in self.feature_names else -1
+        self.gamma_indices = [self.feature_names.index(name) for name in ("Gamma_x", "Gamma_y", "Gamma_z") if name in self.feature_names]
+        if len(self.gamma_indices) != 3:
+            self.gamma_indices = []
+        self.input_network = nn.Sequential(
+            nn.Linear(in_channels, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+            nn.Linear(hidden, hidden),
+        )
+        self.graph_blocks = nn.ModuleList([
+            EdgeFeatureMessageBlock(
+                hidden_size=hidden,
+                neighbor_radius=float(cfg["edge_neighbor_radius"]),
+                use_open3d_neighbor_search=bool(cfg["gno_use_open3d"]),
+                dropout=dropout,
+            )
+            for _ in range(int(cfg["edge_graph_layers"]))
+        ])
+        self.output_network = nn.Sequential(
+            nn.Linear(hidden, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, out_channels),
+        )
+        self.backend_information = {
+            "model_family": "edge_gno",
+            "neighbor_radius": float(cfg["edge_neighbor_radius"]),
+            "edge_features": "dx, distance, distance/sigma, Gamma source/target, sigma source/target",
+        }
+
+    def physical_feature_values(self, x: torch.Tensor) -> torch.Tensor:
+        if not self.use_physical_features:
+            return x
+        return x * self.input_std.to(dtype=x.dtype, device=x.device) + self.input_mean.to(dtype=x.dtype, device=x.device)
+
+    def forward(self, input_geom: torch.Tensor, latent_queries: torch.Tensor, output_queries: torch.Tensor, x: torch.Tensor, output_indices: Optional[torch.Tensor] = None, input_geom_physical: Optional[torch.Tensor] = None) -> torch.Tensor:
+        outs = []
+        for b in range(int(x.shape[0])):
+            xb = x[b]
+            search_positions = input_geom[b]
+            edge_positions = input_geom_physical[b] if input_geom_physical is not None else search_positions
+            physical_features = self.physical_feature_values(xb)
+            if self.sigma_index >= 0:
+                sigma_values = physical_features[:, self.sigma_index:self.sigma_index + 1]
+            else:
+                sigma_values = torch.ones((xb.shape[0], 1), device=xb.device, dtype=xb.dtype)
+            if self.gamma_indices:
+                gamma_values = physical_features[:, self.gamma_indices]
+            else:
+                gamma_values = torch.zeros((xb.shape[0], 3), device=xb.device, dtype=xb.dtype)
+            hidden = self.input_network(xb)
+            for block in self.graph_blocks:
+                hidden = block(hidden, search_positions, edge_positions, gamma_values, sigma_values)
+            pred_all = self.output_network(hidden)
+            if output_indices is not None:
+                pred_all = pred_all[output_indices[b].long()]
+            outs.append(pred_all)
+        return torch.stack(outs, dim=0)
+
+# %% cell 26
 def build_model(cfg: Dict) -> nn.Module:
+    if TASK == "particle_ugradu" and cfg["model_family"] == "edge_gno":
+        return ParticleEdgeGNO(len(feature_names), len(target_names), cfg, feature_names, input_mean, input_std).to(DEVICE)
     if TASK == "field_reconstruction" and FIELD_DECODER == "pointwise":
         return PointwiseLatentGINO(len(feature_names), len(target_names), cfg).to(DEVICE)
     return build_neuralop_gino(cfg)
@@ -692,100 +981,170 @@ TOTAL_PARAMS = count_model_params(MODEL)
 TRAINABLE_PARAMS = sum(p.numel() for p in MODEL.parameters() if p.requires_grad)
 print("Latent queries:", tuple(LATENT_QUERIES.shape))
 print("Parameters    :", f"{TOTAL_PARAMS:,}", "total /", f"{TRAINABLE_PARAMS:,}", "trainable")
+if hasattr(MODEL, "backend_information"):
+    print("Backend       :", MODEL.backend_information)
 
 target_mean_t = torch.tensor(target_mean, dtype=torch.float32, device=DEVICE).view(1, 1, -1)
 target_std_t = torch.tensor(target_std, dtype=torch.float32, device=DEVICE).view(1, 1, -1)
 target_var_t = torch.tensor(target_std**2, dtype=torch.float32, device=DEVICE).view(1, 1, -1).clamp_min(1e-12)
 
-
-# In[ ]:
-
-
+# %% cell 27
 def move_batch(batch: Dict) -> Dict:
     return {k: (v.to(DEVICE, non_blocking=True) if torch.is_tensor(v) else v) for k, v in batch.items()}
 
 
 def predict(model: nn.Module, batch: Dict) -> torch.Tensor:
-    return model(
+    kwargs = dict(
         input_geom=batch["input_geom"],
         latent_queries=LATENT_QUERIES,
         output_queries=batch["output_queries"],
         x=batch["x"],
     )
+    if getattr(model, "uses_output_indices", False) and "output_indices" in batch:
+        kwargs["output_indices"] = batch["output_indices"]
+    if "input_geom_physical" in batch:
+        kwargs["input_geom_physical"] = batch["input_geom_physical"]
+    return model(**kwargs)
 
 
 def denormalize_target(y_norm: torch.Tensor) -> torch.Tensor:
     return y_norm * target_std_t + target_mean_t
 
 
-def relative_l2(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
+def relative_l2(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-12, minimum_norm: Optional[float] = None) -> torch.Tensor:
     diff = (pred - target).reshape(pred.shape[0], -1)
     ref = target.reshape(target.shape[0], -1)
-    return torch.linalg.norm(diff, dim=1) / torch.linalg.norm(ref, dim=1).clamp_min(eps)
+    ref_norm = torch.linalg.norm(ref, dim=1)
+    rel = torch.linalg.norm(diff, dim=1) / ref_norm.clamp_min(eps)
+    if minimum_norm is not None:
+        rel = torch.where(ref_norm > float(minimum_norm), rel, torch.full_like(rel, torch.nan))
+    return rel
 
 
-# def grouped_training_loss(pred: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-#     pred_phys = denormalize_target(pred)
-#     target_phys = denormalize_target(target)
-#     mse_per_channel = torch.mean((pred_phys - target_phys) ** 2, dim=(0, 1))
-#     scaled = mse_per_channel / target_var_t.reshape(-1)
-#     if len(target_names) == 12:
-#         primary = torch.mean(scaled[:3])
-#         secondary = torch.mean(scaled[3:])
-#     elif len(target_names) >= 6:
-#         primary = torch.mean(scaled[:3])
-#         secondary = torch.mean(scaled[3:6])
-#     else:
-#         primary = torch.mean(scaled)
-#         secondary = torch.zeros((), dtype=primary.dtype, device=primary.device)
-#     return primary + secondary, primary.detach(), secondary.detach()
+def training_task_standard_deviations(frame_ids: np.ndarray) -> Tuple[float, float]:
+    velocity_count = gradient_count = 0
+    velocity_sum = velocity_square_sum = 0.0
+    gradient_sum = gradient_square_sum = 0.0
+    for frame_id in np.asarray(frame_ids, dtype=np.int64):
+        target = np.asarray(dataset_file["targets_by_frame"][int(frame_id)], dtype=np.float64)
+        velocity = target[:, :3].reshape(-1)
+        gradient = target[:, 3:].reshape(-1)
+        velocity_count += velocity.size
+        velocity_sum += float(velocity.sum())
+        velocity_square_sum += float(np.dot(velocity, velocity))
+        gradient_count += gradient.size
+        gradient_sum += float(gradient.sum())
+        gradient_square_sum += float(np.dot(gradient, gradient))
+    velocity_mean = velocity_sum / max(velocity_count, 1)
+    gradient_mean = gradient_sum / max(gradient_count, 1)
+    velocity_variance = max(velocity_square_sum / max(velocity_count, 1) - velocity_mean ** 2, 1e-12)
+    gradient_variance = max(gradient_square_sum / max(gradient_count, 1) - gradient_mean ** 2, 1e-12)
+    return float(np.sqrt(velocity_variance)), float(np.sqrt(gradient_variance))
 
 
-def grouped_training_loss(pred, target):
-    pred_phys = denormalize_target(pred)
-    target_phys = denormalize_target(target)
-    mse = torch.mean((pred_phys - target_phys) ** 2)
-    # Optional: separate losses for logging velocity / gradient
-    vel_mse = torch.mean((pred_phys[:, :3] - target_phys[:, :3]) ** 2)
-    grad_mse = torch.mean((pred_phys[:, 3:] - target_phys[:, 3:]) ** 2)
-    return mse, vel_mse.detach(), grad_mse.detach()
+velocity_task_std_value, gradient_task_std_value = training_task_standard_deviations(train_frame_ids)
+velocity_task_std = torch.tensor(velocity_task_std_value, dtype=torch.float32, device=DEVICE)
+gradient_task_std = torch.tensor(gradient_task_std_value, dtype=torch.float32, device=DEVICE)
+minimum_target_norm_for_relative_error = float(CFG["minimum_target_norm_for_relative_error"])
+print("Training velocity std:", f"{velocity_task_std_value:.6e}")
+print("Training gradU std   :", f"{gradient_task_std_value:.6e}")
 
 
-# In[ ]:
+def channel_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    if CFG["loss_name"] == "mse":
+        return (prediction - target) ** 2
+    if CFG["loss_name"] == "smooth_l1":
+        return F.smooth_l1_loss(prediction, target, reduction="none", beta=float(CFG["smooth_l1_beta"]))
+    if CFG["loss_name"] == "relative_l2":
+        numerator = (prediction - target) ** 2
+        denominator = torch.mean(target ** 2, dim=(0, 1), keepdim=True).clamp_min(1e-8)
+        return numerator / denominator
+    raise ValueError(f"Unknown loss_name: {CFG['loss_name']}")
+
+
+def grouped_training_loss(pred: torch.Tensor, target: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if CFG["loss_balance_mode"] == "variance_normalized_physical_mse":
+        pred_phys = denormalize_target(pred)
+        target_phys = denormalize_target(target)
+        velocity_loss = torch.mean((pred_phys[..., :3] - target_phys[..., :3]) ** 2) / velocity_task_std.clamp_min(1e-12).pow(2)
+        gradient_loss = torch.mean((pred_phys[..., 3:] - target_phys[..., 3:]) ** 2) / gradient_task_std.clamp_min(1e-12).pow(2)
+        return velocity_loss + gradient_loss, velocity_loss.detach(), gradient_loss.detach()
+
+    point_loss = channel_loss(pred, target)
+    velocity_loss = point_loss[..., :3].mean()
+    gradient_loss = point_loss[..., 3:].mean()
+    if CFG["loss_balance_mode"] == "equal_task_mean":
+        total = 0.5 * velocity_loss + 0.5 * gradient_loss
+    elif CFG["loss_balance_mode"] == "manual":
+        total = velocity_loss + gradient_loss
+    else:
+        raise ValueError(f"Unknown loss_balance_mode: {CFG['loss_balance_mode']}")
+    return total, velocity_loss.detach(), gradient_loss.detach()
+
+
+def particle_cap_for_epoch(epoch_number: int) -> int:
+    if int(CFG["epochs"]) <= 1:
+        return int(CFG["particles_per_frame_final"])
+    progress = (int(epoch_number) - 1) / max(int(CFG["epochs"]) - 1, 1)
+    start = int(CFG["particles_per_frame_start"])
+    final = int(CFG["particles_per_frame_final"])
+    return int(round((1.0 - progress) * start + progress * final))
+
+# %% cell 28
+def finite_mean(values: Sequence[float]) -> float:
+    finite = [float(v) for v in values if np.isfinite(v)]
+    return float(np.mean(finite)) if finite else np.nan
 
 
 @torch.no_grad()
-def evaluate(model: nn.Module, loader: DataLoader, collect: bool = False) -> Dict:
+def evaluate(model: nn.Module, loader: DataLoader, collect: bool = False, maximum_frames: Optional[int] = None) -> Dict:
     model.eval()
+    empty = {"loss": math.nan, "rel_l2_norm": math.nan, "rel_l2_phys": math.nan, "rmse_phys": math.nan, "mae_phys": math.nan, "frames_evaluated": 0, "frames_skipped_for_relative_error": 0, "rel_per_sample": np.asarray([], dtype=np.float32)}
     if len(loader.dataset) == 0:
-        return {"loss": math.nan, "rel_l2_norm": math.nan, "rel_l2_phys": math.nan, "rmse_phys": math.nan, "mae_phys": math.nan, "rel_per_sample": np.asarray([], dtype=np.float32)}
-    sums = defaultdict(float)
+        return empty
+    indices = np.arange(len(loader.dataset), dtype=np.int64)
+    if maximum_frames is not None and len(indices) > int(maximum_frames):
+        rng = np.random.default_rng(CFG["seed"] + 6701)
+        indices = np.sort(rng.choice(indices, size=int(maximum_frames), replace=False))
+    losses, rel_norms, rel_phys_values, rmses, maes = [], [], [], [], []
     rels = []
-    n = 0
-    for batch in loader:
-        batch = move_batch(batch)
+    skipped = 0
+    for dataset_index in indices:
+        batch = move_batch(loader.dataset[int(dataset_index)])
+        batch = {k: (v.unsqueeze(0) if torch.is_tensor(v) and k != "frame_id" else v) for k, v in batch.items()}
+        if torch.is_tensor(batch.get("frame_id")) and batch["frame_id"].ndim == 0:
+            batch["frame_id"] = batch["frame_id"].view(1)
         pred = predict(model, batch)
         y = batch["y"]
         loss, _, _ = grouped_training_loss(pred, y)
         pred_phys = denormalize_target(pred)
         y_phys = denormalize_target(y)
-        sums["loss"] += float(loss.item())
-        sums["rel_l2_norm"] += float(relative_l2(pred, y).mean().item())
-        sums["rel_l2_phys"] += float(relative_l2(pred_phys, y_phys).mean().item())
-        sums["rmse_phys"] += float(torch.sqrt(torch.mean((pred_phys - y_phys) ** 2)).item())
-        sums["mae_phys"] += float(torch.mean(torch.abs(pred_phys - y_phys)).item())
-        if collect:
-            rels.extend(relative_l2(pred_phys, y_phys).detach().cpu().numpy().tolist())
-        n += 1
-    out = {k: v / max(n, 1) for k, v in sums.items()}
+        rel_phys = relative_l2(pred_phys, y_phys, minimum_norm=minimum_target_norm_for_relative_error)
+        rel_norm = relative_l2(pred, y, minimum_norm=minimum_target_norm_for_relative_error)
+        losses.append(float(loss.item()))
+        rel_norms.append(float(torch.nanmean(rel_norm).item()) if torch.isfinite(rel_norm).any() else np.nan)
+        rel_phys_values.append(float(torch.nanmean(rel_phys).item()) if torch.isfinite(rel_phys).any() else np.nan)
+        rmses.append(float(torch.sqrt(torch.mean((pred_phys - y_phys) ** 2)).item()))
+        maes.append(float(torch.mean(torch.abs(pred_phys - y_phys)).item()))
+        finite_rel = rel_phys[torch.isfinite(rel_phys)]
+        if finite_rel.numel() == 0:
+            skipped += 1
+        elif collect:
+            rels.extend(finite_rel.detach().cpu().numpy().tolist())
+    out = {
+        "loss": finite_mean(losses),
+        "rel_l2_norm": finite_mean(rel_norms),
+        "rel_l2_phys": finite_mean(rel_phys_values),
+        "rmse_phys": finite_mean(rmses),
+        "mae_phys": finite_mean(maes),
+        "frames_evaluated": int(len(indices)),
+        "frames_skipped_for_relative_error": int(skipped),
+    }
     if collect:
         out["rel_per_sample"] = np.asarray(rels, dtype=np.float32)
     return out
 
-
-# In[ ]:
-
-
+# %% cell 29
 history = {
     "epoch": [],
     "train_loss": [],
@@ -802,22 +1161,29 @@ history = {
     "train_batches": [],
 }
 
-
-# In[ ]:
-
-
+# %% cell 30
 optimizer = torch.optim.AdamW(MODEL.parameters(), lr=CFG["lr"], weight_decay=CFG["weight_decay"])
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(int(CFG["epochs"]), 1))
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    optimizer,
+    T_max=max(int(CFG["epochs"]), 1),
+    eta_min=float(CFG["min_lr"]),
+)
+use_amp = bool(DEVICE.type == "cuda" and CFG["use_amp"])
+mixed_precision_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
 try:
-    scaler = torch.amp.GradScaler("cuda", enabled=(DEVICE.type == "cuda" and CFG["use_amp"]))
+    scaler = torch.amp.GradScaler("cuda", enabled=(use_amp and mixed_precision_dtype == torch.float16))
 except TypeError:  # older torch
-    scaler = torch.cuda.amp.GradScaler(enabled=(DEVICE.type == "cuda" and CFG["use_amp"]))
-autocast_options = dict(device_type=DEVICE.type, enabled=(DEVICE.type == "cuda" and CFG["use_amp"]))
+    scaler = torch.cuda.amp.GradScaler(enabled=(use_amp and mixed_precision_dtype == torch.float16))
+autocast_options = dict(device_type=DEVICE.type, dtype=mixed_precision_dtype, enabled=use_amp)
+if DEVICE.type == "cuda":
+    torch.backends.cudnn.benchmark = True
+    try:
+        torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
+print("AMP:", use_amp, mixed_precision_dtype)
 
-
-# In[ ]:
-
-
+# %% cell 31
 def checkpoint_payload(tag: str, score: float, extra_metrics: Optional[Dict] = None) -> Dict:
     payload = {
         "checkpoint_tag": tag,
@@ -840,6 +1206,8 @@ def checkpoint_payload(tag: str, score: float, extra_metrics: Optional[Dict] = N
         "input_std": input_std,
         "target_mean": target_mean,
         "target_std": target_std,
+        "velocity_task_std": float(velocity_task_std_value),
+        "gradient_task_std": float(gradient_task_std_value),
         "train_frame_ids": train_frame_ids,
         "val_id_frame_ids": val_id_frame_ids,
         "val_angle_frame_ids": val_angle_frame_ids,
@@ -872,13 +1240,14 @@ if len(train_loader.dataset) == 0:
 
 best_score = float("inf")
 
-
-# In[ ]:
-
-
+# %% cell 32
 for epoch in range(1, int(CFG["epochs"]) + 1):
     MODEL.train()
     start_time = time.time()
+    particle_cap = particle_cap_for_epoch(epoch)
+    if TASK == "particle_ugradu":
+        train_ds.max_input_particles = particle_cap
+        train_ds.max_output_points = particle_cap
     accumulation_steps = max(int(CFG["gradient_accumulation_steps"]), 1)
     optimizer.zero_grad(set_to_none=True)
     train_losses, train_rels, primary_losses, secondary_losses = [], [], [], []
@@ -914,8 +1283,9 @@ for epoch in range(1, int(CFG["epochs"]) + 1):
             optimizer.zero_grad(set_to_none=True)
             optimizer_steps += 1
         with torch.no_grad():
+            rel = relative_l2(pred, batch["y"], minimum_norm=minimum_target_norm_for_relative_error)
             train_losses.append(float(loss.item()))
-            train_rels.append(float(relative_l2(pred, batch["y"]).mean().item()))
+            train_rels.append(float(torch.nanmean(rel).item()) if torch.isfinite(rel).any() else np.nan)
             primary_losses.append(float(primary_loss.item()))
             secondary_losses.append(float(secondary_loss.item()))
             good_batches += 1
@@ -925,11 +1295,16 @@ for epoch in range(1, int(CFG["epochs"]) + 1):
         raise RuntimeError("All training batches were non-finite.")
 
     if epoch % int(CFG["eval_every"]) == 0 or epoch == int(CFG["epochs"]):
-        val_id_metrics = evaluate(MODEL, val_id_loader)
-        val_angle_metrics = evaluate(MODEL, val_angle_loader)
-        test_metrics = evaluate(MODEL, test_loader)
+        eval_cap = int(CFG["particles_per_frame_final"])
+        if TASK == "particle_ugradu":
+            for ds in (val_id_ds, val_angle_ds, test_ds):
+                ds.max_input_particles = eval_cap
+                ds.max_output_points = eval_cap
+        val_id_metrics = evaluate(MODEL, val_id_loader, maximum_frames=CFG["eval_max_frames"])
+        val_angle_metrics = evaluate(MODEL, val_angle_loader, maximum_frames=CFG["eval_max_frames"])
+        test_metrics = evaluate(MODEL, test_loader, maximum_frames=CFG["eval_max_frames"])
         train_loss = float(np.mean(train_losses))
-        train_rel = float(np.mean(train_rels))
+        train_rel = finite_mean(train_rels)
         score = val_id_metrics["rel_l2_phys"]
         if not np.isfinite(score):
             score = val_angle_metrics["rel_l2_phys"] if np.isfinite(val_angle_metrics["rel_l2_phys"]) else test_metrics["rel_l2_phys"]
@@ -946,6 +1321,10 @@ for epoch in range(1, int(CFG["epochs"]) + 1):
         history["bad_batches"].append(int(bad_batches))
         history["optimizer_steps"].append(int(optimizer_steps))
         history["train_batches"].append(int(good_batches))
+        history.setdefault("particle_cap", []).append(int(particle_cap))
+        history.setdefault("val_id_skipped_tiny_target", []).append(int(val_id_metrics["frames_skipped_for_relative_error"]))
+        history.setdefault("val_angle_skipped_tiny_target", []).append(int(val_angle_metrics["frames_skipped_for_relative_error"]))
+        history.setdefault("test_skipped_tiny_target", []).append(int(test_metrics["frames_skipped_for_relative_error"]))
         metrics_bundle = {
             "train_loss": train_loss,
             "train_rel_l2_norm": train_rel,
@@ -953,6 +1332,7 @@ for epoch in range(1, int(CFG["epochs"]) + 1):
             "val_angle_rel_l2_phys": val_angle_metrics["rel_l2_phys"],
             "test_rel_l2_phys": test_metrics["rel_l2_phys"],
             "test_rmse_phys": test_metrics["rmse_phys"],
+            "particle_cap": int(particle_cap),
         }
         save_checkpoint(LAST_CKPT_PATH, "last", score, metrics_bundle)
         save_history()
@@ -964,14 +1344,13 @@ for epoch in range(1, int(CFG["epochs"]) + 1):
             f"[epoch {epoch:03d}] train_loss={train_loss:.4e} train_rel={train_rel:.4e} "
             f"val_id={val_id_metrics['rel_l2_phys']:.4e} val_angle={val_angle_metrics['rel_l2_phys']:.4e} "
             f"test={test_metrics['rel_l2_phys']:.4e} rmse={test_metrics['rmse_phys']:.4e} "
+            f"particles={particle_cap} eval_frames={CFG['eval_max_frames']} "
+            f"skip_rel={val_id_metrics['frames_skipped_for_relative_error']}/{val_angle_metrics['frames_skipped_for_relative_error']}/{test_metrics['frames_skipped_for_relative_error']} "
             f"good={good_batches} bad={bad_batches} steps={optimizer_steps} "
             f"lr={history['lr'][-1]:.2e} time={elapsed:.1f}s"
         )
 
-
-# In[ ]:
-
-
+# %% cell 33
 if not CKPT_PATH.exists():
     fallback_score = history["test_rel_l2_phys"][-1] if history["test_rel_l2_phys"] else float("inf")
     save_checkpoint(CKPT_PATH, "best_fallback", fallback_score)
@@ -980,4 +1359,3 @@ print("Best score     :", best_score)
 print("Best checkpoint:", CKPT_PATH)
 print("Last checkpoint:", LAST_CKPT_PATH)
 print("History        :", HISTORY_PATH)
-
