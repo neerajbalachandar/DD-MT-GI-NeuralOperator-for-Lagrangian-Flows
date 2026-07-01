@@ -2,8 +2,9 @@ module Task1ParticleIO
 
 using LinearAlgebra
 using Statistics
+import FLOWVPM as vpm
 
-export get_particle_state, set_particle_ugradu!, build_input_features
+export get_particle_state, get_particle_ugradu, set_particle_ugradu!, build_input_features
 
 """
 Read particle state from FLOWVPM particle field.
@@ -12,10 +13,32 @@ NOTE: Field names can differ across FLOWVPM versions.
 If one accessor fails, edit this file only (no package edits needed).
 """
 function get_particle_state(pfield)
-    X = copy(pfield.X)'                # (N,3)
-    Gamma = copy(pfield.Gamma)'        # (N,3)
-    sigma = copy(pfield.sigma)         # (N,)
+    N = vpm.get_np(pfield)
+    X = zeros(Float64, N, 3)
+    Gamma = zeros(Float64, N, 3)
+    sigma = zeros(Float64, N)
+    for i in 1:N
+        X[i, :] .= vpm.get_X(pfield, i)
+        Gamma[i, :] .= vpm.get_Gamma(pfield, i)
+        sigma[i] = vpm.get_sigma(pfield, i)[]
+    end
     return X, Gamma, sigma
+end
+
+function get_particle_ugradu(pfield)
+    N = vpm.get_np(pfield)
+    U = zeros(Float64, N, 3)
+    Gx = zeros(Float64, N, 3)
+    Gy = zeros(Float64, N, 3)
+    Gz = zeros(Float64, N, 3)
+    for i in 1:N
+        U[i, :] .= vpm.get_U(pfield, i)
+        J = vpm.get_J(pfield, i)
+        Gx[i, :] .= J[1:3]
+        Gy[i, :] .= J[4:6]
+        Gz[i, :] .= J[7:9]
+    end
+    return U, Gx, Gy, Gz
 end
 
 function _simple_geometry_proxy(X)
@@ -89,16 +112,20 @@ Expected `Y` columns:
 10:12-> gradUz row
 """
 function set_particle_ugradu!(pfield, Y::AbstractMatrix)
+    N = vpm.get_np(pfield)
+    if size(Y, 1) != N
+        error("Prediction row count $(size(Y, 1)) does not match particle count $(N)")
+    end
+
     U = Y[:, 1:3]
     Gx = Y[:, 4:6]
     Gy = Y[:, 7:9]
     Gz = Y[:, 10:12]
 
-    # Most common layout in FLOWVPM code paths:
-    pfield.U .= U'
-    pfield.J[1, :, :] .= Gx'
-    pfield.J[2, :, :] .= Gy'
-    pfield.J[3, :, :] .= Gz'
+    for i in 1:N
+        vpm.set_U(pfield, i, U[i, :])
+        vpm.set_J(pfield, i, vcat(Gx[i, :], Gy[i, :], Gz[i, :]))
+    end
 
     return nothing
 end

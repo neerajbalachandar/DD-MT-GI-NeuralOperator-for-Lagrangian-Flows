@@ -2,6 +2,11 @@ module Task1UGradUSettings
 
 export UGradUSettings, default_settings
 
+const THIS_DIR = @__DIR__
+const FINAL_DIR = normpath(joinpath(THIS_DIR, ".."))
+const DEFAULT_TASK1_MODEL = joinpath(THIS_DIR, "result", "task1", "good result", "final", "best_task1_v3_model.pt")
+const DEFAULT_TASK1_META = joinpath(FINAL_DIR, "processed_data_task1", "particle_ugradu_dataset.npz")
+
 """
 Configuration for Task-1 U/gradU surrogate runtime.
 
@@ -12,11 +17,11 @@ Configuration for Task-1 U/gradU surrogate runtime.
 """
 Base.@kwdef struct UGradUSettings
     mode::Symbol = :baseline_fmm
-    save_dir::String = "final-2/output/runtime"
+    save_dir::String = joinpath(THIS_DIR, "output", "runtime")
     save_stride::Int = 1
-    model_py_path::String = "final-2/output/task1_ugradu_training/best_task1_ugradu_gno.pt"
-    model_meta_npz::String = "final-2/output/particle_ugradu_dataset.npz"
-    device::String = "cpu"
+    model_py_path::String = DEFAULT_TASK1_MODEL
+    model_meta_npz::String = DEFAULT_TASK1_META
+    device::String = "auto"
     input_feature_names::Vector{String} = [
         "x", "y", "z",
         "Gamma_x", "Gamma_y", "Gamma_z",
