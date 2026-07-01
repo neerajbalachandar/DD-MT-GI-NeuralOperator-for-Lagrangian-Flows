@@ -5,11 +5,11 @@ measure vortex-particle state error over simulation time.
 
 Typical usage from the repository root:
 
-  python3 /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/benchmark_task1_runtime.py --run
+  python3 /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/benchmark_comparison_task1.py --run
 
 Or analyze existing runtime snapshots:
 
-  python3 /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/benchmark_task1_runtime.py \
+  python3 /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/benchmark_comparison_task1.py \
     --baseline-dir output/runtime_baseline_fmm \
     --surrogate-dir output/runtime_surrogate_ml
 """

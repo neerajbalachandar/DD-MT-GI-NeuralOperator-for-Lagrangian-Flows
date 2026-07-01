@@ -10,6 +10,8 @@ julia --project=/home/dysco/FLOWUnsteady \
 
 Run code + comparison (FMM)
 
+mkdir -p Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/benchmark_task1
+
 TASK1_PIPELINE_PYTHON=/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/neuralop-env/bin/python \
 TASK1_PYTHON=/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/neuralop-env/bin/python \
 TASK1_DEVICE=auto \
@@ -20,4 +22,4 @@ nohup Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/run.sh \
 
 
 
-run.sh > benchmark_comparison_task1.py > run_task1_flowunstead.jl > 
+run.sh > benchmark_comparison_task1.py > run_task1_flowunsteady.jl > flowunsteady_callback.jl
