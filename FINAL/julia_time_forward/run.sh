@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-WORKFLOW_DIR="/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward"
-FLOWUNSTEADY_PROJECT="${FLOWUNSTEADY_PROJECT:-/home/dysco/FLOWUnsteady}"
+# Dynamically find the folder where this script lives
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKFLOW_DIR="${SCRIPT_DIR}"
+
+# Stepping back exactly 3 directories up targets the main FLOWUnsteady root folder
+FLOWUNSTEADY_PROJECT_DEFAULT="$(cd "${SCRIPT_DIR}/../../../" && pwd)"
+FLOWUNSTEADY_PROJECT="${FLOWUNSTEADY_PROJECT:-$FLOWUNSTEADY_PROJECT_DEFAULT}"
+
 PYTHON_BIN="${TASK1_PIPELINE_PYTHON:-python3}"
 TASK1_DEVICE="${TASK1_DEVICE:-auto}"
 
