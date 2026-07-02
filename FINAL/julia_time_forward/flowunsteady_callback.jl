@@ -41,10 +41,66 @@ function build_ml_uj_function(cfg)
     predictor, close_predictor = build_predictor(cfg.model_py_path, cfg.model_meta_npz; device=cfg.device)
     atexit(close_predictor)
 
+    total_calls = Ref(0)
+    total_predictions = Ref(0)
+    total_seconds = Ref(0.0)
+    last_step = Ref(-1)
+    step_calls = Ref(0)
+    step_predictions = Ref(0)
+    step_seconds = Ref(0.0)
+    step_particles = Ref(0)
+    predicted_step = Ref(-1)
+
+    function flush_step_stats(force::Bool=false)
+        if last_step[] < 0 || step_calls[] == 0
+            return
+        end
+        if force || last_step[] == 1 || last_step[] % 10 == 0
+            @printf(
+                "Task1 ML UJ stats: step=%d calls_this_step=%d predictions_this_step=%d particles=%d ml_seconds=%.3f total_calls=%d total_predictions=%d total_ml_seconds=%.3f cache_per_step=%s\n",
+                last_step[],
+                step_calls[],
+                step_predictions[],
+                step_particles[],
+                step_seconds[],
+                total_calls[],
+                total_predictions[],
+                total_seconds[],
+                string(cfg.cache_ml_uj_per_step),
+            )
+            flush(stdout)
+        end
+    end
+
     function ml_uj(pfield; optargs...)
-        _predict_ugradu!(pfield, cfg, predictor)
+        step = Int(getfield(pfield, :nt))
+        if last_step[] != step
+            flush_step_stats(false)
+            last_step[] = step
+            step_calls[] = 0
+            step_predictions[] = 0
+            step_seconds[] = 0.0
+            step_particles[] = 0
+        end
+
+        total_calls[] += 1
+        step_calls[] += 1
+        step_particles[] = max(step_particles[], Int(getfield(pfield, :np)))
+
+        if cfg.cache_ml_uj_per_step && predicted_step[] == step
+            return nothing
+        end
+
+        elapsed = @elapsed _predict_ugradu!(pfield, cfg, predictor)
+        predicted_step[] = step
+        total_predictions[] += 1
+        total_seconds[] += elapsed
+        step_predictions[] += 1
+        step_seconds[] += elapsed
         return nothing
     end
+
+    atexit(() -> flush_step_stats(true))
 
     return ml_uj, predictor, close_predictor
 end

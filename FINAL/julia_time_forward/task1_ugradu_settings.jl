@@ -33,6 +33,7 @@ Base.@kwdef struct UGradUSettings
     aoa_deg::Float64 = 0.0
     freestream::NTuple{3,Float64} = (0.0, 0.0, 0.0)
     phase::Float64 = 0.0
+    cache_ml_uj_per_step::Bool = true
 end
 
 default_settings() = UGradUSettings()
