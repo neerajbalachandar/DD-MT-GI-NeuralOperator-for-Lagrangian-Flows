@@ -4,7 +4,7 @@ export UGradUSettings, default_settings
 
 const THIS_DIR = @__DIR__
 const FINAL_DIR = normpath(joinpath(THIS_DIR, ".."))
-const DEFAULT_TASK1_MODEL = joinpath(THIS_DIR, "result", "task1", "good result", "final", "best_task1_v3_model.pt")
+const DEFAULT_TASK1_MODEL = joinpath(FINAL_DIR, "result", "task1", "best_task1_v3_model.pt")
 const DEFAULT_TASK1_META = joinpath(FINAL_DIR, "processed_data_task1", "particle_ugradu_dataset.npz")
 
 """

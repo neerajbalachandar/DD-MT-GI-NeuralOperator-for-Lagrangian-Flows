@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import sys
+import struct
 
 try:
     from neuralop.layers.gno_block import GNOBlock  # noqa: F401
@@ -417,21 +418,60 @@ def resolve_torch_device(requested: str | None) -> torch.device:
     return torch.device(req)
 
 
+def _read_exact(stream, nbytes: int) -> bytes:
+    chunks = []
+    remaining = nbytes
+    while remaining:
+        chunk = stream.read(remaining)
+        if not chunk:
+            raise EOFError("input stream ended while reading predictor request")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def run_binary_server(predictor: Task1UGradUPredictor) -> None:
+    stdin = sys.stdin.buffer
+    stdout = sys.stdout.buffer
+    while True:
+        header = _read_exact(stdin, 16)
+        nrows, ncols = struct.unpack("<qq", header)
+        if nrows < 0:
+            return
+        if nrows == 0 or ncols == 0:
+            y = np.empty((int(nrows), 0), dtype=np.float32)
+        else:
+            payload = _read_exact(stdin, int(nrows) * int(ncols) * 4)
+            x = np.frombuffer(payload, dtype="<f4").reshape((int(nrows), int(ncols)))
+            y = np.ascontiguousarray(predictor.predict(x), dtype=np.float32)
+        stdout.write(struct.pack("<qq", int(y.shape[0]), int(y.shape[1])))
+        stdout.write(y.astype("<f4", copy=False).tobytes(order="C"))
+        stdout.flush()
+
+
 def _main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--predict-csv", required=True, help="Input feature matrix CSV, no header")
-    parser.add_argument("--output-csv", required=True, help="Output prediction matrix CSV, no header")
+    parser.add_argument("--server", action="store_true", help="Run a persistent binary stdin/stdout prediction server")
+    parser.add_argument("--predict-csv", help="Input feature matrix CSV, no header")
+    parser.add_argument("--output-csv", help="Output prediction matrix CSV, no header")
     parser.add_argument("--model", required=True, help="Task1 U/gradU .pt checkpoint")
     parser.add_argument("--meta", required=True, help="particle_ugradu_dataset.npz metadata")
     parser.add_argument("--device", default="auto", help="auto | cpu | cuda | cuda:<id>")
     args = parser.parse_args()
 
+    predictor = Task1UGradUPredictor(args.model, args.meta, args.device)
+    if args.server:
+        run_binary_server(predictor)
+        return
+
+    if not args.predict_csv or not args.output_csv:
+        parser.error("--predict-csv and --output-csv are required unless --server is used")
+
     x = np.loadtxt(args.predict_csv, delimiter=",", dtype=np.float32)
     if x.ndim == 1:
         x = x.reshape(1, -1)
-    predictor = Task1UGradUPredictor(args.model, args.meta, args.device)
     y = predictor.predict(x)
     np.savetxt(args.output_csv, y, delimiter=",")
 

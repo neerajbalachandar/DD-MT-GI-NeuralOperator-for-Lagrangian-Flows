@@ -9,7 +9,7 @@ include("task1_python_predictor.jl")
 using .Task1ParticleIO
 using .Task1PythonPredictor
 
-export build_runtime_callback
+export build_runtime_callback, build_ml_uj_function
 
 function _save_snapshot_csv(fpath::String, columns::Vector{String}, arrays...)
     data = hcat(arrays...)
@@ -19,19 +19,49 @@ function _save_snapshot_csv(fpath::String, columns::Vector{String}, arrays...)
     end
 end
 
+function _predict_ugradu!(pfield, cfg, predictor)
+    X, Gamma, sigma = get_particle_state(pfield)
+    if size(X, 1) == 0
+        return false
+    end
+    feats = build_input_features(
+        X, Gamma, sigma;
+        feature_names=cfg.input_feature_names,
+        use_context_channels=cfg.use_context_channels,
+        phase=cfg.phase,
+        aoa_deg=cfg.aoa_deg,
+        freestream=cfg.freestream,
+    )
+    Y = predictor(feats)
+    set_particle_ugradu!(pfield, Y)
+    return true
+end
+
+function build_ml_uj_function(cfg)
+    predictor, close_predictor = build_predictor(cfg.model_py_path, cfg.model_meta_npz; device=cfg.device)
+    atexit(close_predictor)
+
+    function ml_uj(pfield; optargs...)
+        _predict_ugradu!(pfield, cfg, predictor)
+        return nothing
+    end
+
+    return ml_uj, predictor, close_predictor
+end
+
 """
 Build runtime callback to:
 - export baseline U/gradU supervision
 - or replace U/gradU with ML predictions
 - or compare both in one run
 """
-function build_runtime_callback(cfg)
+function build_runtime_callback(cfg; predictor=nothing, predict_in_callback::Bool=true)
     mkpath(cfg.save_dir)
     println("Task1 runtime callback active: mode=$(cfg.mode), save_dir=$(cfg.save_dir)")
 
-    predictor = nothing
-    if cfg.mode == :surrogate_ml || cfg.mode == :compare
-        predictor = build_predictor(cfg.model_py_path, cfg.model_meta_npz; device=cfg.device)
+    if predictor === nothing && predict_in_callback && (cfg.mode == :surrogate_ml || cfg.mode == :compare)
+        predictor, close_predictor = build_predictor(cfg.model_py_path, cfg.model_meta_npz; device=cfg.device)
+        atexit(close_predictor)
     end
 
     function cb(sim, pfield, t, dt; optargs...)
@@ -44,21 +74,12 @@ function build_runtime_callback(cfg)
         if size(X, 1) == 0
             return false
         end
-        feats = build_input_features(
-            X, Gamma, sigma;
-            feature_names=cfg.input_feature_names,
-            use_context_channels=cfg.use_context_channels,
-            phase=cfg.phase,
-            aoa_deg=cfg.aoa_deg,
-            freestream=cfg.freestream,
-        )
 
         # Baseline references before overwrite
         U_ref, Gx_ref, Gy_ref, Gz_ref = get_particle_ugradu(pfield)
 
-        if cfg.mode == :surrogate_ml || cfg.mode == :compare
-            Y = predictor(feats)
-            set_particle_ugradu!(pfield, Y)
+        if predict_in_callback && (cfg.mode == :surrogate_ml || cfg.mode == :compare)
+            _predict_ugradu!(pfield, cfg, predictor)
         end
 
         # Save snapshots for debugging/comparison

@@ -40,6 +40,8 @@ if not FLOWUNSTEADY_PROJECT.is_dir():
 
 def _default_model() -> Path:
     candidates = [
+        FINAL_DIR / "result" / "task1" / "best_task1_v3_model.pt",
+        THIS_DIR / "result" / "task1" / "good_result" / "final" / "best_task1_v3_model.pt",
         THIS_DIR / "result" / "task1" / "good result" / "final" / "best_task1_v3_model.pt",
         FINAL_DIR / "result" / "task1" / "task1_particle_ugradu_gino_pointwise_best_model.pt",
         FINAL_DIR / "result" / "task1_particle_ugradu_gino_pointwise_best_model.pt",
@@ -390,6 +392,11 @@ def main() -> None:
         print(json.dumps(summary, indent=2))
         print(f"Wrote {out_dir / 'particle_state_error_timeseries.csv'}")
         print(f"Wrote {out_dir / 'benchmark_summary.json'}")
+    except SystemExit as exc:
+        status.update({"status": "failed", "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "error": str(exc)})
+        with status_path.open("w") as f:
+            json.dump(status, f, indent=2)
+        raise
     except Exception as exc:
         status.update({"status": "failed", "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "error": str(exc)})
         with status_path.open("w") as f:

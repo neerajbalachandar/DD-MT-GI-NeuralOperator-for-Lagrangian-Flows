@@ -20,7 +20,7 @@ using .Task1FlowUnsteadyRuntime
 
 const THIS_DIR = @__DIR__
 const FINAL_DIR = normpath(joinpath(THIS_DIR, ".."))
-const DEFAULT_TASK1_MODEL = joinpath(THIS_DIR, "result", "task1", "good result", "final", "best_task1_v3_model.pt")
+const DEFAULT_TASK1_MODEL = joinpath(FINAL_DIR, "result", "task1", "best_task1_v3_model.pt")
 const DEFAULT_TASK1_META = joinpath(FINAL_DIR, "processed_data_task1", "particle_ugradu_dataset.npz")
 
 function resolve_from_workflow(path::AbstractString)
@@ -117,7 +117,16 @@ function main()
         device = args["device"],
     )
 
-    cb = build_runtime_callback(cfg)
+    predictor = nothing
+    predict_in_callback = true
+    if mode_sym == :surrogate_ml
+        ml_uj, predictor, _close_predictor = build_ml_uj_function(cfg)
+        run_kwargs[:vpm_UJ] = ml_uj
+        predict_in_callback = false
+        println("Task1 surrogate_ml: replacing FLOWVPM UJ/FMM with persistent ML U/gradU predictor")
+    end
+
+    cb = build_runtime_callback(cfg; predictor=predictor, predict_in_callback=predict_in_callback)
 
     if !haskey(run_kwargs, :nsteps)
         error("run_kwargs must include :nsteps")
