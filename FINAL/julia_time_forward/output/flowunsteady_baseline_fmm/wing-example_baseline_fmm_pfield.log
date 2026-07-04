@@ -1,0 +1,53 @@
+-------------------------------------------------------------------------
+
+	SOLVER SETTINGS
+		  maxparticles----> 40401
+		   formulation----> formulation_rVPM
+		       viscous----> (Symbol("*userfunction"), "FLOWVPM.Inviscid{Float64}(0.0)")
+		        kernel----> gaussianerf
+		            UJ----> UJ_fmm
+		          Uinf----> (Symbol("*userfunction"), "#152")
+		           SFS----> SFS_none
+		   integration----> rungekutta3
+		    transposed----> true
+		    relaxation----> pedrizzetti
+		           fmm----> FLOWVPM.FMM(4, 10, 0.5, true, 0.001, 0.001, true, true, true, 1.0, 3)
+		        useGPU----> 0
+
+	SIMULATION SETTINGS
+		dt:			0.0034223749999999996
+		Runtime function:	Yes
+		Static particles:	Yes
+		nsteps_save:		1
+
+-------------------------------------------------------------------------
+*************************************************************************
+START /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/flowunsteady_baseline_fmm/wing-example_baseline_fmm_pfield
+	2026-07-02T18:13:05.848
+*************************************************************************
+	Time step 0 out of 200	Particles: 0
+	Time step 10 out of 200	Particles: 1754
+	Time step 20 out of 200	Particles: 3754
+	Time step 30 out of 200	Particles: 5516
+	Time step 40 out of 200	Particles: 6601
+	Time step 50 out of 200	Particles: 7611
+	Time step 60 out of 200	Particles: 8621
+	Time step 70 out of 200	Particles: 9631
+	Time step 80 out of 200	Particles: 10641
+	Time step 90 out of 200	Particles: 11651
+	Time step 100 out of 200	Particles: 12661
+	Time step 110 out of 200	Particles: 13671
+	Time step 120 out of 200	Particles: 14681
+	Time step 130 out of 200	Particles: 15691
+	Time step 140 out of 200	Particles: 16701
+	Time step 150 out of 200	Particles: 17711
+	Time step 160 out of 200	Particles: 18721
+	Time step 170 out of 200	Particles: 19731
+	Time step 180 out of 200	Particles: 20741
+	Time step 190 out of 200	Particles: 21751
+	Time step 200 out of 200	Particles: 22761
+*************************************************************************
+END /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/flowunsteady_baseline_fmm/wing-example_baseline_fmm_pfield
+	2026-07-02T18:28:59.320
+*************************************************************************
+ELAPSED TIME: 0 hours 15 minutes 53 seconds

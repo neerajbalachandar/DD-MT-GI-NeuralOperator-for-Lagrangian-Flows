@@ -1,0 +1,78 @@
+Running: julia --project=/home/dysco/FLOWUnsteady /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/run_task1_flowunsteady.jl --sim-file /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/simulation.jl --model /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/result/task1/best_task1_v3_model.pt --meta /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/processed_data_task1/particle_ugradu_dataset.npz --device auto --mode baseline_fmm --save-dir /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm
+
+Generating geometry...
+Generating vehicle...
+Task1 runtime callback active: mode=baseline_fmm, save_dir=/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm
+-------------------------------------------------------------------------
+
+	SOLVER SETTINGS
+		  maxparticles----> 40401
+		   formulation----> formulation_rVPM
+		       viscous----> (Symbol("*userfunction"), "FLOWVPM.Inviscid{Float64}(0.0)")
+		        kernel----> gaussianerf
+		            UJ----> UJ_fmm
+		          Uinf----> (Symbol("*userfunction"), "#152")
+		           SFS----> SFS_none
+		   integration----> rungekutta3
+		    transposed----> true
+		    relaxation----> pedrizzetti
+		           fmm----> FLOWVPM.FMM(4, 10, 0.5, true, 0.001, 0.001, true, true, true, 1.0, 3)
+		        useGPU----> 0
+
+	SIMULATION SETTINGS
+		dt:			0.0034223749999999996
+		Runtime function:	Yes
+		Static particles:	Yes
+		nsteps_save:		1
+
+-------------------------------------------------------------------------
+*************************************************************************
+START /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/flowunsteady_baseline_fmm/wing-example_baseline_fmm_pfield
+	2026-07-02T18:13:05.848
+*************************************************************************
+	Time step 0 out of 200	Particles: 0
+	Time step 10 out of 200	Particles: 1754
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000010.csv
+	Time step 20 out of 200	Particles: 3754
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000020.csv
+	Time step 30 out of 200	Particles: 5516
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000030.csv
+	Time step 40 out of 200	Particles: 6601
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000040.csv
+	Time step 50 out of 200	Particles: 7611
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000050.csv
+	Time step 60 out of 200	Particles: 8621
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000060.csv
+	Time step 70 out of 200	Particles: 9631
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000070.csv
+	Time step 80 out of 200	Particles: 10641
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000080.csv
+	Time step 90 out of 200	Particles: 11651
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000090.csv
+	Time step 100 out of 200	Particles: 12661
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000100.csv
+	Time step 110 out of 200	Particles: 13671
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000110.csv
+	Time step 120 out of 200	Particles: 14681
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000120.csv
+	Time step 130 out of 200	Particles: 15691
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000130.csv
+	Time step 140 out of 200	Particles: 16701
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000140.csv
+	Time step 150 out of 200	Particles: 17711
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000150.csv
+	Time step 160 out of 200	Particles: 18721
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000160.csv
+	Time step 170 out of 200	Particles: 19731
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000170.csv
+	Time step 180 out of 200	Particles: 20741
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000180.csv
+	Time step 190 out of 200	Particles: 21751
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000190.csv
+	Time step 200 out of 200	Particles: 22761
+Task1 saved baseline snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm/baseline_000200.csv
+*************************************************************************
+END /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/flowunsteady_baseline_fmm/wing-example_baseline_fmm_pfield
+	2026-07-02T18:28:59.320
+*************************************************************************
+ELAPSED TIME: 0 hours 15 minutes 53 seconds
