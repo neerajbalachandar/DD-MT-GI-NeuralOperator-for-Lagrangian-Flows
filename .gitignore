@@ -1,14 +1,11 @@
 # Virtual environments
 neuralop-env/
-# fno-env/
 train/
 
 # Python cache
 __pycache__/
 *.pyc
 *.pyo
-
-*.png
 
 # ML artifacts
 *.pth
@@ -26,7 +23,6 @@ final-2/processed_data
 
 FINAL/processed_data_task1/
 FINAL/processed_data_task2/
-FINAL/processed_data/
 
 results/
 
