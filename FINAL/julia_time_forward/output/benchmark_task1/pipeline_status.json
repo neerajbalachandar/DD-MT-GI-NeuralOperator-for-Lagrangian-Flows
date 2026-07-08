@@ -1,6 +1,0 @@
-{
-  "status": "failed",
-  "started_at": "2026-07-04T22:52:24+0530",
-  "finished_at": "2026-07-04T23:08:28+0530",
-  "error": "Surrogate ML run failed; see /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/benchmark_task1/surrogate_ml.log"
-}
