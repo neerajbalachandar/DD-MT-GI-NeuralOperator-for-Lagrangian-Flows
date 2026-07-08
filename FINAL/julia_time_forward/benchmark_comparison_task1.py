@@ -40,11 +40,11 @@ if not FLOWUNSTEADY_PROJECT.is_dir():
 
 def _default_model() -> Path:
     candidates = [
-        FINAL_DIR / "result" / "task1" / "best_task1_v3_model.pt",
-        THIS_DIR / "result" / "task1" / "good_result" / "final" / "best_task1_v3_model.pt",
-        THIS_DIR / "result" / "task1" / "good result" / "final" / "best_task1_v3_model.pt",
-        FINAL_DIR / "result" / "task1" / "task1_particle_ugradu_gino_pointwise_best_model.pt",
-        FINAL_DIR / "result" / "task1_particle_ugradu_gino_pointwise_best_model.pt",
+        FINAL_DIR / "result" / "task1" / "update_result" / "best_task1_v3_model.pt",
+        # THIS_DIR / "result" / "task1" / "good_result" / "final" / "best_task1_v3_model.pt",
+        # THIS_DIR / "result" / "task1" / "good result" / "final" / "best_task1_v3_model.pt",
+        # FINAL_DIR / "result" / "task1" / "task1_particle_ugradu_gino_pointwise_best_model.pt",
+        # FINAL_DIR / "result" / "task1_particle_ugradu_gino_pointwise_best_model.pt",
     ]
     for path in candidates:
         if path.is_file():

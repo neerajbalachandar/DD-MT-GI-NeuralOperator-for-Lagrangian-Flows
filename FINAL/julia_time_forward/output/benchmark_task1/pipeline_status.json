@@ -1,7 +1,6 @@
 {
-  "status": "complete",
-  "started_at": "2026-07-02T18:12:46+0530",
-  "finished_at": "2026-07-02T18:43:41+0530",
-  "summary_path": "/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/benchmark_task1/benchmark_summary.json",
-  "timeseries_csv": "/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/benchmark_task1/particle_state_error_timeseries.csv"
+  "status": "failed",
+  "started_at": "2026-07-04T22:52:24+0530",
+  "finished_at": "2026-07-04T23:08:28+0530",
+  "error": "Surrogate ML run failed; see /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/benchmark_task1/surrogate_ml.log"
 }

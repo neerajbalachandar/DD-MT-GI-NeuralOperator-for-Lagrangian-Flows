@@ -1,102 +1,13 @@
-Running: julia --project=/home/dysco/FLOWUnsteady /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/run_task1_flowunsteady.jl --sim-file /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/simulation.jl --model /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/result/task1/best_task1_v3_model.pt --meta /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/processed_data_task1/particle_ugradu_dataset.npz --device auto --mode surrogate_ml --save-dir /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml
+Running: julia --project=/home/dysco/FLOWUnsteady /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/run_task1_flowunsteady.jl --sim-file /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/simulation.jl --model /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/result/task1/update_result/best_task1_v3_model.pt --meta /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/processed_data_task1/particle_ugradu_dataset.npz --device auto --mode surrogate_ml --save-dir /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml
 
-Task1 predictor device: cpu
+ERROR: LoadError: Task1 model checkpoint not found: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/result/task1/update_result/best_task1_v3_model.pt
+Stacktrace:
+ [1] error(s::String)
+   @ Base ./error.jl:35
+ [2] main()
+   @ Main ~/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/run_task1_flowunsteady.jl:106
+ [3] top-level scope
+   @ ~/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/run_task1_flowunsteady.jl:153
+in expression starting at /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/run_task1_flowunsteady.jl:153
 Generating geometry...
 Generating vehicle...
-Task1 surrogate_ml: replacing FLOWVPM UJ/FMM with persistent ML U/gradU predictor
-Task1 runtime callback active: mode=surrogate_ml, save_dir=/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml
--------------------------------------------------------------------------
-
-	SOLVER SETTINGS
-		  maxparticles----> 40401
-		   formulation----> formulation_rVPM
-		       viscous----> (Symbol("*userfunction"), "FLOWVPM.Inviscid{Float64}(0.0)")
-		        kernel----> gaussianerf
-		            UJ----> (Symbol("*userfunction"), "ml_uj")
-		          Uinf----> (Symbol("*userfunction"), "#152")
-		           SFS----> SFS_none
-		   integration----> rungekutta3
-		    transposed----> true
-		    relaxation----> pedrizzetti
-		           fmm----> FLOWVPM.FMM(4, 10, 0.5, true, 0.001, 0.001, true, true, true, 1.0, 3)
-		        useGPU----> 0
-
-	SIMULATION SETTINGS
-		dt:			0.0034223749999999996
-		Runtime function:	Yes
-		Static particles:	Yes
-		nsteps_save:		1
-
--------------------------------------------------------------------------
-*************************************************************************
-START /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/flowunsteady_surrogate_ml/wing-example_surrogate_ml_pfield
-	2026-07-02T18:29:15.089
-*************************************************************************
-	Time step 0 out of 200	Particles: 0
-Task1 ML UJ stats: step=0 calls_this_step=4 predictions_this_step=1 particles=300 ml_seconds=0.985 total_calls=4 total_predictions=1 total_ml_seconds=0.985 cache_per_step=true
-Task1 ML UJ stats: step=1 calls_this_step=6 predictions_this_step=1 particles=601 ml_seconds=0.082 total_calls=10 total_predictions=2 total_ml_seconds=1.067 cache_per_step=true
-	Time step 10 out of 200	Particles: 1189
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000010.csv
-Task1 ML UJ stats: step=10 calls_this_step=6 predictions_this_step=1 particles=1690 ml_seconds=0.275 total_calls=64 total_predictions=11 total_ml_seconds=3.113 cache_per_step=true
-	Time step 20 out of 200	Particles: 2199
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000020.csv
-Task1 ML UJ stats: step=20 calls_this_step=6 predictions_this_step=1 particles=2700 ml_seconds=0.648 total_calls=124 total_predictions=21 total_ml_seconds=8.053 cache_per_step=true
-	Time step 30 out of 200	Particles: 3209
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000030.csv
-Task1 ML UJ stats: step=30 calls_this_step=6 predictions_this_step=1 particles=3710 ml_seconds=0.667 total_calls=184 total_predictions=31 total_ml_seconds=14.651 cache_per_step=true
-	Time step 40 out of 200	Particles: 4219
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000040.csv
-Task1 ML UJ stats: step=40 calls_this_step=6 predictions_this_step=1 particles=4720 ml_seconds=0.918 total_calls=244 total_predictions=41 total_ml_seconds=22.605 cache_per_step=true
-	Time step 50 out of 200	Particles: 5229
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000050.csv
-Task1 ML UJ stats: step=50 calls_this_step=6 predictions_this_step=1 particles=5730 ml_seconds=1.160 total_calls=304 total_predictions=51 total_ml_seconds=32.979 cache_per_step=true
-	Time step 60 out of 200	Particles: 6239
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000060.csv
-Task1 ML UJ stats: step=60 calls_this_step=6 predictions_this_step=1 particles=6740 ml_seconds=1.417 total_calls=364 total_predictions=61 total_ml_seconds=46.532 cache_per_step=true
-	Time step 70 out of 200	Particles: 7249
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000070.csv
-Task1 ML UJ stats: step=70 calls_this_step=6 predictions_this_step=1 particles=7750 ml_seconds=1.735 total_calls=424 total_predictions=71 total_ml_seconds=62.476 cache_per_step=true
-	Time step 80 out of 200	Particles: 8259
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000080.csv
-Task1 ML UJ stats: step=80 calls_this_step=6 predictions_this_step=1 particles=8760 ml_seconds=2.047 total_calls=484 total_predictions=81 total_ml_seconds=81.524 cache_per_step=true
-	Time step 90 out of 200	Particles: 9269
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000090.csv
-Task1 ML UJ stats: step=90 calls_this_step=6 predictions_this_step=1 particles=9770 ml_seconds=2.363 total_calls=544 total_predictions=91 total_ml_seconds=103.747 cache_per_step=true
-	Time step 100 out of 200	Particles: 10279
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000100.csv
-Task1 ML UJ stats: step=100 calls_this_step=6 predictions_this_step=1 particles=10780 ml_seconds=2.740 total_calls=604 total_predictions=101 total_ml_seconds=129.458 cache_per_step=true
-	Time step 110 out of 200	Particles: 11289
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000110.csv
-Task1 ML UJ stats: step=110 calls_this_step=6 predictions_this_step=1 particles=11790 ml_seconds=3.090 total_calls=664 total_predictions=111 total_ml_seconds=158.948 cache_per_step=true
-	Time step 120 out of 200	Particles: 12299
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000120.csv
-Task1 ML UJ stats: step=120 calls_this_step=6 predictions_this_step=1 particles=12800 ml_seconds=3.510 total_calls=724 total_predictions=121 total_ml_seconds=192.392 cache_per_step=true
-	Time step 130 out of 200	Particles: 13309
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000130.csv
-Task1 ML UJ stats: step=130 calls_this_step=6 predictions_this_step=1 particles=13810 ml_seconds=3.900 total_calls=784 total_predictions=131 total_ml_seconds=229.584 cache_per_step=true
-	Time step 140 out of 200	Particles: 14319
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000140.csv
-Task1 ML UJ stats: step=140 calls_this_step=6 predictions_this_step=1 particles=14820 ml_seconds=4.570 total_calls=844 total_predictions=141 total_ml_seconds=273.465 cache_per_step=true
-	Time step 150 out of 200	Particles: 15329
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000150.csv
-Task1 ML UJ stats: step=150 calls_this_step=6 predictions_this_step=1 particles=15830 ml_seconds=4.919 total_calls=904 total_predictions=151 total_ml_seconds=319.952 cache_per_step=true
-	Time step 160 out of 200	Particles: 16339
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000160.csv
-Task1 ML UJ stats: step=160 calls_this_step=6 predictions_this_step=1 particles=16840 ml_seconds=6.475 total_calls=964 total_predictions=161 total_ml_seconds=375.269 cache_per_step=true
-	Time step 170 out of 200	Particles: 17349
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000170.csv
-Task1 ML UJ stats: step=170 calls_this_step=6 predictions_this_step=1 particles=17850 ml_seconds=8.250 total_calls=1024 total_predictions=171 total_ml_seconds=436.992 cache_per_step=true
-	Time step 180 out of 200	Particles: 18359
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000180.csv
-Task1 ML UJ stats: step=180 calls_this_step=6 predictions_this_step=1 particles=18860 ml_seconds=6.649 total_calls=1084 total_predictions=181 total_ml_seconds=505.051 cache_per_step=true
-	Time step 190 out of 200	Particles: 19369
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000190.csv
-Task1 ML UJ stats: step=190 calls_this_step=6 predictions_this_step=1 particles=19870 ml_seconds=7.209 total_calls=1144 total_predictions=191 total_ml_seconds=575.266 cache_per_step=true
-	Time step 200 out of 200	Particles: 20379
-Task1 saved surrogate snapshot: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml/surrogate_000200.csv
-*************************************************************************
-END /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/flowunsteady_surrogate_ml/wing-example_surrogate_ml_pfield
-	2026-07-02T18:42:49.879
-*************************************************************************
-ELAPSED TIME: 0 hours 13 minutes 34 seconds
-Task1 ML UJ stats: step=200 calls_this_step=2 predictions_this_step=1 particles=20880 ml_seconds=7.892 total_calls=1200 total_predictions=201 total_ml_seconds=652.510 cache_per_step=true

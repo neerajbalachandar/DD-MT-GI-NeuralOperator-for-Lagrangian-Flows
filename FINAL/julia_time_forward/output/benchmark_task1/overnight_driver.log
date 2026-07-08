@@ -4,68 +4,7 @@ Workflow: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/ju
 Julia project: /home/dysco/FLOWUnsteady
 Python: /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/neuralop-env/bin/python
 Task1 predictor device: auto
-Running: julia --project=/home/dysco/FLOWUnsteady /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/run_task1_flowunsteady.jl --sim-file /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/simulation.jl --model /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/result/task1/best_task1_v3_model.pt --meta /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/processed_data_task1/particle_ugradu_dataset.npz --device auto --mode baseline_fmm --save-dir /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm
+Running: julia --project=/home/dysco/FLOWUnsteady /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/run_task1_flowunsteady.jl --sim-file /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/simulation.jl --model /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/result/task1/update_result/best_task1_v3_model.pt --meta /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/processed_data_task1/particle_ugradu_dataset.npz --device auto --mode baseline_fmm --save-dir /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm
 Found 200 baseline snapshots in /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm (steps 1..200)
-Running: julia --project=/home/dysco/FLOWUnsteady /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/run_task1_flowunsteady.jl --sim-file /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/simulation.jl --model /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/result/task1/best_task1_v3_model.pt --meta /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/processed_data_task1/particle_ugradu_dataset.npz --device auto --mode surrogate_ml --save-dir /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml
-Found 200 surrogate snapshots in /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml (steps 1..200)
-{
-  "n_common_steps": 200,
-  "timings": {
-    "baseline_fmm": {
-      "cmd": [
-        "julia",
-        "--project=/home/dysco/FLOWUnsteady",
-        "/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/run_task1_flowunsteady.jl",
-        "--sim-file",
-        "/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/simulation.jl",
-        "--model",
-        "/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/result/task1/best_task1_v3_model.pt",
-        "--meta",
-        "/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/processed_data_task1/particle_ugradu_dataset.npz",
-        "--device",
-        "auto",
-        "--mode",
-        "baseline_fmm",
-        "--save-dir",
-        "/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_baseline_fmm"
-      ],
-      "returncode": 0,
-      "wall_seconds": 973.4881368239876,
-      "log_path": "/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/benchmark_task1/baseline_fmm.log"
-    },
-    "surrogate_ml": {
-      "cmd": [
-        "julia",
-        "--project=/home/dysco/FLOWUnsteady",
-        "/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/run_task1_flowunsteady.jl",
-        "--sim-file",
-        "/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/simulation.jl",
-        "--model",
-        "/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/result/task1/best_task1_v3_model.pt",
-        "--meta",
-        "/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/processed_data_task1/particle_ugradu_dataset.npz",
-        "--device",
-        "auto",
-        "--mode",
-        "surrogate_ml",
-        "--save-dir",
-        "/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml"
-      ],
-      "returncode": 0,
-      "wall_seconds": 830.6346157480148,
-      "log_path": "/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/benchmark_task1/surrogate_ml.log"
-    }
-  },
-  "surrogate_speedup_vs_fmm": 1.1719811796518116,
-  "position_rel_l2_final": 0.0814250227344491,
-  "position_rel_l2_mean": 0.07341860138634482,
-  "position_rel_l2_max": 0.08426177585516686,
-  "gamma_rel_l2_final": 5.149526130624477,
-  "gamma_rel_l2_mean": 3.647211875461366,
-  "gamma_rel_l2_max": 5.149526130624477,
-  "sigma_rel_l2_final": 0.13048632685764813,
-  "sigma_rel_l2_mean": 0.08675223211163678,
-  "sigma_rel_l2_max": 0.13048632685764813
-}
-Wrote /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/benchmark_task1/particle_state_error_timeseries.csv
-Wrote /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/benchmark_task1/benchmark_summary.json
+Running: julia --project=/home/dysco/FLOWUnsteady /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/run_task1_flowunsteady.jl --sim-file /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/simulation.jl --model /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/result/task1/update_result/best_task1_v3_model.pt --meta /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/processed_data_task1/particle_ugradu_dataset.npz --device auto --mode surrogate_ml --save-dir /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/runtime_surrogate_ml
+Surrogate ML run failed; see /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/benchmark_task1/surrogate_ml.log
