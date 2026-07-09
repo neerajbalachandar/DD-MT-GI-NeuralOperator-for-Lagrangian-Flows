@@ -24,7 +24,11 @@ final-2/processed_data
 FINAL/processed_data_task1/
 FINAL/processed_data_task2/
 FINAL/process_data_ugradu/
-FINAL/processed_data_evolution/
+FINAL/process_data_evolution/
+
+FINAL/GNO evolution/process_data_evolution/
+FINAL/GNO ugradu/process_data_ugradu/
+
 
 results/
 
