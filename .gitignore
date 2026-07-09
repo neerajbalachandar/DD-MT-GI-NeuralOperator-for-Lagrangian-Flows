@@ -28,3 +28,7 @@ FINAL/processed_data_evolution/
 
 results/
 
+FINAL/julia_time_forward/surrogate_ml_initial/
+FINAL/julia_time_forward/surrogate_ml_rollout_phyloss/
+FINAL/julia_time_forward/output/
+
