@@ -1,7 +1,0 @@
-{
-  "status": "complete",
-  "started_at": "2026-07-09T00:04:03+0530",
-  "finished_at": "2026-07-09T00:05:01+0530",
-  "summary_path": "/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/benchmark_task1/benchmark_summary.json",
-  "timeseries_csv": "/home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/FINAL/julia_time_forward/output/benchmark_task1/particle_state_error_timeseries.csv"
-}

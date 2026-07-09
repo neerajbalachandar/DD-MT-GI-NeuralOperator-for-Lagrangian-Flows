@@ -26,3 +26,6 @@ FINAL/processed_data_task2/
 
 results/
 
+FINAL/julia_time_forward/surrogate_ml_initial/
+FINAL/julia_time_forward/surrogate_ml_rollout_phyloss/
+
