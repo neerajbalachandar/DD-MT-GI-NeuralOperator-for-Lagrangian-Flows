@@ -73,7 +73,7 @@ MERGED_ROOT = OUT_ROOT / "merged_frames"
 
 # Task-1 evolution setup
 RANDOM_SEED = 42
-TASK1_TARGET_MODE = "delta"  # "delta" | "ugradu" | "both"
+TASK1_TARGET_MODE = "delta"
 
 # Optional metadata table path for strict conditioning channels.
 #
@@ -108,7 +108,7 @@ VAL_CASES: List[str] = []
 TEST_CASES: List[str] = []
 # AUTO_ASSIGN_SPLITS_FROM_CASE_NAMES = True - above will be assigned automatically.
 
-# Feature/state definitions for Task - ignore if we are using ugradu
+# Feature/state definitions for Task-1 evolution.
 STATE_NAMES = ["x", "y", "z", "Gamma_x", "Gamma_y", "Gamma_z", "sigma"]
 TARGET_DELTA_NAMES = [
     "dx",
@@ -118,20 +118,9 @@ TARGET_DELTA_NAMES = [
     "dGamma_y",
     "dGamma_z",
     "dsigma",
-]
-TARGET_UGRADU_NAMES = [
-    "velocity_x",
-    "velocity_y",
-    "velocity_z",
-    "gradUx_x",
-    "gradUx_y",
-    "gradUx_z",
-    "gradUy_x",
-    "gradUy_y",
-    "gradUy_z",
-    "gradUz_x",
-    "gradUz_y",
-    "gradUz_z",
+    "u_x",
+    "u_y",
+    "u_z",
 ]
 
 # Geometry-aware particle channels (from per-frame VTK).
@@ -172,7 +161,6 @@ if USE_EXPLICIT_CONDITIONING:
 
 # Frame quality control.
 MIN_PARTICLES_PER_FRAME = 64 # See what is the use and keep a value > 300
-MIN_UGRADU_TARGET_NORM = 1.0e-12 # See the global min and dynamically keep a value during run based on that min of u and gradu
 EXPORT_FILTERED_FRAME_MANIFEST = True
 
 # Geometry QA control.
@@ -791,7 +779,7 @@ def _load_vtk_geom(vtk_path: str):
                         if m >= 3:
                             cells.append(np.asarray(faces[i + 1 : i + 1 + m], dtype=np.int64))
                         i += 1 + m
-                    nrm = _point_normals_from_cells(pGINO_ugraduts, cells) if len(cells) > 0 else np.zeros_like(pts)
+                    nrm = _point_normals_from_cells(pts, cells) if len(cells) > 0 else np.zeros_like(pts)
                 else:
                     # Last-resort parser for legacy ASCII VTK.
                     pts2, nrm2 = _load_legacy_vtk_ascii(vp)
@@ -1298,6 +1286,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
             with np.load(p, allow_pickle=True) as d:
                 data = {k: d[k] for k in d.files}
             state = _state_from_frame(data)
+            velocity = as_xyz(data["velocity"])
             fr = str(np.asarray(data["frame_id"]).reshape(-1)[0])
             vtk_path = str(np.asarray(data.get("source_vtk_path", "")).reshape(-1)[0])
             phase = 0.0 if T <= 1 else float(i) / float(T - 1)
@@ -1305,6 +1294,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
                 {
                     "frame_id": fr,
                     "state": state,
+                    "velocity": velocity,
                     "phase": phase,
                     "path": str(p),
                     "vtk_path": vtk_path,
@@ -1374,6 +1364,8 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
             st0 = _state_matrix(s0, n)
             st1 = _state_matrix(s1, n)
             delta = st1 - st0
+            velocity = np.asarray(curr["velocity"], dtype=np.float32)[:n]
+            target = np.concatenate([delta, velocity], axis=1).astype(np.float32)
 
             end = start + n
             pair_ranges.append((case, curr["frame_id"], nxt["frame_id"], start, end, n))
@@ -1394,7 +1386,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
             )
 
             rows_x.append(x_feat.astype(np.float32))
-            rows_delta.append(delta.astype(np.float32))
+            rows_delta.append(target)
             rows_next.append(st1.astype(np.float32))
             start = end
 
@@ -1422,6 +1414,9 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     next_mean = np.mean(Y_next[train_rows], axis=0, keepdims=True)
     next_std = np.maximum(np.std(Y_next[train_rows], axis=0, keepdims=True), 1e-8)
     Yn_next = ((Y_next - next_mean) / next_std).astype(np.float32)
+    coord_cols = [PARTICLE_INPUT_FEATURES.index(k) for k in ("x", "y", "z")]
+    coord_min = np.min(X[:, coord_cols], axis=0).astype(np.float32)
+    coord_span = np.maximum(np.ptp(X[:, coord_cols], axis=0), 1e-8).astype(np.float32)
 
     out_path = OUT_ROOT / "particle_evolution_dataset.npz"
     np.savez_compressed(
@@ -1465,6 +1460,8 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         out_std=out_std.astype(np.float32),
         next_mean=next_mean.astype(np.float32),
         next_std=next_std.astype(np.float32),
+        coord_min=coord_min,
+        coord_span=coord_span,
     )
 
     # Rich console summary for sanity checks.
@@ -1484,322 +1481,6 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
 
     return out_path
 
-
-def build_particle_ugradu_dataset(merged: List[Path]) -> Path:
-    """Build instantaneous Task-1 dataset: x_t -> [u_t, gradU_t].
-
-    This is the surrogate mode where FLOWUnsteady still performs particle
-    integration, while the ML model replaces only the expensive U/gradU query.
-    """
-    by_case: Dict[str, List[Path]] = {}
-    for p in merged:
-        by_case.setdefault(p.parent.name, []).append(p)
-    for c in by_case:
-        by_case[c] = sorted(by_case[c], key=lambda x: frame_id(x))
-
-    all_cases = sorted(by_case.keys())
-    _validate_case_split(all_cases)
-
-    # Keep each frame as one coherent graph sample.
-    frame_inputs_raw: List[np.ndarray] = []
-    frame_targets_raw: List[np.ndarray] = []
-    frame_ranges: List[Tuple] = []
-    frame_contexts: List[Dict[str, object]] = []
-    geom_reports: List[Dict[str, Any]] = []
-    filtered_frames: List[Dict[str, Any]] = []
-
-    start = 0
-    for case in all_cases:
-        meta = _case_meta(case)
-        fr_list = by_case[case]
-        T = len(fr_list)
-
-        for i, p in enumerate(fr_list):
-            with np.load(p, allow_pickle=True) as d:
-                data = {k: d[k] for k in d.files}
-
-            state = _state_from_frame(data)
-            xyz = as_xyz(data["particle_xyz"])
-            vel = as_xyz(data["velocity"])
-            gx = as_xyz(data["velocity_gradient_x"])
-            gy = as_xyz(data["velocity_gradient_y"])
-            gz = as_xyz(data["velocity_gradient_z"])
-            grad = np.concatenate([gx, gy, gz], axis=1)
-
-            n = min(
-                xyz.shape[0],
-                vel.shape[0],
-                gx.shape[0],
-                gy.shape[0],
-                gz.shape[0],
-            )
-            fr = str(np.asarray(data["frame_id"]).reshape(-1)[0])
-            vtk_path = str(np.asarray(data.get("source_vtk_path", "")).reshape(-1)[0])
-            usable, reason = _frame_is_usable(n)
-            if not usable:
-                filtered_frames.append(
-                    {
-                        "case": str(case),
-                        "frame": str(fr),
-                        "n_particles": int(n),
-                        "reason": reason,
-                        "source": str(p),
-                    }
-                )
-                continue
-
-            phase = 0.0 if T <= 1 else float(i) / float(T - 1)
-            geom_feat = _particle_geometry_features(xyz, vtk_path, n)
-            geom_reports.append(_geometry_frame_report(case, fr, n, vtk_path, geom_feat))
-            x_feat = _feature_matrix_from_state(
-                state=state,
-                n=n,
-                phase=phase,
-                aoa_deg=float(meta["aoa_deg"]),
-                freestream=np.asarray(meta["freestream"], dtype=np.float64),
-                geom_feat=geom_feat,
-            )
-            y = np.concatenate([vel[:n], grad[:n]], axis=1).astype(np.float32)
-            target_norm = float(np.linalg.norm(np.nan_to_num(y).reshape(-1)))
-            if (not np.isfinite(target_norm)) or target_norm <= MIN_UGRADU_TARGET_NORM:
-                filtered_frames.append(
-                    {
-                        "case": str(case),
-                        "frame": str(fr),
-                        "n_particles": int(n),
-                        "reason": "tiny_ugradu_target",
-                        "target_norm": target_norm,
-                        "source": str(p),
-                    }
-                )
-                continue
-
-            end = start + n
-            frame_ranges.append((case, fr, start, end, n))
-            frame_contexts.append(
-                {
-                    "case": case,
-                    "frame": fr,
-                    "start": start,
-                    "end": end,
-                    "n_particles": n,
-                    "phase": phase,
-                    "aoa_deg": float(meta["aoa_deg"]),
-                    "freestream": [float(v) for v in np.asarray(meta["freestream"]).reshape(-1)],
-                    "dt": float(meta["dt"]),
-                    "particles_per_step": int(meta.get("particles_per_step", 1)),
-                    "split": _case_split_label(case),
-                    "test_role": _test_case_role_from_metadata(meta) if _case_split_label(case) == "test" else "",
-                    "vtk_path": vtk_path,
-                }
-            )
-
-            frame_inputs_raw.append(x_feat.astype(np.float32))
-            frame_targets_raw.append(y.astype(np.float32))
-            start = end
-
-    if not frame_inputs_raw:
-        raise RuntimeError("No Task-1 u/gradU samples were built after filtering.")
-
-    _validate_geometry_report(geom_reports)
-
-    # OOD case splits stay fixed by user intent.
-    frame_ids_train_all = np.array(
-        [i for i, r in enumerate(frame_ranges) if _case_split_label(r[0]) == "train"], dtype=np.int64
-    )
-    frame_ids_val_ood = np.array(
-        [i for i, r in enumerate(frame_ranges) if _case_split_label(r[0]) == "val"], dtype=np.int64
-    )
-    frame_ids_test_ood = np.array(
-        [i for i, r in enumerate(frame_ranges) if _case_split_label(r[0]) == "test"], dtype=np.int64
-    )
-    frame_ids_test_normal = np.array(
-        [
-            i
-            for i, r in enumerate(frame_ranges)
-            if _case_split_label(r[0]) == "test"
-            and _test_case_role_from_metadata(_case_meta(r[0])) == "testing_normal"
-        ],
-        dtype=np.int64,
-    )
-    frame_ids_test_super_resolution = np.array(
-        [
-            i
-            for i, r in enumerate(frame_ranges)
-            if _case_split_label(r[0]) == "test"
-            and _test_case_role_from_metadata(_case_meta(r[0])) == "testing_super_resolution"
-        ],
-        dtype=np.int64,
-    )
-    frame_ids_test_unseen_angle = np.array(
-        [
-            i
-            for i, r in enumerate(frame_ranges)
-            if _case_split_label(r[0]) == "test"
-            and _test_case_role_from_metadata(_case_meta(r[0])) == "testing_unseen_angle"
-        ],
-        dtype=np.int64,
-    )
-
-    frame_ids_train, frame_ids_val_id = _train_id_val_id_split_by_case(frame_ranges, frame_ids_train_all)
-    if frame_ids_train.size == 0:
-        raise RuntimeError("Train-ID split became empty. Reduce VAL_ID_FRACTION_FROM_TRAIN_CASES or filtering.")
-
-    def rows_from_frame_ids(fid: np.ndarray) -> np.ndarray:
-        chunks = []
-        for i in fid:
-            _, _, s, e, _ = frame_ranges[int(i)]
-            chunks.append(np.arange(int(s), int(e), dtype=np.int64))
-        return np.concatenate(chunks) if chunks else np.zeros((0,), dtype=np.int64)
-
-    train_rows = rows_from_frame_ids(frame_ids_train)
-    val_id_rows = rows_from_frame_ids(frame_ids_val_id)
-    val_ood_rows = rows_from_frame_ids(frame_ids_val_ood)
-    test_ood_rows = rows_from_frame_ids(frame_ids_test_ood)
-
-    # Backward-compatible keys now point to the same-distribution validation
-    # split used for training curves/model selection. The held-out AoA
-    # validation cases are saved separately as validation_angle_*.
-    val_rows = val_id_rows
-    test_rows = test_ood_rows
-
-    # Normalize using ONLY train-ID rows.
-    X_train = np.concatenate([frame_inputs_raw[int(i)] for i in frame_ids_train], axis=0).astype(np.float32)
-    Y_train = np.concatenate([frame_targets_raw[int(i)] for i in frame_ids_train], axis=0).astype(np.float32)
-    in_mean = np.mean(X_train, axis=0, keepdims=True)
-    in_std = np.maximum(np.std(X_train, axis=0, keepdims=True), 1e-8)
-    out_mean = np.mean(Y_train, axis=0, keepdims=True)
-    out_std = np.maximum(np.std(Y_train, axis=0, keepdims=True), 1e-8)
-
-    frame_inputs_norm = [((x - in_mean) / in_std).astype(np.float32) for x in frame_inputs_raw]
-    frame_targets_norm = [((y - out_mean) / out_std).astype(np.float32) for y in frame_targets_raw]
-
-    # Flat arrays kept only as optional legacy compatibility keys.
-    X = np.concatenate(frame_inputs_raw, axis=0).astype(np.float32)
-    Y = np.concatenate(frame_targets_raw, axis=0).astype(np.float32)
-    Xn = np.concatenate(frame_inputs_norm, axis=0).astype(np.float32)
-    Yn = np.concatenate(frame_targets_norm, axis=0).astype(np.float32)
-    coord_cols = [PARTICLE_INPUT_FEATURES.index(k) for k in ("x", "y", "z")]
-    coord_min = np.min(X[:, coord_cols], axis=0).astype(np.float32)
-    coord_span = np.maximum(np.ptp(X[:, coord_cols], axis=0), 1e-8).astype(np.float32)
-
-    _assert_conditioning_variance(X, PARTICLE_INPUT_FEATURES, train_rows)
-
-    split_stats = {
-        "train_id": _split_stats_from_rows(Y, frame_ranges, frame_ids_train, "train_id"),
-        "val_id": _split_stats_from_rows(Y, frame_ranges, frame_ids_val_id, "val_id"),
-        "val_ood": _split_stats_from_rows(Y, frame_ranges, frame_ids_val_ood, "val_ood"),
-        "test_ood": _split_stats_from_rows(Y, frame_ranges, frame_ids_test_ood, "test_ood"),
-    }
-    geom_case_summary = _geometry_case_summary(geom_reports)
-
-    filtered_manifest_path = OUT_ROOT / "task1_ugradu_filtered_frames.json"
-    if EXPORT_FILTERED_FRAME_MANIFEST:
-        filtered_manifest_path.write_text(
-            json.dumps(
-                {
-                    "min_particles_per_frame": int(MIN_PARTICLES_PER_FRAME),
-                    "min_ugradu_target_norm": float(MIN_UGRADU_TARGET_NORM),
-                    "n_filtered": int(len(filtered_frames)),
-                    "filtered_frames": filtered_frames,
-                },
-                indent=2,
-            )
-        )
-
-    out_path = OUT_ROOT / "particle_ugradu_dataset.npz"
-    np.savez_compressed(
-        out_path,
-        # Frame-graph dataset (preferred)
-        inputs_by_frame=np.asarray(frame_inputs_raw, dtype=object),
-        targets_by_frame=np.asarray(frame_targets_raw, dtype=object),
-        inputs_by_frame_norm=np.asarray(frame_inputs_norm, dtype=object),
-        targets_by_frame_norm=np.asarray(frame_targets_norm, dtype=object),
-        # Flat legacy arrays (optional compatibility with older scripts)
-        inputs_t=X,
-        targets_ugradu=Y,
-        inputs_t_norm=Xn,
-        targets_ugradu_norm=Yn,
-        feature_names=np.asarray(PARTICLE_INPUT_FEATURES, dtype=object),
-        target_names=np.asarray(TARGET_UGRADU_NAMES, dtype=object),
-        frame_ranges=np.asarray(frame_ranges, dtype=object),
-        frame_contexts=np.asarray(frame_contexts, dtype=object),
-        # Backward-compatible split keys: validation is same-distribution;
-        # test remains the complete held-out test collection.
-        train_frame_ids=frame_ids_train,
-        val_frame_ids=frame_ids_val_id,
-        test_frame_ids=frame_ids_test_ood,
-        train_rows=train_rows,
-        val_rows=val_rows,
-        test_rows=test_rows,
-        # Explicit dual split keys.
-        train_frame_ids_all_train_cases=frame_ids_train_all,
-        train_id_frame_ids=frame_ids_train,
-        val_id_frame_ids=frame_ids_val_id,
-        val_ood_frame_ids=frame_ids_val_ood,
-        validation_angle_frame_ids=frame_ids_val_ood,
-        test_ood_frame_ids=frame_ids_test_ood,
-        test_normal_frame_ids=frame_ids_test_normal,
-        test_super_resolution_frame_ids=frame_ids_test_super_resolution,
-        test_unseen_angle_frame_ids=frame_ids_test_unseen_angle,
-        val_id_rows=val_id_rows,
-        val_ood_rows=val_ood_rows,
-        validation_angle_rows=val_ood_rows,
-        test_ood_rows=test_ood_rows,
-        test_normal_rows=rows_from_frame_ids(frame_ids_test_normal),
-        test_super_resolution_rows=rows_from_frame_ids(frame_ids_test_super_resolution),
-        test_unseen_angle_rows=rows_from_frame_ids(frame_ids_test_unseen_angle),
-        split_stats=np.asarray(split_stats, dtype=object),
-        geometry_case_summary=np.asarray(geom_case_summary, dtype=object),
-        filtered_frames=np.asarray(filtered_frames, dtype=object),
-        train_cases=np.asarray(TRAIN_CASES, dtype=object),
-        val_cases=np.asarray(VAL_CASES, dtype=object),
-        test_cases=np.asarray(TEST_CASES, dtype=object),
-        case_metadata=np.asarray(ACTIVE_CASE_METADATA, dtype=object),
-        use_explicit_conditioning=np.asarray(USE_EXPLICIT_CONDITIONING),
-        conditioning_channel_names=np.asarray(CONDITIONING_CHANNEL_NAMES, dtype=object),
-        conditioning_active_channel_names=np.asarray(ACTIVE_CONDITIONING_CHANNEL_NAMES, dtype=object),
-        use_geometry_channels=np.asarray(USE_GEOMETRY_CHANNELS),
-        geometry_channel_names=np.asarray(GEOMETRY_CHANNEL_NAMES, dtype=object),
-        coord_min=coord_min,
-        coord_span=coord_span,
-        in_mean=in_mean.astype(np.float32),
-        in_std=in_std.astype(np.float32),
-        out_mean=out_mean.astype(np.float32),
-        out_std=out_std.astype(np.float32),
-    )
-
-    print("\n[task1-ugradu] dataset built")
-    print("  n_graph_frames            :", len(frame_inputs_raw))
-    print("  filtered_frames           :", len(filtered_frames))
-    print("  first graph shapes        :", frame_inputs_raw[0].shape, frame_targets_raw[0].shape)
-    print("  inputs_t shape (legacy)   :", X.shape)
-    print("  targets_ugradu (legacy)   :", Y.shape)
-    print("  n_frames                  :", len(frame_ranges))
-    print("  feature_names             :", PARTICLE_INPUT_FEATURES)
-    print("  use_explicit_conditioning :", USE_EXPLICIT_CONDITIONING)
-    print("  conditioning_channels     :", ACTIVE_CONDITIONING_CHANNEL_NAMES)
-    print("  use_geometry_channels     :", USE_GEOMETRY_CHANNELS)
-    print("  target_names              :", TARGET_UGRADU_NAMES)
-    print("  split rows train_id/val_id/val_ood/test_ood:",
-          len(train_rows), len(val_id_rows), len(val_ood_rows), len(test_ood_rows))
-    print("  zero/tiny target filter   :", MIN_UGRADU_TARGET_NORM)
-    print("  split frame counts        :",
-          {
-              "train": int(len(frame_ids_train)),
-              "val_id": int(len(frame_ids_val_id)),
-              "val_angle": int(len(frame_ids_val_ood)),
-              "test_normal": int(len(frame_ids_test_normal)),
-              "test_sr": int(len(frame_ids_test_super_resolution)),
-              "test_unseen": int(len(frame_ids_test_unseen_angle)),
-          })
-    print("  validation_frame_stride/offset:",
-          VAL_ID_FRAME_STRIDE, VAL_ID_FRAME_OFFSET)
-    print("  test frames normal/super-resolution/unseen-angle:",
-          len(frame_ids_test_normal), len(frame_ids_test_super_resolution), len(frame_ids_test_unseen_angle))
-    print("  filtered manifest         :", filtered_manifest_path if EXPORT_FILTERED_FRAME_MANIFEST else "disabled")
-    _print_geometry_channel_stats(X, PARTICLE_INPUT_FEATURES, "task1-ugradu")
-    return out_path
 
 
 # ==============================================================================
@@ -1829,18 +1510,10 @@ def main() -> None:
 
     merged = merge_frames()
 
-    particle_evolution_path = None
-    particle_ugradu_path = None
     mode = str(TASK1_TARGET_MODE).lower()
-    if mode == "delta":
-        particle_evolution_path = build_particle_evolution_dataset(merged)
-    elif mode == "ugradu":
-        particle_ugradu_path = build_particle_ugradu_dataset(merged)
-    elif mode == "both":
-        particle_evolution_path = build_particle_evolution_dataset(merged)
-        particle_ugradu_path = build_particle_ugradu_dataset(merged)
-    else:
-        raise ValueError("TASK1_TARGET_MODE must be one of: delta, ugradu, both")
+    if mode != "delta":
+        raise ValueError("TASK1_TARGET_MODE must be 'delta'")
+    particle_evolution_path = build_particle_evolution_dataset(merged)
 
     summary = {
         "raw_root": str(RAW_ROOT),
@@ -1848,7 +1521,6 @@ def main() -> None:
         "n_merged_frames": len(merged),
         "task1_target_mode": mode,
         "task1_particle_evolution_dataset": None if particle_evolution_path is None else str(particle_evolution_path),
-        "task1_particle_ugradu_dataset": None if particle_ugradu_path is None else str(particle_ugradu_path),
         "use_explicit_conditioning": USE_EXPLICIT_CONDITIONING,
         "conditioning_channel_names": CONDITIONING_CHANNEL_NAMES if USE_EXPLICIT_CONDITIONING else [],
         "conditioning_active_channel_names": ACTIVE_CONDITIONING_CHANNEL_NAMES,
