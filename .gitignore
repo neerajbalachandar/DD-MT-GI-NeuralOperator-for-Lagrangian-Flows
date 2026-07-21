@@ -41,4 +41,6 @@ FINAL/processed_data
 
 # Master branch
 GNO_ugradu_deployment/GNO ugradu/process_data_ugradu/
+GNO_ugradu_deployment/input_distribution/
+GNO_ugradu_deployment/GNO ugradu/ugradu prediction/
 
