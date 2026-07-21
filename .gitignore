@@ -36,3 +36,9 @@ FINAL/julia_time_forward/surrogate_ml_initial/
 FINAL/julia_time_forward/surrogate_ml_rollout_phyloss/
 FINAL/julia_time_forward/output/
 
+FINAL/processed_data
+
+
+# Master branch
+GNO_ugradu_deployment/GNO ugradu/process_data_ugradu/
+
