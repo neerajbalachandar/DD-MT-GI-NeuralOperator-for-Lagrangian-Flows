@@ -1315,7 +1315,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         by_case[c] = sorted(by_case[c], key=lambda x: frame_id(x))
 
     field_root = _resolve_field_root()
-    field_h5_by_case: Dict[str, Dict[int, Path]] = {}
+    field_h5_by_case: Dict[str, Dict[str, Path]] = {}
     for case in sorted(by_case.keys()):
         case_field_root = field_root / case
         if not case_field_root.exists():
@@ -1328,12 +1328,8 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         print(f"[field] {case}: fdom frames={len(field_h5_by_case[case])}")
 
     def field_grid_for_pair(case: str, frame_t: object) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-        try:
-            fr_int = int(float(str(frame_t)))
-        except Exception:
-            return None
-        key = (case, fr_int)
-        path = field_h5_by_case.get(key[0], {}).get(key[1])
+        fr = str(np.asarray(frame_t).reshape(-1)[0])
+        path = field_h5_by_case.get(case, {}).get(fr)
         if path is None:
             return None
         return read_field_grid_h5(path)
@@ -1523,8 +1519,23 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     next_std = np.maximum(np.std(Y_next[train_rows], axis=0, keepdims=True), 1e-8)
     Yn_next = ((Y_next - next_mean) / next_std).astype(np.float32)
     coord_cols = [PARTICLE_INPUT_FEATURES.index(k) for k in ("x", "y", "z")]
-    coord_min = np.min(X[:, coord_cols], axis=0).astype(np.float32)
-    coord_span = np.maximum(np.ptp(X[:, coord_cols], axis=0), 1e-8).astype(np.float32)
+    particle_coords = X[:, coord_cols]
+    valid_field_coords = field_query_coords[field_query_mask]
+    if valid_field_coords.size:
+        coord_source = np.concatenate([particle_coords, valid_field_coords], axis=0)
+    else:
+        coord_source = particle_coords
+    coord_min = np.min(coord_source, axis=0).astype(np.float32)
+    coord_span = np.maximum(np.ptp(coord_source, axis=0), 1e-8).astype(np.float32)
+    coord_max = (coord_min + coord_span).astype(np.float32)
+    particle_coord_min = np.min(particle_coords, axis=0).astype(np.float32)
+    particle_coord_max = np.max(particle_coords, axis=0).astype(np.float32)
+    if valid_field_coords.size:
+        field_coord_min = np.min(valid_field_coords, axis=0).astype(np.float32)
+        field_coord_max = np.max(valid_field_coords, axis=0).astype(np.float32)
+    else:
+        field_coord_min = np.full(3, np.nan, dtype=np.float32)
+        field_coord_max = np.full(3, np.nan, dtype=np.float32)
 
     out_path = OUT_ROOT / "particle_evolution_dataset.npz"
     np.savez_compressed(
@@ -1579,6 +1590,11 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         next_std=next_std.astype(np.float32),
         coord_min=coord_min,
         coord_span=coord_span,
+        coord_max=coord_max,
+        particle_coord_min=particle_coord_min,
+        particle_coord_max=particle_coord_max,
+        field_coord_min=field_coord_min,
+        field_coord_max=field_coord_max,
         max_field_query_points=np.asarray(MAX_FIELD_QUERY_POINTS, dtype=np.int64),
     )
 
@@ -1589,6 +1605,10 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     print("  query_coords shape        :", field_query_coords.shape)
     print("  targets_velocity_field    :", targets_velocity_field.shape)
     print("  skipped pairs no field    :", skipped_pairs_missing_field)
+    print("  coord_min union           :", coord_min.tolist())
+    print("  coord_max union           :", coord_max.tolist())
+    print("  particle coord min/max    :", particle_coord_min.tolist(), particle_coord_max.tolist())
+    print("  field coord min/max       :", field_coord_min.tolist(), field_coord_max.tolist())
     print("  targets_next_state shape  :", Y_next.shape)
     print("  n_pairs                   :", len(pair_ranges))
     print("  n_rollout_cases           :", len(rollout_cases))
