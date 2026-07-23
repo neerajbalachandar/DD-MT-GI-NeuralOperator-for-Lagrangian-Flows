@@ -34,6 +34,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 # Task-1 dataset root
 RAW_ROOT = Path("/media/neerajc/New Volume/Neeraj/neuralop/data/task1")
 RAW_ROOT_CANDIDATES = [RAW_ROOT]
+FIELD_ROOT = Path("/media/neerajc/New Volume/Neeraj/neuralop/data/task2")
+FIELD_ROOT_CANDIDATES = [FIELD_ROOT]
 
 # Leave empty when AUTO_DISCOVER_TASK1_CASES=True.
 DATASET_IDS: List[str] = []
@@ -58,6 +60,7 @@ EXPECTED_PARTICLES_PER_STEP_BY_AOA: Dict[int, int] = {}
 DYNAMIC_PARTICLE_H5_PATTERN = "static_airfoil_pfield.*.h5"
 STATIC_PARTICLE_H5_PATTERN = "static_airfoil_staticpfield.*.h5"
 VTK_PATTERN = "static_airfoil_Wing_vlm.*.vtk"
+FIELD_H5_PATTERN = "static_airfoil_fdom.*.h5"
 INCLUDE_STATIC_PARTICLES = True
 
 OUT_ROOT = SCRIPT_DIR / "processed_data"
@@ -110,10 +113,15 @@ TARGET_DELTA_NAMES = [
     "dGamma_y",
     "dGamma_z",
     "dsigma",
-    "u_x",
-    "u_y",
-    "u_z",
+    "delta_u_x",
+    "delta_u_y",
+    "delta_u_z",
 ]
+
+# Field-reconstruction supervision for the MLP decoder.  These query points come
+# from the precomputed task2 field grid, not from particle positions.
+MAX_FIELD_QUERY_POINTS = 4096
+FIELD_TARGET_NAMES = ["u_x", "u_y", "u_z"]
 
 # Geometry-aware particle channels (from per-frame VTK).
 USE_GEOMETRY_CHANNELS = True
@@ -145,6 +153,9 @@ PARTICLE_INPUT_FEATURES = [
     "Gamma_y",
     "Gamma_z",
     "sigma",
+    "u_x",
+    "u_y",
+    "u_z",
 ]
 if USE_GEOMETRY_CHANNELS:
     PARTICLE_INPUT_FEATURES = PARTICLE_INPUT_FEATURES + GEOMETRY_CHANNEL_NAMES
@@ -222,6 +233,23 @@ def read_h5_selected(path: Path, key_map: Dict[str, str]) -> Dict[str, np.ndarra
                 raise KeyError(f"{path.name}: missing key {in_key}")
             out[out_key] = np.asarray(f[in_key])
     return out
+
+
+def read_field_grid_h5(path: Path) -> Tuple[np.ndarray, np.ndarray]:
+    """Read task2 field-domain grid coordinates and velocity."""
+    with h5py.File(path, "r") as f:
+        if "nodes" not in f:
+            raise KeyError(f"{path.name}: missing grid-coordinate dataset 'nodes'")
+        if "U" not in f:
+            raise KeyError(f"{path.name}: missing velocity dataset 'U'")
+        coords = as_xyz(np.asarray(f["nodes"]))
+        velocity = as_xyz(np.asarray(f["U"]))
+    if coords.shape[0] != velocity.shape[0]:
+        raise ValueError(
+            f"{path.name}: nodes and U have different point counts: "
+            f"{coords.shape[0]} vs {velocity.shape[0]}"
+        )
+    return coords.astype(np.float32), velocity.astype(np.float32)
 
 
 def _fit_scalar(arr: np.ndarray, n: int, default: float) -> np.ndarray:
@@ -303,6 +331,28 @@ def _resolve_raw_root() -> Path:
     raise FileNotFoundError(
         "Could not locate Task-1 dataset root. Tried: "
         f"{tried}. Update RAW_ROOT or mount the external drive."
+    )
+
+
+def _resolve_field_root() -> Path:
+    env_raw = os.environ.get("FIELD_ROOT", os.environ.get("TASK2_ROOT", "")).strip()
+    if env_raw:
+        p = Path(env_raw)
+        if p.exists() and p.is_dir():
+            return p
+        raise FileNotFoundError(
+            f"FIELD_ROOT/TASK2_ROOT is set but invalid: {p}. "
+            "Fix the env var or unset it."
+        )
+
+    for cand in FIELD_ROOT_CANDIDATES:
+        c = Path(cand)
+        if c.exists() and c.is_dir():
+            return c
+    tried = ", ".join([str(Path(c)) for c in FIELD_ROOT_CANDIDATES])
+    raise FileNotFoundError(
+        "Could not locate Task-2 field-grid root. Tried: "
+        f"{tried}. Update FIELD_ROOT/TASK2_ROOT or mount the external drive."
     )
 
 
@@ -1190,6 +1240,7 @@ def _state_from_frame(data: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
 
 def _feature_matrix_from_state(
     state: Dict[str, np.ndarray],
+    velocity: np.ndarray,
     n: int,
     phase: float,
     aoa_deg: float,
@@ -1204,6 +1255,9 @@ def _feature_matrix_from_state(
         "Gamma_y": state["Gamma_y"][:n],
         "Gamma_z": state["Gamma_z"][:n],
         "sigma": state["sigma"][:n],
+        "u_x": velocity[:n, 0],
+        "u_y": velocity[:n, 1],
+        "u_z": velocity[:n, 2],
     }
     # Optional context features are only added if requested.
     if "phase" in PARTICLE_INPUT_FEATURES:
@@ -1260,6 +1314,30 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     for c in by_case:
         by_case[c] = sorted(by_case[c], key=lambda x: frame_id(x))
 
+    field_root = _resolve_field_root()
+    field_h5_by_case: Dict[str, Dict[int, Path]] = {}
+    for case in sorted(by_case.keys()):
+        case_field_root = field_root / case
+        if not case_field_root.exists():
+            field_h5_by_case[case] = {}
+            continue
+        field_h5_by_case[case] = {
+            frame_id(path): path
+            for path in sorted(case_field_root.glob(FIELD_H5_PATTERN))
+        }
+        print(f"[field] {case}: fdom frames={len(field_h5_by_case[case])}")
+
+    def field_grid_for_pair(case: str, frame_t: object) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+        try:
+            fr_int = int(float(str(frame_t)))
+        except Exception:
+            return None
+        key = (case, fr_int)
+        path = field_h5_by_case.get(key[0], {}).get(key[1])
+        if path is None:
+            return None
+        return read_field_grid_h5(path)
+
     all_cases = sorted(by_case.keys())
     _validate_case_split(all_cases)
 
@@ -1297,6 +1375,9 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     rows_x: List[np.ndarray] = []
     rows_delta: List[np.ndarray] = []
     rows_next: List[np.ndarray] = []
+    field_query_coords_by_pair: List[np.ndarray] = []
+    field_velocity_by_pair: List[np.ndarray] = []
+    skipped_pairs_missing_field = 0
 
     pair_ranges: List[Tuple] = []
     pair_contexts: List[Dict[str, object]] = []
@@ -1331,6 +1412,10 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         for i in range(T - 1):
             curr = fr_list[i]
             nxt = fr_list[i + 1]
+            field_grid = field_grid_for_pair(case, curr["frame_id"])
+            if field_grid is None:
+                skipped_pairs_missing_field += 1
+                continue
 
             s0 = curr["state"]
             s1 = nxt["state"]
@@ -1346,6 +1431,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
 
             x_feat = _feature_matrix_from_state(
                 state=s0,
+                velocity=np.asarray(curr["velocity"], dtype=np.float32),
                 n=n,
                 phase=float(curr["phase"]),
                 aoa_deg=float(meta["aoa_deg"]),
@@ -1356,8 +1442,10 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
             st0 = _state_matrix(s0, n)
             st1 = _state_matrix(s1, n)
             delta = st1 - st0
-            velocity = np.asarray(curr["velocity"], dtype=np.float32)[:n]
-            target = np.concatenate([delta, velocity], axis=1).astype(np.float32)
+            velocity_current = np.asarray(curr["velocity"], dtype=np.float32)[:n]
+            velocity_next = np.asarray(nxt["velocity"], dtype=np.float32)[:n]
+            delta_u = velocity_next - velocity_current
+            target = np.concatenate([delta, delta_u], axis=1).astype(np.float32)
 
             end = start + n
             pair_ranges.append((case, curr["frame_id"], nxt["frame_id"], start, end, n))
@@ -1380,6 +1468,9 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
             rows_x.append(x_feat.astype(np.float32))
             rows_delta.append(target)
             rows_next.append(st1.astype(np.float32))
+            grid_coords, grid_velocity = field_grid
+            field_query_coords_by_pair.append(grid_coords.astype(np.float32))
+            field_velocity_by_pair.append(grid_velocity.astype(np.float32))
             start = end
 
     if not rows_x:
@@ -1388,6 +1479,24 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     X = np.concatenate(rows_x, axis=0).astype(np.float32)
     Y_delta = np.concatenate(rows_delta, axis=0).astype(np.float32)
     Y_next = np.concatenate(rows_next, axis=0).astype(np.float32)
+
+    n_pairs = len(pair_ranges)
+    field_query_coords = np.zeros((n_pairs, MAX_FIELD_QUERY_POINTS, 3), dtype=np.float32)
+    targets_velocity_field = np.zeros((n_pairs, MAX_FIELD_QUERY_POINTS, 3), dtype=np.float32)
+    field_query_mask = np.zeros((n_pairs, MAX_FIELD_QUERY_POINTS), dtype=bool)
+    for pair_id, (query_coords, velocity_values) in enumerate(zip(field_query_coords_by_pair, field_velocity_by_pair)):
+        n_query = min(int(query_coords.shape[0]), int(MAX_FIELD_QUERY_POINTS))
+        if n_query <= 0:
+            continue
+        if query_coords.shape[0] > n_query:
+            # Deterministic coverage of the field grid for this pair. The
+            # training Dataset can still randomly subsample further each epoch.
+            picked = np.linspace(0, query_coords.shape[0] - 1, n_query, dtype=np.int64)
+        else:
+            picked = np.arange(n_query, dtype=np.int64)
+        field_query_coords[pair_id, :n_query, :] = query_coords[picked, :]
+        targets_velocity_field[pair_id, :n_query, :] = velocity_values[picked, :]
+        field_query_mask[pair_id, :n_query] = True
 
     # Case-based split at pair level
     pair_split_train = np.array([i for i, r in enumerate(pair_ranges) if _case_split_label(r[0]) == "train"], dtype=np.int64)
@@ -1401,6 +1510,13 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     # Normalize per feature using TRAIN rows only.
     in_mean, in_std, Xn = _normalize_channels_rows(X, train_rows)
     out_mean, out_std, Yn_delta = _normalize_channels_rows(Y_delta, train_rows)
+
+    train_field_values = targets_velocity_field[pair_split_train][field_query_mask[pair_split_train]]
+    if train_field_values.size == 0:
+        raise RuntimeError("No field-reconstruction query points were available in the training split.")
+    field_mean = np.mean(train_field_values, axis=0, keepdims=True).astype(np.float32)
+    field_std = np.maximum(np.std(train_field_values, axis=0, keepdims=True), 1e-8).astype(np.float32)
+    targets_velocity_field_norm = ((targets_velocity_field - field_mean.reshape(1, 1, 3)) / field_std.reshape(1, 1, 3)).astype(np.float32)
 
     # Next-state normalization for optional analysis (not primary training target).
     next_mean = np.mean(Y_next[train_rows], axis=0, keepdims=True)
@@ -1416,14 +1532,21 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         # core supervised data
         inputs_t=X,
         targets_delta=Y_delta,
+        query_coords=field_query_coords,
+        targets_velocity_field=targets_velocity_field,
+        field_query_mask=field_query_mask,
+        field_query_source=np.asarray("task2_static_airfoil_fdom_grid", dtype=object),
+        field_root=np.asarray(str(field_root), dtype=object),
         targets_next_state=Y_next,
         inputs_t_norm=Xn,
         targets_delta_norm=Yn_delta,
+        targets_velocity_field_norm=targets_velocity_field_norm,
         targets_next_state_norm=Yn_next,
         # naming
         feature_names=np.asarray(PARTICLE_INPUT_FEATURES, dtype=object),
         state_names=np.asarray(STATE_NAMES, dtype=object),
         target_names=np.asarray(TARGET_DELTA_NAMES, dtype=object),
+        field_target_names=np.asarray(FIELD_TARGET_NAMES, dtype=object),
         # pair indexing
         pair_ranges=np.asarray(pair_ranges, dtype=object),
         pair_contexts=np.asarray(pair_contexts, dtype=object),
@@ -1450,16 +1573,22 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         in_std=in_std.astype(np.float32),
         out_mean=out_mean.astype(np.float32),
         out_std=out_std.astype(np.float32),
+        field_mean=field_mean.astype(np.float32),
+        field_std=field_std.astype(np.float32),
         next_mean=next_mean.astype(np.float32),
         next_std=next_std.astype(np.float32),
         coord_min=coord_min,
         coord_span=coord_span,
+        max_field_query_points=np.asarray(MAX_FIELD_QUERY_POINTS, dtype=np.int64),
     )
 
     # Rich console summary for sanity checks.
     print("\n[task1] Particle evolution dataset built")
     print("  inputs_t shape            :", X.shape)
     print("  targets_delta shape       :", Y_delta.shape)
+    print("  query_coords shape        :", field_query_coords.shape)
+    print("  targets_velocity_field    :", targets_velocity_field.shape)
+    print("  skipped pairs no field    :", skipped_pairs_missing_field)
     print("  targets_next_state shape  :", Y_next.shape)
     print("  n_pairs                   :", len(pair_ranges))
     print("  n_rollout_cases           :", len(rollout_cases))
