@@ -122,6 +122,13 @@ TARGET_DELTA_NAMES = [
 # from the precomputed task2 field grid, not from particle positions.
 MAX_FIELD_QUERY_POINTS = 4096
 FIELD_TARGET_NAMES = ["u_x", "u_y", "u_z"]
+# Keep field supervision in the informative near-airfoil/wake region by default.
+# The task2 fdom grid spans a large freestream-dominated domain; using all points
+# makes the velocity target nearly constant and can produce useless field losses.
+# Override with FIELD_QUERY_BOUNDS="xmin,xmax,ymin,ymax,zmin,zmax", or set it to
+# "none"/"full" to keep all finite field points.
+DEFAULT_FIELD_QUERY_BOUNDS = (-0.5, 4.0, -0.8, 0.8, -0.5, 2.0)
+FIELD_STD_FLOOR = float(os.environ.get("FIELD_STD_FLOOR", "1e-6"))
 
 # Geometry-aware particle channels (from per-frame VTK).
 USE_GEOMETRY_CHANNELS = True
@@ -215,9 +222,9 @@ def as_xyz(a: np.ndarray) -> np.ndarray:
 def as_vec_field(a: np.ndarray) -> np.ndarray:
     a = np.asarray(a)
     if a.ndim == 4 and a.shape[-1] == 3:
-        return a.astype(np.float64)
+        return a.reshape(-1, 3).astype(np.float64)
     if a.ndim == 4 and a.shape[0] == 3:
-        return np.moveaxis(a, 0, -1).astype(np.float64)
+        return np.moveaxis(a, 0, -1).reshape(-1, 3).astype(np.float64)
     if a.ndim == 2 and a.shape[1] == 3:
         return a.astype(np.float64)
     if a.ndim == 2 and a.shape[0] == 3:
@@ -235,6 +242,45 @@ def read_h5_selected(path: Path, key_map: Dict[str, str]) -> Dict[str, np.ndarra
     return out
 
 
+
+def _field_query_bounds() -> Optional[Tuple[float, float, float, float, float, float]]:
+    raw = os.environ.get("FIELD_QUERY_BOUNDS", "").strip()
+    if raw.lower() in {"none", "full", "all", "off", "false", "0"}:
+        return None
+    if not raw:
+        return DEFAULT_FIELD_QUERY_BOUNDS
+    parts = [float(x.strip()) for x in raw.replace(";", ",").split(",") if x.strip()]
+    if len(parts) != 6:
+        raise ValueError(
+            "FIELD_QUERY_BOUNDS must have six values: xmin,xmax,ymin,ymax,zmin,zmax "
+            f"or be 'none'; got {raw!r}"
+        )
+    xmin, xmax, ymin, ymax, zmin, zmax = parts
+    if not (xmin < xmax and ymin < ymax and zmin < zmax):
+        raise ValueError(f"Invalid FIELD_QUERY_BOUNDS ordering: {parts}")
+    return xmin, xmax, ymin, ymax, zmin, zmax
+
+
+def _filter_field_queries(coords: np.ndarray, values: np.ndarray, path: Path) -> Tuple[np.ndarray, np.ndarray]:
+    finite = np.isfinite(coords).all(axis=1) & np.isfinite(values).all(axis=1)
+    bounds = _field_query_bounds()
+    keep = finite.copy()
+    if bounds is not None:
+        xmin, xmax, ymin, ymax, zmin, zmax = bounds
+        in_box = (
+            (coords[:, 0] >= xmin) & (coords[:, 0] <= xmax)
+            & (coords[:, 1] >= ymin) & (coords[:, 1] <= ymax)
+            & (coords[:, 2] >= zmin) & (coords[:, 2] <= zmax)
+        )
+        keep &= in_box
+    if not np.any(keep):
+        if np.any(finite):
+            print(f"[field] warning: {path.name} has no finite points in FIELD_QUERY_BOUNDS={bounds}; using all finite points")
+            keep = finite
+        else:
+            raise ValueError(f"{path.name}: no finite field query/target rows")
+    return coords[keep].astype(np.float32), values[keep].astype(np.float32)
+
 def read_field_grid_h5(path: Path) -> Tuple[np.ndarray, np.ndarray]:
     """Read task2 field-domain grid coordinates and velocity."""
     with h5py.File(path, "r") as f:
@@ -243,13 +289,13 @@ def read_field_grid_h5(path: Path) -> Tuple[np.ndarray, np.ndarray]:
         if "U" not in f:
             raise KeyError(f"{path.name}: missing velocity dataset 'U'")
         coords = as_xyz(np.asarray(f["nodes"]))
-        velocity = as_xyz(np.asarray(f["U"]))
+        velocity = as_vec_field(np.asarray(f["U"]))
     if coords.shape[0] != velocity.shape[0]:
         raise ValueError(
             f"{path.name}: nodes and U have different point counts: "
             f"{coords.shape[0]} vs {velocity.shape[0]}"
         )
-    return coords.astype(np.float32), velocity.astype(np.float32)
+    return _filter_field_queries(coords, velocity, path)
 
 
 def _fit_scalar(arr: np.ndarray, n: int, default: float) -> np.ndarray:
@@ -1510,8 +1556,11 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     train_field_values = targets_velocity_field[pair_split_train][field_query_mask[pair_split_train]]
     if train_field_values.size == 0:
         raise RuntimeError("No field-reconstruction query points were available in the training split.")
+    train_field_values = train_field_values[np.isfinite(train_field_values).all(axis=1)]
+    if train_field_values.size == 0:
+        raise RuntimeError("No finite field-reconstruction targets were available in the training split.")
     field_mean = np.mean(train_field_values, axis=0, keepdims=True).astype(np.float32)
-    field_std = np.maximum(np.std(train_field_values, axis=0, keepdims=True), 1e-8).astype(np.float32)
+    field_std = np.maximum(np.std(train_field_values, axis=0, keepdims=True), FIELD_STD_FLOOR).astype(np.float32)
     targets_velocity_field_norm = ((targets_velocity_field - field_mean.reshape(1, 1, 3)) / field_std.reshape(1, 1, 3)).astype(np.float32)
 
     # Next-state normalization for optional analysis (not primary training target).
@@ -1546,7 +1595,9 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         query_coords=field_query_coords,
         targets_velocity_field=targets_velocity_field,
         field_query_mask=field_query_mask,
-        field_query_source=np.asarray("task2_static_airfoil_fdom_grid", dtype=object),
+        field_query_source=np.asarray("task2_static_airfoil_fdom_grid_filtered", dtype=object),
+        field_query_bounds=np.asarray(_field_query_bounds() if _field_query_bounds() is not None else (), dtype=np.float32),
+        field_std_floor=np.asarray(FIELD_STD_FLOOR, dtype=np.float32),
         field_root=np.asarray(str(field_root), dtype=object),
         targets_next_state=Y_next,
         inputs_t_norm=Xn,
@@ -1604,6 +1655,9 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     print("  targets_delta shape       :", Y_delta.shape)
     print("  query_coords shape        :", field_query_coords.shape)
     print("  targets_velocity_field    :", targets_velocity_field.shape)
+    print("  field query bounds        :", _field_query_bounds())
+    print("  field queries per pair    :", int(field_query_mask.sum(axis=1).min()), float(field_query_mask.sum(axis=1).mean()), int(field_query_mask.sum(axis=1).max()))
+    print("  field target mean/std     :", field_mean.reshape(-1).tolist(), field_std.reshape(-1).tolist())
     print("  skipped pairs no field    :", skipped_pairs_missing_field)
     print("  coord_min union           :", coord_min.tolist())
     print("  coord_max union           :", coord_max.tolist())
