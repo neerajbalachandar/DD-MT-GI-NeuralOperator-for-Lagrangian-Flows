@@ -6,6 +6,8 @@ train/
 __pycache__/
 *.pyc
 *.pyo
+*.pt
+*.png
 
 # ML artifacts
 *.pth
@@ -45,3 +47,7 @@ GNO_ugradu_deployment/input_distribution/
 GNO_ugradu_deployment/GNO ugradu/ugradu prediction/
 processed_data/
 
+result_gino_sharedlatent/
+
+*.pt
+*.pt
