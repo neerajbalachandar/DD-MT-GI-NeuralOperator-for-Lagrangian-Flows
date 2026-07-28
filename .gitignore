@@ -49,5 +49,8 @@ processed_data/
 
 result_gino_sharedlatent/
 
-*.pt
-*.pt
+
+# Final branch ignore
+pt_model/
+processed_data/
+plots/
