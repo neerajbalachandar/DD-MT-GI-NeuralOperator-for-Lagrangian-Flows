@@ -2,6 +2,9 @@
 # output channel_1 = \delta{x}, \delta{\Gamma}, \delta{\sigma}, \delta{u(x_p)}. 
 # output channel_2 = u(x)
 
+# Split 1 is the initial train, val, test split with different AoA for train and validate
+# Split 2 has the same AoA for train and validate and a subset of train is used for val. Rest of the val angles are passed to test. No sr, unseen present as before.
+
 from __future__ import annotations
 import json
 import os
@@ -47,8 +50,8 @@ TASK1_CASE_RE = re.compile(r"^(?P<aoa>\d+(?:\.\d+)?)deg_static_airfoil_(?P<speed
 
 # AoA plan for the methodical dataset generation.
 TRAIN_AOA_DEGREES = list(range(10, 31, 2))
-VAL_AOA_DEGREES = [11, 15, 21, 25]
-TEST_AOA_DEGREES = [27, 32]
+VAL_AOA_DEGREES = []
+TEST_AOA_DEGREES = [11, 15, 21, 25, 27, 32]
 IGNORE_AOA_DEGREES = [19]
 TEST_NORMAL_AOA_DEGREES = [27]
 TEST_SUPER_RESOLUTION_AOA_DEGREES: List[int] = []
@@ -63,7 +66,7 @@ VTK_PATTERN = "static_airfoil_Wing_vlm.*.vtk"
 FIELD_H5_PATTERN = "static_airfoil_fdom.*.h5"
 INCLUDE_STATIC_PARTICLES = True
 
-OUT_ROOT = SCRIPT_DIR / "processed_data"
+OUT_ROOT = SCRIPT_DIR / "processed_data_split2"
 MERGED_ROOT = OUT_ROOT / "merged_frames"
 
 # Task-1 evolution setup
