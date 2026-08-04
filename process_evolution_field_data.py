@@ -4,6 +4,7 @@
 
 # Split 1 is the initial train, val, test split with different AoA for train and validate
 # Split 2 has the same AoA for train and validate and a subset of train is used for val. Rest of the val angles are passed to test. No sr, unseen present as before.
+# Split 3 has the u and gradu in input and target required for GINO_sharedlatent_2.ipynb 
 
 from __future__ import annotations
 import json
@@ -66,7 +67,7 @@ VTK_PATTERN = "static_airfoil_Wing_vlm.*.vtk"
 FIELD_H5_PATTERN = "static_airfoil_fdom.*.h5"
 INCLUDE_STATIC_PARTICLES = True
 
-OUT_ROOT = SCRIPT_DIR / "processed_data_split2"
+OUT_ROOT = SCRIPT_DIR / "processed_data_split3"
 MERGED_ROOT = OUT_ROOT / "merged_frames"
 
 # Task-1 evolution setup
@@ -124,7 +125,12 @@ TARGET_DELTA_NAMES = [
 # Field-reconstruction supervision for the MLP decoder.  These query points come
 # from the precomputed task2 field grid, not from particle positions.
 MAX_FIELD_QUERY_POINTS = 4096
-FIELD_TARGET_NAMES = ["u_x", "u_y", "u_z"]
+FIELD_TARGET_NAMES = [
+    "u_x", "u_y", "u_z",
+    "dUx_dx", "dUx_dy", "dUx_dz",
+    "dUy_dx", "dUy_dy", "dUy_dz",
+    "dUz_dx", "dUz_dy", "dUz_dz",
+]
 # Keep field supervision in the informative near-airfoil/wake region by default.
 # The task2 fdom grid spans a large freestream-dominated domain; using all points
 # makes the velocity target nearly constant and can produce useless field losses.
@@ -166,6 +172,9 @@ PARTICLE_INPUT_FEATURES = [
     "u_x",
     "u_y",
     "u_z",
+    "gradU_xx", "gradU_xy", "gradU_xz",
+    "gradU_yx", "gradU_yy", "gradU_yz",
+    "gradU_zx", "gradU_zy", "gradU_zz",
 ]
 if USE_GEOMETRY_CHANNELS:
     PARTICLE_INPUT_FEATURES = PARTICLE_INPUT_FEATURES + GEOMETRY_CHANNEL_NAMES
@@ -284,21 +293,44 @@ def _filter_field_queries(coords: np.ndarray, values: np.ndarray, path: Path) ->
             raise ValueError(f"{path.name}: no finite field query/target rows")
     return coords[keep].astype(np.float32), values[keep].astype(np.float32)
 
+# def read_field_grid_h5(path: Path) -> Tuple[np.ndarray, np.ndarray]:
+#     """Read task2 field-domain grid coordinates and velocity."""
+#     with h5py.File(path, "r") as f:
+#         if "nodes" not in f:
+#             raise KeyError(f"{path.name}: missing grid-coordinate dataset 'nodes'")
+#         if "U" not in f:
+#             raise KeyError(f"{path.name}: missing velocity dataset 'U'")
+#         coords = as_xyz(np.asarray(f["nodes"]))
+#         velocity = as_vec_field(np.asarray(f["U"]))
+#     if coords.shape[0] != velocity.shape[0]:
+#         raise ValueError(
+#             f"{path.name}: nodes and U have different point counts: "
+#             f"{coords.shape[0]} vs {velocity.shape[0]}"
+#         )
+#     return _filter_field_queries(coords, velocity, path)
+
+
 def read_field_grid_h5(path: Path) -> Tuple[np.ndarray, np.ndarray]:
-    """Read task2 field-domain grid coordinates and velocity."""
     with h5py.File(path, "r") as f:
-        if "nodes" not in f:
-            raise KeyError(f"{path.name}: missing grid-coordinate dataset 'nodes'")
-        if "U" not in f:
-            raise KeyError(f"{path.name}: missing velocity dataset 'U'")
-        coords = as_xyz(np.asarray(f["nodes"]))
-        velocity = as_vec_field(np.asarray(f["U"]))
-    if coords.shape[0] != velocity.shape[0]:
-        raise ValueError(
-            f"{path.name}: nodes and U have different point counts: "
-            f"{coords.shape[0]} vs {velocity.shape[0]}"
-        )
-    return _filter_field_queries(coords, velocity, path)
+        coords = as_xyz(np.asarray(f["nodes"]))       # (274625, 3)
+        vel = as_vec_field(np.asarray(f["U"]))         # (274625, 3)
+    
+    # Reshape to 65³ grid – assuming nodes are ordered with x fastest, then y, then z
+    grid_shape = (65, 65, 65, 3)
+    vel_grid = vel.reshape(grid_shape)                 # (65, 65, 65, 3)
+    
+    # Compute gradients along each axis
+    # np.gradient returns a tuple of (d/dx, d/dy, d/dz), each of shape (65,65,65,3)
+    spacing = (1.0, 1.0, 1.0)  # uniform grid; if not, pass actual spacings
+    grad = np.gradient(vel_grid, axis=(0,1,2))
+    dU_dx, dU_dy, dU_dz = grad[0], grad[1], grad[2]   # each (65,65,65,3)
+    
+    # Flatten back to (N, 3) and concatenate all 12 channels
+    vel_flat = vel_grid.reshape(-1, 3)
+    grad_flat = np.concatenate([dU_dx.reshape(-1,3), dU_dy.reshape(-1,3), dU_dz.reshape(-1,3)], axis=1)  # (274625, 9)
+    combined = np.concatenate([vel_flat, grad_flat], axis=1)  # (274625, 12)
+    
+    return _filter_field_queries(coords, combined, path)
 
 
 def _fit_scalar(arr: np.ndarray, n: int, default: float) -> np.ndarray:
@@ -1290,6 +1322,7 @@ def _state_from_frame(data: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
 def _feature_matrix_from_state(
     state: Dict[str, np.ndarray],
     velocity: np.ndarray,
+    gradient,
     n: int,
     phase: float,
     aoa_deg: float,
@@ -1307,7 +1340,18 @@ def _feature_matrix_from_state(
         "u_x": velocity[:n, 0],
         "u_y": velocity[:n, 1],
         "u_z": velocity[:n, 2],
+        "gradU_xx": gradient[:n, 0],  "gradU_xy": gradient[:n, 1],  "gradU_xz": gradient[:n, 2],
+        "gradU_yx": gradient[:n, 3],  "gradU_yy": gradient[:n, 4],  "gradU_yz": gradient[:n, 5],
+        "gradU_zx": gradient[:n, 6],  "gradU_zy": gradient[:n, 7],  "gradU_zz": gradient[:n, 8],
     }
+
+    # Add velocity gradient channels
+    # The raw gradient arrays are available in the calling function as curr["velocity_gradient_x"] etc.
+    # They are stored in the `data` dictionary inside `build_particle_evolution_dataset`.
+    # For now, we add placeholders; the actual values will be filled by passing them as arguments.
+
+
+
     # Optional context features are only added if requested.
     if "phase" in PARTICLE_INPUT_FEATURES:
         feat["phase"] = np.full(n, phase, dtype=np.float64)
@@ -1474,9 +1518,16 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
             curr_xyz = np.stack([s0["x"][:n], s0["y"][:n], s0["z"][:n]], axis=1)
             geom_feat = _particle_geometry_features(curr_xyz, str(curr.get("vtk_path", "")), n)
 
+            # Inside the pair loop, after reading curr["velocity_gradient_x"] etc.
+            grad_x = np.asarray(curr.get("velocity_gradient_x", np.zeros((n,3))), dtype=np.float32)[:n]
+            grad_y = np.asarray(curr.get("velocity_gradient_y", np.zeros((n,3))), dtype=np.float32)[:n]
+            grad_z = np.asarray(curr.get("velocity_gradient_z", np.zeros((n,3))), dtype=np.float32)[:n]
+            gradient = np.concatenate([grad_x, grad_y, grad_z], axis=1)  # (n, 9)
+
             x_feat = _feature_matrix_from_state(
                 state=s0,
                 velocity=np.asarray(curr["velocity"], dtype=np.float32),
+                gradient=gradient,
                 n=n,
                 phase=float(curr["phase"]),
                 aoa_deg=float(meta["aoa_deg"]),
@@ -1526,8 +1577,10 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     Y_next = np.concatenate(rows_next, axis=0).astype(np.float32)
 
     n_pairs = len(pair_ranges)
+
     field_query_coords = np.zeros((n_pairs, MAX_FIELD_QUERY_POINTS, 3), dtype=np.float32)
-    targets_velocity_field = np.zeros((n_pairs, MAX_FIELD_QUERY_POINTS, 3), dtype=np.float32)
+    targets_velocity_field = np.zeros((n_pairs, MAX_FIELD_QUERY_POINTS, 12), dtype=np.float32)
+
     field_query_mask = np.zeros((n_pairs, MAX_FIELD_QUERY_POINTS), dtype=bool)
     for pair_id, (query_coords, velocity_values) in enumerate(zip(field_query_coords_by_pair, field_velocity_by_pair)):
         n_query = min(int(query_coords.shape[0]), int(MAX_FIELD_QUERY_POINTS))
@@ -1564,7 +1617,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         raise RuntimeError("No finite field-reconstruction targets were available in the training split.")
     field_mean = np.mean(train_field_values, axis=0, keepdims=True).astype(np.float32)
     field_std = np.maximum(np.std(train_field_values, axis=0, keepdims=True), FIELD_STD_FLOOR).astype(np.float32)
-    targets_velocity_field_norm = ((targets_velocity_field - field_mean.reshape(1, 1, 3)) / field_std.reshape(1, 1, 3)).astype(np.float32)
+    targets_velocity_field_norm = ((targets_velocity_field - field_mean.reshape(1, 1, 12)) / field_std.reshape(1, 1, 12)).astype(np.float32)
 
     # Next-state normalization for optional analysis (not primary training target).
     next_mean = np.mean(Y_next[train_rows], axis=0, keepdims=True)
