@@ -5,7 +5,6 @@ The architecture DD-MT-GINO is a multi-task neural operator that utilizes a shar
 Arxiv publication:
 
 The main codes are:
-1. particle evolution.py: Training for the evolution of vortex particles according to $\textit{rVPM}$, for the reduced order simulation of flow.
-2. field_reconstruction.py: Training for the reconstruction of the velocity field from the Lagrangian field.
-3. evaluation.ipynb: Testing and evaluation of the trained model, with analysis for shared latent space. 
+1. GINO_sharedlatent_4.ipynb
+2. GINO_analysis_new.ipynb
 
