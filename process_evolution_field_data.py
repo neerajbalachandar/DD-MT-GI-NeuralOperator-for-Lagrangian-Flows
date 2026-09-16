@@ -1446,6 +1446,9 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
                 data = {k: d[k] for k in d.files}
             state = _state_from_frame(data)
             velocity = as_xyz(data["velocity"])
+            grad_x = as_xyz(data["velocity_gradient_x"])
+            grad_y = as_xyz(data["velocity_gradient_y"])
+            grad_z = as_xyz(data["velocity_gradient_z"])
             fr = str(np.asarray(data["frame_id"]).reshape(-1)[0])
             vtk_path = str(np.asarray(data.get("source_vtk_path", "")).reshape(-1)[0])
             phase = 0.0 if T <= 1 else float(i) / float(T - 1)
@@ -1454,6 +1457,9 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
                     "frame_id": fr,
                     "state": state,
                     "velocity": velocity,
+                    "velocity_gradient_x": grad_x,
+                    "velocity_gradient_y": grad_y,
+                    "velocity_gradient_z": grad_z,
                     "phase": phase,
                     "path": str(p),
                     "vtk_path": vtk_path,
@@ -1463,6 +1469,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
 
     rows_x: List[np.ndarray] = []
     rows_delta: List[np.ndarray] = []
+    rows_residual: List[np.ndarray] = []
     rows_next: List[np.ndarray] = []
     field_query_coords_by_pair: List[np.ndarray] = []
     field_velocity_by_pair: List[np.ndarray] = []
@@ -1541,6 +1548,20 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
             velocity_current = np.asarray(curr["velocity"], dtype=np.float32)[:n]
             velocity_next = np.asarray(nxt["velocity"], dtype=np.float32)[:n]
             delta_u = velocity_next - velocity_current
+            dt = float(meta["dt"])
+            gamma0 = st0[:, 3:6]
+            grad_tensor = gradient.reshape(n, 3, 3).astype(np.float32)
+            physics_dx = (dt * velocity_current).astype(np.float32)
+            physics_dgamma = (dt * np.einsum("nij,nj->ni", grad_tensor, gamma0)).astype(np.float32)
+            residual = np.concatenate(
+                [
+                    delta[:, :3] - physics_dx,
+                    delta[:, 3:6] - physics_dgamma,
+                    delta[:, 6:7],
+                    delta_u,
+                ],
+                axis=1,
+            ).astype(np.float32)
             target = np.concatenate([delta, delta_u], axis=1).astype(np.float32)
 
             end = start + n
@@ -1563,6 +1584,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
 
             rows_x.append(x_feat.astype(np.float32))
             rows_delta.append(target)
+            rows_residual.append(residual)
             rows_next.append(st1.astype(np.float32))
             grid_coords, grid_velocity = field_grid
             field_query_coords_by_pair.append(grid_coords.astype(np.float32))
@@ -1574,6 +1596,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
 
     X = np.concatenate(rows_x, axis=0).astype(np.float32)
     Y_delta = np.concatenate(rows_delta, axis=0).astype(np.float32)
+    Y_residual = np.concatenate(rows_residual, axis=0).astype(np.float32)
     Y_next = np.concatenate(rows_next, axis=0).astype(np.float32)
 
     n_pairs = len(pair_ranges)
@@ -1607,7 +1630,8 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
 
     # Normalize per feature using TRAIN rows only.
     in_mean, in_std, Xn = _normalize_channels_rows(X, train_rows)
-    out_mean, out_std, Yn_delta = _normalize_channels_rows(Y_delta, train_rows)
+    raw_delta_mean, raw_delta_std, Yn_delta_raw = _normalize_channels_rows(Y_delta, train_rows)
+    residual_mean, residual_std, Yn_residual = _normalize_channels_rows(Y_residual, train_rows)
 
     train_field_values = targets_velocity_field[pair_split_train][field_query_mask[pair_split_train]]
     if train_field_values.size == 0:
@@ -1648,6 +1672,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         # core supervised data
         inputs_t=X,
         targets_delta=Y_delta,
+        targets_residual=Y_residual,
         query_coords=field_query_coords,
         targets_velocity_field=targets_velocity_field,
         field_query_mask=field_query_mask,
@@ -1657,7 +1682,8 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         field_root=np.asarray(str(field_root), dtype=object),
         targets_next_state=Y_next,
         inputs_t_norm=Xn,
-        targets_delta_norm=Yn_delta,
+        targets_delta_norm=Yn_delta_raw,
+        targets_residual_norm=Yn_residual,
         targets_velocity_field_norm=targets_velocity_field_norm,
         targets_next_state_norm=Yn_next,
         # naming
@@ -1689,8 +1715,12 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         # normalization
         in_mean=in_mean.astype(np.float32),
         in_std=in_std.astype(np.float32),
-        out_mean=out_mean.astype(np.float32),
-        out_std=out_std.astype(np.float32),
+        out_mean=residual_mean.astype(np.float32),
+        out_std=residual_std.astype(np.float32),
+        residual_mean=residual_mean.astype(np.float32),
+        residual_std=residual_std.astype(np.float32),
+        raw_delta_mean=raw_delta_mean.astype(np.float32),
+        raw_delta_std=raw_delta_std.astype(np.float32),
         field_mean=field_mean.astype(np.float32),
         field_std=field_std.astype(np.float32),
         next_mean=next_mean.astype(np.float32),
