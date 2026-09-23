@@ -1,11 +1,14 @@
-# Data processing script with .npz script for compiling input channel = x, \Gamma, \sigma, u(x_p); and 
+# Data processing script with .npz script for compiling input channel = x, \Gamma, \sigma, u(x_p); and
+
 # output channel_1 = \delta{x}, \delta{\Gamma}, \delta{\sigma}, \delta{u(x_p)}. 
 # output channel_2 = u(x)
 
 # Split 1 is the initial train, val, test split with different AoA for train and validate
-# Split 2 has the same AoA for train and validate and a subset of train is used for val. Rest of the val angles are passed to test. No sr, unseen present as before.
-# Split 3 has the u and gradu in input and target required for GINO_sharedlatent_2.ipynb 
 
+# Split 2 has the same AoA for train and validate and a subset of train is used for val. Rest of the val angles are passed to test. No sr, unseen present as before.
+
+# Split 3 has the u and gradu in input and target required for GINO_sharedlatent_2.ipynb 
+#----------------------------------------------------------------------------------------------------------------------------------------------------------------------
 from __future__ import annotations
 import json
 import os
@@ -14,20 +17,16 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
 import h5py
 import numpy as np
 
 try:
     from scipy.spatial import cKDTree
-
     SCIPY_AVAILABLE = True
 except Exception:
     SCIPY_AVAILABLE = False
-
 try:
     import pyvista as pv
-
     PYVISTA_AVAILABLE = True
 except Exception:
     PYVISTA_AVAILABLE = False
@@ -36,9 +35,9 @@ except Exception:
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 # Task-1 dataset root
-RAW_ROOT = Path("/media/neerajc/New Volume/Neeraj/neuralop/data/task1")
+RAW_ROOT = Path("/media/neerajc/New Volume/Neeraj/NeuralOp_Data/task1/")
 RAW_ROOT_CANDIDATES = [RAW_ROOT]
-FIELD_ROOT = Path("/media/neerajc/New Volume/Neeraj/neuralop/data/task2")
+FIELD_ROOT = Path("/media/neerajc/New Volume/Neeraj/NeuralOp_Data/task2/")
 FIELD_ROOT_CANDIDATES = [FIELD_ROOT]
 
 # Leave empty when AUTO_DISCOVER_TASK1_CASES=True.
@@ -67,27 +66,15 @@ VTK_PATTERN = "static_airfoil_Wing_vlm.*.vtk"
 FIELD_H5_PATTERN = "static_airfoil_fdom.*.h5"
 INCLUDE_STATIC_PARTICLES = True
 
-OUT_ROOT = SCRIPT_DIR / "processed_data_split3"
+OUT_ROOT = SCRIPT_DIR / "Processed_Data/processed_data_split3"
 MERGED_ROOT = OUT_ROOT / "merged_frames"
 
 # Task-1 evolution setup
 RANDOM_SEED = 42
 TASK1_TARGET_MODE = "delta"
 
-# Optional metadata table path for strict conditioning channels.
-#
-# For the current automated Task-1 folders, this file is OPTIONAL because
-# metadata is inferred directly from folder names such as:
-#   10deg_static_airfoil_10u_1p
-# which means:
-#   AoA = 10 deg, freestream magnitude = 10 m/s, particles_per_step = 1.
-#
-# If a future case does not follow that naming convention, or if one case has
-# a special dt/freestream, put overrides in this JSON file:
-# {
-#   "10deg_static_airfoil_10u_1p": {"aoa_deg": 10.0, "magVinf": 10.0, "dt": 0.0034},
-#   "custom_case_name": {"aoa_deg": 18.0, "freestream": [9.51, 0.0, 3.09], "dt": 0.0034}
-# }
+# 10deg_static_airfoil_10u_1p - AoA = 10 deg, freestream magnitude = 10 m/s, particles_per_step = 1.
+
 CASE_METADATA_PATH = SCRIPT_DIR / "case_metadata.json"
 STRICT_METADATA_VALIDATION = True
 
@@ -97,15 +84,9 @@ STRICT_METADATA_VALIDATION = True
 CASE_METADATA: Dict[str, Dict[str, Any]] = {}
 DEFAULT_TASK1_DT = 0.0034 # Find out if this is the case.
 
-# Split by CASE (or AoA groups) to avoid temporal leakage.
-# Example desired pattern:
-#   TRAIN_CASES = ["1", "2", "7"]
-#   VAL_CASES   = ["8"]
-#   TEST_CASES  = ["9"]
 TRAIN_CASES: List[str] = []
 VAL_CASES: List[str] = []
 TEST_CASES: List[str] = []
-# AUTO_ASSIGN_SPLITS_FROM_CASE_NAMES = True - above will be assigned automatically.
 
 # Feature/state definitions for Task-1 evolution.
 STATE_NAMES = ["x", "y", "z", "Gamma_x", "Gamma_y", "Gamma_z", "sigma"]
@@ -131,11 +112,7 @@ FIELD_TARGET_NAMES = [
     "dUy_dx", "dUy_dy", "dUy_dz",
     "dUz_dx", "dUz_dy", "dUz_dz",
 ]
-# Keep field supervision in the informative near-airfoil/wake region by default.
-# The task2 fdom grid spans a large freestream-dominated domain; using all points
-# makes the velocity target nearly constant and can produce useless field losses.
-# Override with FIELD_QUERY_BOUNDS="xmin,xmax,ymin,ymax,zmin,zmax", or set it to
-# "none"/"full" to keep all finite field points.
+
 DEFAULT_FIELD_QUERY_BOUNDS = (-0.5, 4.0, -0.8, 0.8, -0.5, 2.0)
 FIELD_STD_FLOOR = float(os.environ.get("FIELD_STD_FLOOR", "1e-6"))
 
@@ -190,11 +167,6 @@ STRICT_GEOMETRY_QA = True
 GEOM_MIN_NONZERO_FRAC = 1e-4
 GEOM_MIN_NEAR_FRAC = 1e-5
 
-# Internal same-distribution validation split from training cases.
-# This split is used for tuning/early stopping because it preserves the same
-# AoA/time/particle-count distribution as training more closely than a held-out
-# angle-only validation set.
-
 #Check out what these are? and what are angle only validation set?
 USE_DUAL_SPLIT_PROTOCOL = True
 VAL_ID_FRACTION_FROM_TRAIN_CASES = 0.2
@@ -206,21 +178,16 @@ VAL_ID_FRAME_OFFSET = 2
 # Example: freestream_y is exactly zero when inflow is in x-z plane.
 CONDITIONING_ALLOWED_CONSTANT_CHANNELS: set = set()
 
-
 # Basic helpers
-
 FRAME_RE = re.compile(r"(\d+)(?!.*\d)")
-
 
 def ensure_dir(p: Path) -> Path:
     p.mkdir(parents=True, exist_ok=True)
     return p
 
-
 def frame_id(path: Path) -> str:
     m = FRAME_RE.search(path.stem)
     return m.group(1).zfill(6) if m else path.stem
-
 
 def as_xyz(a: np.ndarray) -> np.ndarray:
     a = np.asarray(a)
@@ -229,7 +196,6 @@ def as_xyz(a: np.ndarray) -> np.ndarray:
     if a.ndim == 2 and a.shape[0] == 3:
         return a.T.astype(np.float64)
     raise ValueError(f"Cannot parse xyz from shape={a.shape}")
-
 
 def as_vec_field(a: np.ndarray) -> np.ndarray:
     a = np.asarray(a)
@@ -243,7 +209,6 @@ def as_vec_field(a: np.ndarray) -> np.ndarray:
         return a.T.astype(np.float64)
     raise ValueError(f"Cannot parse vector field from shape={a.shape}")
 
-
 def read_h5_selected(path: Path, key_map: Dict[str, str]) -> Dict[str, np.ndarray]:
     out: Dict[str, np.ndarray] = {}
     with h5py.File(path, "r") as f:
@@ -252,8 +217,6 @@ def read_h5_selected(path: Path, key_map: Dict[str, str]) -> Dict[str, np.ndarra
                 raise KeyError(f"{path.name}: missing key {in_key}")
             out[out_key] = np.asarray(f[in_key])
     return out
-
-
 
 def _field_query_bounds() -> Optional[Tuple[float, float, float, float, float, float]]:
     raw = os.environ.get("FIELD_QUERY_BOUNDS", "").strip()
@@ -271,7 +234,6 @@ def _field_query_bounds() -> Optional[Tuple[float, float, float, float, float, f
     if not (xmin < xmax and ymin < ymax and zmin < zmax):
         raise ValueError(f"Invalid FIELD_QUERY_BOUNDS ordering: {parts}")
     return xmin, xmax, ymin, ymax, zmin, zmax
-
 
 def _filter_field_queries(coords: np.ndarray, values: np.ndarray, path: Path) -> Tuple[np.ndarray, np.ndarray]:
     finite = np.isfinite(coords).all(axis=1) & np.isfinite(values).all(axis=1)
@@ -292,23 +254,6 @@ def _filter_field_queries(coords: np.ndarray, values: np.ndarray, path: Path) ->
         else:
             raise ValueError(f"{path.name}: no finite field query/target rows")
     return coords[keep].astype(np.float32), values[keep].astype(np.float32)
-
-# def read_field_grid_h5(path: Path) -> Tuple[np.ndarray, np.ndarray]:
-#     """Read task2 field-domain grid coordinates and velocity."""
-#     with h5py.File(path, "r") as f:
-#         if "nodes" not in f:
-#             raise KeyError(f"{path.name}: missing grid-coordinate dataset 'nodes'")
-#         if "U" not in f:
-#             raise KeyError(f"{path.name}: missing velocity dataset 'U'")
-#         coords = as_xyz(np.asarray(f["nodes"]))
-#         velocity = as_vec_field(np.asarray(f["U"]))
-#     if coords.shape[0] != velocity.shape[0]:
-#         raise ValueError(
-#             f"{path.name}: nodes and U have different point counts: "
-#             f"{coords.shape[0]} vs {velocity.shape[0]}"
-#         )
-#     return _filter_field_queries(coords, velocity, path)
-
 
 def read_field_grid_h5(path: Path) -> Tuple[np.ndarray, np.ndarray]:
     with h5py.File(path, "r") as f:
@@ -332,7 +277,6 @@ def read_field_grid_h5(path: Path) -> Tuple[np.ndarray, np.ndarray]:
     
     return _filter_field_queries(coords, combined, path)
 
-
 def _fit_scalar(arr: np.ndarray, n: int, default: float) -> np.ndarray:
     x = np.asarray(arr).reshape(-1)
     if x.size == 0:
@@ -343,14 +287,12 @@ def _fit_scalar(arr: np.ndarray, n: int, default: float) -> np.ndarray:
         return out
     return x[:n].astype(np.float64)
 
-
 def _rows_from_pair_ids(pair_ranges: List[Tuple], pair_ids: np.ndarray) -> np.ndarray:
     chunks = []
     for i in pair_ids:
         _, _, _, s, e, _ = pair_ranges[int(i)]
         chunks.append(np.arange(int(s), int(e), dtype=np.int64))
     return np.concatenate(chunks) if chunks else np.zeros((0,), dtype=np.int64)
-
 
 def _validate_case_split(all_cases: List[str]) -> None:
     if len(all_cases) == 0:
@@ -369,10 +311,8 @@ def _validate_case_split(all_cases: List[str]) -> None:
     if uncovered:
         raise ValueError(f"Some cases are not assigned to any split: {sorted(uncovered)}")
 
-
 ACTIVE_CASE_METADATA: Dict[str, Dict[str, Any]] = {}
 ACTIVE_CONDITIONING_CHANNEL_NAMES: List[str] = []
-
 
 def _load_case_metadata_overrides() -> Tuple[Dict[str, Dict[str, Any]], Dict[str, Any]]:
     if not CASE_METADATA_PATH.exists():
@@ -391,7 +331,6 @@ def _load_case_metadata_overrides() -> Tuple[Dict[str, Dict[str, Any]], Dict[str
             continue
         out[str(k)] = dict(v) if isinstance(v, dict) else {}
     return out, defaults
-
 
 def _resolve_raw_root() -> Path:
     env_raw = os.environ.get("RAW_ROOT", "").strip()
@@ -414,7 +353,6 @@ def _resolve_raw_root() -> Path:
         f"{tried}. Update RAW_ROOT or mount the external drive."
     )
 
-
 def _resolve_field_root() -> Path:
     env_raw = os.environ.get("FIELD_ROOT", os.environ.get("TASK2_ROOT", "")).strip()
     if env_raw:
@@ -436,7 +374,6 @@ def _resolve_field_root() -> Path:
         f"{tried}. Update FIELD_ROOT/TASK2_ROOT or mount the external drive."
     )
 
-
 def _parse_task1_case_name(case: str) -> Optional[Dict[str, float]]:
     m = TASK1_CASE_RE.match(str(case))
     if not m:
@@ -447,12 +384,10 @@ def _parse_task1_case_name(case: str) -> Optional[Dict[str, float]]:
         "particles_per_step": float(m.group("particles")),
     }
 
-
 def _expected_particles_per_step_for_aoa(aoa_deg: float) -> int:
     """Return the intended particle-shedding resolution for a generated case."""
     aoa_key = int(round(float(aoa_deg)))
     return int(EXPECTED_PARTICLES_PER_STEP_BY_AOA.get(aoa_key, DEFAULT_PARTICLES_PER_STEP))
-
 
 def _case_has_expected_particle_count(case: str) -> Tuple[bool, str]:
     """Check that folder naming matches the intended resolution plan.
@@ -472,7 +407,6 @@ def _case_has_expected_particle_count(case: str) -> Tuple[bool, str]:
             f"expected {expected}p for AoA {parsed['aoa_deg']:g}, found {observed}p",
         )
     return True, "ok"
-
 
 def _discover_task1_case_ids(root: Path) -> List[str]:
     if not AUTO_DISCOVER_TASK1_CASES:
@@ -513,7 +447,6 @@ def _discover_task1_case_ids(root: Path) -> List[str]:
         )
     return out
 
-
 def _assign_case_splits_from_names(case_ids: List[str]) -> None:
     """Populate TRAIN_CASES/VAL_CASES/TEST_CASES from the AoA encoded in folder names."""
     if not AUTO_ASSIGN_SPLITS_FROM_CASE_NAMES:
@@ -548,7 +481,6 @@ def _assign_case_splits_from_names(case_ids: List[str]) -> None:
     VAL_CASES = val
     TEST_CASES = test
 
-
 def _test_case_role_from_metadata(meta: Dict[str, Any]) -> str:
     """Classify test cases into the experiment role used in plots/reports."""
     aoa = int(round(float(meta["aoa_deg"])))
@@ -557,7 +489,6 @@ def _test_case_role_from_metadata(meta: Dict[str, Any]) -> str:
     if aoa in TEST_NORMAL_AOA_DEGREES:
         return "testing_normal"
     return "testing_other"
-
 
 def _resolve_case_metadata(meta: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:
     """Resolve one case metadata entry into canonical form.
@@ -673,21 +604,11 @@ def _resolve_case_metadata(meta: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any
     }
     return resolved, "ok"
 
-
 def _prepare_case_metadata(all_cases: List[str]) -> Dict[str, Dict[str, Any]]:
     merged: Dict[str, Dict[str, Any]] = {str(k): dict(v) for k, v in CASE_METADATA.items()}
     overrides, defaults = _load_case_metadata_overrides()
     merged.update(overrides)
 
-    # Ensure all required cases exist in the metadata mapping.
-    # For the new Task-1 naming scheme this is the built-in metadata table:
-    #   <AoA>deg_static_airfoil_<speed>u_<particles>p
-    # Example:
-    #   20deg_static_airfoil_10u_1p ->
-    #   aoa_deg=20, magVinf=10, dt=DEFAULT_TASK1_DT.
-    # _resolve_case_metadata() then converts magVinf + AoA into the same
-    # FLOWUnsteady freestream convention used in simulation.jl:
-    #   Vinf = magVinf * [cosd(AOA), 0, sind(AOA)].
     for c in all_cases:
         if str(c) not in merged:
             parsed = _parse_task1_case_name(str(c))
@@ -731,7 +652,6 @@ def _prepare_case_metadata(all_cases: List[str]) -> Dict[str, Dict[str, Any]]:
 
     return active
 
-
 def _case_meta(case: str) -> Dict[str, object]:
     meta = ACTIVE_CASE_METADATA.get(str(case), None)
     if meta is None:
@@ -751,17 +671,14 @@ def _case_meta(case: str) -> Dict[str, object]:
         "particles_per_step": int(meta.get("particles_per_step", 1)),
     }
 
-
 _VTK_GEOM_CACHE: Dict[str, Tuple[np.ndarray, np.ndarray, object]] = {}
 _GEOM_BACKEND_NOTICE_PRINTED = False
-
 
 def _normalize_rows(v: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     """Normalize row-vectors safely."""
     n = np.linalg.norm(v, axis=1, keepdims=True)
     n = np.maximum(n, eps)
     return v / n
-
 
 def _point_normals_from_cells(points: np.ndarray, cells: List[np.ndarray]) -> np.ndarray:
     """Estimate point normals by averaging adjacent cell normals."""
@@ -783,7 +700,6 @@ def _point_normals_from_cells(points: np.ndarray, cells: List[np.ndarray]) -> np
     if np.any(nz):
         normals[nz] = _normalize_rows(normals[nz])
     return normals
-
 
 def _load_legacy_vtk_ascii(vp: Path) -> Tuple[np.ndarray, np.ndarray]:
     """Read VTK legacy ASCII points/cells and estimate point normals.
@@ -862,7 +778,6 @@ def _load_legacy_vtk_ascii(vp: Path) -> Tuple[np.ndarray, np.ndarray]:
         normals = _point_normals_from_cells(pts, cells)
     return pts, normals
 
-
 def _load_vtk_geom(vtk_path: str):
     """Load/cached VTK points and normals.
 
@@ -922,7 +837,6 @@ def _load_vtk_geom(vtk_path: str):
 
     return _VTK_GEOM_CACHE[vtk_path]
 
-
 def _particle_geometry_features(xyz: np.ndarray, vtk_path: str, n: int) -> Dict[str, np.ndarray]:
     """Compute per-particle geometry channels by nearest surface query."""
     zeros = np.zeros(n, dtype=np.float64)
@@ -964,7 +878,6 @@ def _particle_geometry_features(xyz: np.ndarray, vtk_path: str, n: int) -> Dict[
         "geom_body_near": body_near,
     }
 
-
 def _print_geometry_channel_stats(X: np.ndarray, feature_names: List[str], tag: str) -> None:
     """Print compact geometry-channel statistics for sanity checks."""
     if not USE_GEOMETRY_CHANNELS:
@@ -991,7 +904,6 @@ def _print_geometry_channel_stats(X: np.ndarray, feature_names: List[str], tag: 
             "Check VTK paths, VTK parser backend, and GEOMETRY_NEAR_THRESHOLD."
         )
 
-
 def _geometry_frame_report(case: str, frame: str, n_particles: int, vtk_path: str, geom_feat: Dict[str, np.ndarray]) -> Dict[str, Any]:
     dist = np.asarray(geom_feat.get("geom_dist", np.zeros(n_particles)), dtype=np.float64)
     nx = np.asarray(geom_feat.get("geom_nx", np.zeros(n_particles)), dtype=np.float64)
@@ -1016,7 +928,6 @@ def _geometry_frame_report(case: str, frame: str, n_particles: int, vtk_path: st
         "normal_nz_var": float(np.var(nz)) if nz.size else 0.0,
     }
 
-
 def _geometry_case_summary(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
     by_case: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for e in entries:
@@ -1036,7 +947,6 @@ def _geometry_case_summary(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
         }
     return out
 
-
 def _validate_geometry_report(entries: List[Dict[str, Any]]) -> None:
     if not USE_GEOMETRY_CHANNELS or len(entries) == 0:
         return
@@ -1053,12 +963,10 @@ def _validate_geometry_report(entries: List[Dict[str, Any]]) -> None:
             raise RuntimeError(msg)
         print(f"[geom] warning: {msg}")
 
-
 def _frame_is_usable(n_particles: int) -> Tuple[bool, str]:
     if n_particles < int(MIN_PARTICLES_PER_FRAME):
         return False, f"n_particles<{MIN_PARTICLES_PER_FRAME}"
     return True, "ok"
-
 
 def _train_id_val_id_split_by_case(frame_ranges: List[Tuple], train_frame_ids: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Split training cases into training and same-distribution validation frames.
@@ -1117,7 +1025,6 @@ def _train_id_val_id_split_by_case(frame_ranges: List[Tuple], train_frame_ids: n
 
     return np.asarray(sorted(train_out), dtype=np.int64), np.asarray(sorted(val_id_out), dtype=np.int64)
 
-
 def _split_stats_from_rows(
     Y: np.ndarray,
     frame_ranges: List[Tuple],
@@ -1168,7 +1075,6 @@ def _split_stats_from_rows(
         },
     }
 
-
 def _assert_conditioning_variance(X: np.ndarray, feature_names: List[str], train_rows: np.ndarray) -> None:
     if not USE_EXPLICIT_CONDITIONING:
         return
@@ -1204,9 +1110,6 @@ def _assert_conditioning_variance(X: np.ndarray, feature_names: List[str], train
         )
 
 
-# ==============================================================================
-# Stage-1 merge
-# ==============================================================================
 INPUT_KEYS = {
     "particle_xyz": "X",
     "Gamma_vec": "Gamma",
@@ -1233,7 +1136,6 @@ def _merge_particle_payloads(dynamic_payload: Dict[str, np.ndarray], static_payl
         else:
             out[key] = np.concatenate([a, b], axis=0)
     return out
-
 
 def merge_frames() -> List[Path]:
     if not RAW_ROOT.exists():
@@ -1297,10 +1199,7 @@ def merge_frames() -> List[Path]:
         raise RuntimeError(msg)
     return merged
 
-
-# ==============================================================================
-# Task-1 preprocessing: EVOLUTION DATASET (x_t -> delta_state)
-# ==============================================================================
+# Evolution
 
 def _state_from_frame(data: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
     xyz = as_xyz(data["particle_xyz"])
@@ -1317,7 +1216,6 @@ def _state_from_frame(data: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
         "Gamma_z": gamma[:, 2],
         "sigma": sigma,
     }
-
 
 def _feature_matrix_from_state(
     state: Dict[str, np.ndarray],
@@ -1345,13 +1243,6 @@ def _feature_matrix_from_state(
         "gradU_zx": gradient[:n, 6],  "gradU_zy": gradient[:n, 7],  "gradU_zz": gradient[:n, 8],
     }
 
-    # Add velocity gradient channels
-    # The raw gradient arrays are available in the calling function as curr["velocity_gradient_x"] etc.
-    # They are stored in the `data` dictionary inside `build_particle_evolution_dataset`.
-    # For now, we add placeholders; the actual values will be filled by passing them as arguments.
-
-
-
     # Optional context features are only added if requested.
     if "phase" in PARTICLE_INPUT_FEATURES:
         feat["phase"] = np.full(n, phase, dtype=np.float64)
@@ -1377,10 +1268,8 @@ def _feature_matrix_from_state(
                 feat[gk] = np.zeros(n, dtype=np.float64)
     return np.stack([feat[k] for k in PARTICLE_INPUT_FEATURES], axis=1).astype(np.float32)
 
-
 def _state_matrix(state: Dict[str, np.ndarray], n: int) -> np.ndarray:
     return np.stack([state[k][:n] for k in STATE_NAMES], axis=1).astype(np.float32)
-
 
 def _normalize_channels_rows(x: np.ndarray, train_rows: np.ndarray):
     mean = np.mean(x[train_rows], axis=0, keepdims=True)
@@ -1388,7 +1277,6 @@ def _normalize_channels_rows(x: np.ndarray, train_rows: np.ndarray):
     std = np.maximum(std, 1e-8)
     xn = ((x - mean) / std).astype(np.float32)
     return mean.astype(np.float32), std.astype(np.float32), xn
-
 
 def _case_split_label(case: str) -> str:
     if case in TRAIN_CASES:
@@ -1398,7 +1286,6 @@ def _case_split_label(case: str) -> str:
     if case in TEST_CASES:
         return "test"
     raise ValueError(f"Case {case} is not assigned in TRAIN_CASES/VAL_CASES/TEST_CASES")
-
 
 def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     by_case: Dict[str, List[Path]] = {}
@@ -1762,12 +1649,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
 
     return out_path
 
-
-
-# ==============================================================================
 # Main
-# ==============================================================================
-
 def main() -> None:
     global ACTIVE_CASE_METADATA
     global ACTIVE_CONDITIONING_CHANNEL_NAMES
