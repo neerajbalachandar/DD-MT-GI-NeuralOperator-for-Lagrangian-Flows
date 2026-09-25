@@ -1,7 +1,7 @@
 seed: 42
 device: auto
 data:
-  dataset: ../../Processed_Data/processed_data_split3/particle_evolution_dataset.npz
+  dataset: ../Processed_Data/processed_data_split3/particle_evolution_dataset.npz
   native_task2_root: ""
   input_features: [u_x, u_y, u_z, sigma, geom_dist, Gamma_x, Gamma_y, Gamma_z, gradU_xx, gradU_xy, gradU_xz, gradU_yx, gradU_yy, gradU_yz, gradU_zx, gradU_zy, gradU_zz]
   global_condition_channels: [angle_of_attack, freestream_magnitude, phase]
@@ -35,9 +35,10 @@ training:
   use_state_loss: true
   use_field_loss: true
   use_rollout_loss: false
-  rollout_weight: 0.0
-  rollout_horizon_max: 1
+  rollout_weight: 1.0
+  rollout_horizon_max: 16
   rollout_horizon_schedule: [1, 2, 4, 8, 16]
+  pushforward_weight: 1.0
   use_scheduled_sampling: false
   scheduled_sampling_max_probability: 0.3
   use_gns_noise: false
@@ -54,3 +55,4 @@ evaluation:
   rollout_horizons: [1, 2, 4, 8, 16]
   max_batches: 0
   save_plots: true
+  field_y_plane: 0.0

@@ -12,3 +12,15 @@ def random_walk_noise(states, initial_std: float, walk_std: float, generator=Non
             eps = eps + torch.randn(eps.shape, dtype=eps.dtype, device=eps.device, generator=generator) * float(walk_std)
         output.append(eps)
     return torch.stack(output)
+
+
+def perturb_flow_inputs(batch, noise, feature_indices, initial_std, walk_std):
+    if not feature_indices:
+        return batch["x"], noise
+    x = batch["x"].clone()
+    if noise is None:
+        noise = torch.randn_like(x[..., feature_indices]) * float(initial_std)
+    else:
+        noise = noise + torch.randn_like(noise) * float(walk_std)
+    x[..., feature_indices] = x[..., feature_indices] + noise
+    return x, noise

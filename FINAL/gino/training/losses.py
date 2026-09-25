@@ -41,12 +41,30 @@ def homoscedastic_multitask(state_term, field_term, log_state_var, log_field_var
 def combined_loss(state_term=None, field_term=None, rollout_term=None, weights=None,
                   log_state_var=None, log_field_var=None, homoscedastic=False):
     weights = weights or {}
-    state_term = state_term if state_term is not None else torch.zeros(())
-    field_term = field_term if field_term is not None else torch.zeros_like(state_term)
     if homoscedastic and log_state_var is not None and log_field_var is not None:
-        total = homoscedastic_multitask(state_term, field_term, log_state_var, log_field_var)
+        terms = []
+        if state_term is not None:
+            terms.append(torch.exp(-log_state_var) * state_term + log_state_var)
+        if field_term is not None:
+            terms.append(torch.exp(-log_field_var) * field_term + log_field_var)
+        if terms:
+            total = sum(terms)
+        elif rollout_term is not None:
+            total = rollout_term * 0.0
+        else:
+            raise ValueError("At least one task loss must be enabled")
     else:
-        total = float(weights.get("state", 1.0)) * state_term + float(weights.get("field", 1.0)) * field_term
+        terms = []
+        if state_term is not None:
+            terms.append(float(weights.get("state", 1.0)) * state_term)
+        if field_term is not None:
+            terms.append(float(weights.get("field", 1.0)) * field_term)
+        if terms:
+            total = sum(terms)
+        elif rollout_term is not None:
+            total = rollout_term * 0.0
+        else:
+            raise ValueError("At least one task loss must be enabled")
     if rollout_term is not None:
         total = total + float(weights.get("rollout", 0.0)) * rollout_term
     return total

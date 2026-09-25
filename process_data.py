@@ -1430,6 +1430,8 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
                     "aoa_deg": float(meta["aoa_deg"]),
                     "freestream": [float(v) for v in np.asarray(meta["freestream"]).reshape(-1)],
                     "dt": float(meta["dt"]),
+                    "vtk_path": str(curr.get("vtk_path", "")),
+                    "phase_delta": float(nxt["phase"] - curr["phase"]),
                 }
             )
 

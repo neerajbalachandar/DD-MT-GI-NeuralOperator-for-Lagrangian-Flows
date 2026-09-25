@@ -85,20 +85,21 @@ class GINOSharedLatent(nn.Module):
         result = []
         for b, (flat, skip) in enumerate(zip(flat_latents, particle_skips)):
             particle_pe = fourier_positional_encoding(input_geom[b].unsqueeze(0), self.query_pe_freqs).squeeze(0)
-            qbase = skip + self.particle_pos_enc_proj(particle_pe)
+            skip_features = skip if self.use_skip else torch.zeros_like(skip)
+            qbase = skip_features + self.particle_pos_enc_proj(particle_pe)
             q = self.particle_query_proj(qbase)
             kv = self.grid_kv_proj(flat + self.grid_pos_enc_proj(grid_pe))
             k, v = kv[..., :self.hidden], kv[..., self.hidden:]
-            if self.use_task_adapters:
-                particle_latent, _ = self.task_adapters(cross_attention(q, k, v, self.attn_dropout))
-            elif self.use_attention:
+            if self.use_attention:
                 particle_latent = cross_attention(q, k, v, self.attn_dropout)
             else:
                 particle_latent = flat.mean(dim=0, keepdim=True).expand_as(q)
+            if self.use_task_adapters:
+                particle_latent = self.task_adapters.particle(particle_latent)
             if self.use_skip:
                 particle_latent = add_skip(particle_latent, q)
             particle_latent = self.attn_norm(particle_latent)
-            fused = self.delta_fusion(torch.cat((particle_latent, skip), dim=-1))
+            fused = self.delta_fusion(torch.cat((particle_latent, skip_features), dim=-1))
             result.append(self.delta_head(fused).unsqueeze(0))
         return torch.cat(result, dim=0)
 
@@ -111,6 +112,6 @@ class GINOSharedLatent(nn.Module):
             sampled = self.sample_grid(grid, q)
             pe = fourier_positional_encoding(q.unsqueeze(0), self.query_pe_freqs).squeeze(0)
             if self.use_task_adapters:
-                _, sampled = self.task_adapters(sampled)
+                sampled = self.task_adapters.field(sampled)
             field.append(self.field_decoder(torch.cat((sampled, pe), dim=-1)).unsqueeze(0))
         return delta, torch.cat(field, dim=0)

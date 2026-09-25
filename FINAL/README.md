@@ -5,8 +5,9 @@ This directory is the modular research implementation for the VPM GINO workflow.
 ## Commands
 
 ```bash
-python scripts/preprocess.py --source-root ../..
+python scripts/preprocess.py
 python scripts/train.py --config configs/default.yaml
+python scripts/train.py --config configs/default.yaml --set training.use_rollout_loss=true --set training.rollout_weight=1.0
 python scripts/evaluate.py --config configs/default.yaml --set evaluation.checkpoint=runs/baseline/best_model.pt
 ```
 
@@ -16,7 +17,7 @@ Override any config value using `--set section.key=value`. Training requires a p
 
 `scripts` → `gino.data` + `gino.model` + `gino.dynamics` + `gino.training` / `gino.evaluation` → `visualization`.
 
-`state_transition.predict_next_state` is the single physical-plus-residual step. `dynamics.rollout` always delegates the next input to a caller supplied `rebuild_batch` function so geometry must be recalculated from each predicted position state.
+`state_transition.predict_next_state` is the single physical-plus-residual step and exposes predicted/base states, residual, and normalized/physical fields. Inference uses `inference_rollout`; BPTT uses `training_rollout`; detached generated-input training uses `pushforward_rollout`. All share `gino.data.reconstruction.rebuild_next_batch`, which updates state, flow, phase, and VTK-derived geometry inputs.
 
 ## Source mapping
 
@@ -30,10 +31,10 @@ Override any config value using `--set section.key=value`. Training requires a p
 | `GINO_analysis.py`: Euler base plus residual transition and rollout evaluation | `gino/dynamics/`, `gino/evaluation/` |
 | analysis figures | `visualization/` |
 
-The baseline keeps the original state-dict layer names and shapes (`lift`, `global_condition_mlp`, `encoder`, `fno`, decoder and attention projection names, and uncertainty scalars). Checkpoint compatibility still requires an actual checkpoint load test; this workspace contains no `.pt`/`.pth` file, processed dataset, or raw HDF5 data, and `torch` is absent from the active Python runtime.
+The baseline keeps the original state-dict layer names and shapes (`lift`, `global_condition_mlp`, `encoder`, `fno`, decoder and attention projection names, and uncertainty scalars). Evaluation checks missing and unexpected checkpoint keys before running.
 
 ## Mechanisms
 
-Baseline: one-step state residual and field losses with the existing homoscedastic task weighting. Optional modules expose scheduled sampling, temporally correlated GNS noise, pushforward inputs, normalized rollout loss, longer horizon curriculum, attention/skip/global-conditioning switches, and task adapters. New mechanisms default off. Scheduled sampling mirrors the source notebook's partial velocity/gradient replacement and is not equivalent to closed-loop rollout.
+Baseline: one-step state residual and field losses with the existing homoscedastic task weighting. Mechanisms are independent config switches. Scheduled sampling only replaces selected velocity/gradient features in `x`; it is not closed-loop rollout. Pushforward detaches generated inputs between supervised steps, while rollout loss retains gradients through generated states.
 
-Numerical one-step evaluation is available from the CLI. Autoregressive evaluation accepts a `rebuild_batch` callback and never teacher-forces. This callback must refresh all state-dependent features, including geometry. Native Task-2 field metrics operate on native HDF5 samples; plotting interpolation is separate.
+Evaluation reports one-step physical state errors, autoregressive metrics by configured horizon, and direct native Task-2 HDF5 field errors when `data.native_task2_root` is set. Autoregressive evaluation never teacher-forces future states. Preprocessing stores source VTK paths so geometry-dependent channels can be refreshed at every rollout step.

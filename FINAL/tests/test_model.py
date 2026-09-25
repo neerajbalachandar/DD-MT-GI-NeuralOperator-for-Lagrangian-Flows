@@ -21,3 +21,25 @@ def test_gino_forward_shapes_and_checkpoint_roundtrip():
     assert out[1].shape == (1, 6, 12)
     clone = GINOSharedLatent(3, 7, 12, 2, cfg)
     clone.load_state_dict(model.state_dict())
+
+
+@pytest.mark.parametrize("switch", [
+    {"use_attention": False},
+    {"use_skip": False},
+    {"use_global_conditioning": False},
+    {"use_task_adapters": True},
+    {"use_attention": False, "use_task_adapters": True},
+])
+def test_architecture_switches_execute_independently(switch):
+    pytest.importorskip("neuralop")
+    from gino.model.gino import GINOSharedLatent, build_latent_grid
+    cfg = {"hidden_channels": 8, "latent_res": 4, "query_pos_encoding_frequencies": 1,
+           "gno_radius": 2., "fno_modes": 2, "fno_layers": 1, "mlp_hidden": 8, "mlp_layers": 1,
+           "use_attention": True, "use_skip": True, "use_global_conditioning": True,
+           "use_task_adapters": False}
+    cfg.update(switch)
+    model = GINOSharedLatent(3, 7, 12, 2, cfg)
+    delta, field = model(torch.rand(1, 5, 3), build_latent_grid(4, "cpu"),
+                         torch.rand(1, 6, 3), torch.rand(1, 5, 3), torch.rand(1, 2))
+    assert delta.shape == (1, 5, 7)
+    assert field.shape == (1, 6, 12)
