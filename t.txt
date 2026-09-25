@@ -1,0 +1,257 @@
+FLOW-reconstruction-in-VPM-using-FNO/FINAL/
+│
+├── gino/
+│   │
+│   ├── model/
+│   │   ├── gino.py
+│   │   ├── gno.py
+│   │   ├── fno.py
+│   │   ├── attention.py
+│   │   ├── skip.py
+│   │   ├── positional_encoding.py
+│   │   └── decoders.py
+│   │
+│   ├── data/
+│   │   ├── hdf5.py
+│   │   ├── geometry.py
+│   │   ├── dataset.py
+│   │   └── normalization.py
+│   │
+│   ├── dynamics/
+│   │   ├── physics.py
+│   │   ├── state_transition.py
+│   │   └── rollout.py
+│   │
+│   ├── training/
+│   │   ├── losses.py
+│   │   ├── noise.py
+│   │   ├── scheduled_sampling.py
+│   │   ├── pushforward.py
+│   │   └── trainer.py
+│   │
+│   └── evaluation/
+│       ├── one_step.py
+│       ├── autoregressive.py
+│       ├── field.py
+│       └── metrics.py
+│
+├── visualization/
+│   ├── temporal.py
+│   └── fields.py
+│
+├── scripts/
+│   ├── preprocess.py
+│   ├── train.py
+│   └── evaluate.py
+│
+├── tests/
+│   ├── test_dataset.py
+│   ├── test_physics.py
+│   ├── test_model.py
+│   └── test_rollout.py
+|
+└── notebooks/
+    ├── inspect_data.ipynb
+    ├── inspect_training.ipynb
+    └── visualize_results.ipynb
+
+Can you also make the changes according to the current structure of FINAL folder, epecially with the pt model and processed data.
+
+Refer to the current set of files process_data.py, GINO_sharedlatent.ipynb, GINO_analysis.py for the following modular code development. (no need to refer to GINO_analysis.ipynb).
+
+The functionality of each of these files should be as follows:
+
+| File                    | Responsibility                                                 | What should not be inside it |
+| ----------------------- | -------------------------------------------------------------- | ---------------------------- |
+| config.py             | Dataclass/config loading                                       | Model implementation         |
+| paths.py              | Resolve raw, processed, checkpoint, and output paths           | Training logic               |
+| hdf5_io.py            | Read Task-1 particle HDF5 and Task-2 field HDF5                | Normalization                |
+| geometry.py           | VTK geometry, distances, normals, geometry channels            | Neural network               |
+| preprocessing.py      | Construct \(S_t\), \(S_{t+1}\), \(\Delta S\), residual targets | Training                     |
+| dataset.py            | PyTorch Dataset and DataLoader                             | HDF5 discovery               |
+| normalization.py      | Train-only means/stds and transforms                           | Model                        |
+| gino_shared_latent.py | Entire neural architecture                                     | Losses                       |
+| physics.py            | Euler/residual state transition                                | Neural network               |
+| losses.py             | One-step, field, rollout, uncertainty-weighted objectives      | Data loading                 |
+| noise.py              | GNS-style random-walk corruption                               | Rollout metrics              |
+| rollout.py            | One exact canonical autoregressive step and rollout            | Plotting                     |
+| trainer.py            | Optimizer, scheduler, checkpointing                            | Model architecture           |
+| one_step.py           | One-step test evaluation                                       | Training                     |
+| autoregressive.py     | Closed-loop rollout evaluation                                 | Plot styling                 |
+| field.py              | Native-HDF5 versus GINO field comparison                       | Temporal metrics             |
+| temporal.py           | Figure A/B                                                     | Model                        |
+| fields.py             | Field figures                                                  | Training                     |
+| train.py              | CLI entry point                                                | Architecture details         |
+| evaluate.py           | CLI entry point                                                | Model definition             |
+
+
+There are few errors which needs to be corrected:
+1. Your preprocessing computes geometry features from the current particle positions:
+
+curr_xyz = ...
+geom_feat = _particle_geometry_features(curr_xyz, ...)
+
+and consequently geom_dist is a function of the current particle configuration.
+
+But during the current rollout, _make_rollout_x() reconstructs the model input by copying the old input features and replacing state, velocity, and gradient. The geometry features are not recomputed from the predicted particle positions.
+
+That means you can have
+
+$$ \widehat X_n \neq X_n $$
+
+but still provide the model with
+
+$$ d_{\rm geom}(\widehat X_n) = d_{\rm geom}(X_0). $$
+
+For the current checkpoint, geom_dist is one of the input features, so this is particularly important.
+
+The rollout input should instead be constructed as
+
+$$ X_n \rightarrow d_{\rm geom}(X_n) $$
+
+at every autoregressive step.
+
+I would implement:
+
+geometry_features = compute_geometry_features(
+    predicted_positions,
+    case_geometry,
+)
+
+inside the canonical rollout step.
+
+2. Your second major problem is that your rollout training horizon is far too short
+
+The current notebook defaults to
+
+$$ K_{\max}=1. $$
+
+The curriculum only increases this to \(K=2\) under a validation criterion, and the maximum rollout loss weight is then set to \(0.05\).
+
+That is a very weak long-horizon objective compared with your 100-step evaluation.
+
+GNS itself trains on one-step examples but explicitly adds noise to approximate rollout-state errors; the authors report that noise corruption is one of the principal factors governing long-term performance.
+
+For neural operators, the TUM long-horizon study gives an even more relevant result: in their experiments, unrolling for \(m\le4\) was insufficient for stable long rollouts, while \(m\ge8\) produced stable rollouts on their difficult flow task. They also found that residual versus direct prediction had little effect compared with training unroll length.
+
+Therefore I would change your temporal curriculum to
+
+$$ 1\rightarrow2\rightarrow4\rightarrow8, $$
+
+and possibly
+
+$$ 8\rightarrow16. $$
+
+I would not jump from \(K=2\) to \(K=100\).
+
+3. Your current scheduled sampling is not full rollout exposure
+
+The notebook currently uses a probability
+
+$$ p=\min(0.3,(e-1)/30) $$
+
+to replace field inputs with predictions. However, it primarily replaces the velocity/gradient channels, while the geometric/state input remains largely teacher-forced. The field loss also continues to use the clean first forward pass.
+
+Therefore deployment is approximately
+
+$$ (\widehat X,\widehat\Gamma,\widehat\sigma, \widehat U,\widehat{\nabla U}) \rightarrow F_\theta(\cdot), $$
+
+while training only partially exposes the network to that distribution.
+
+This is why I would move from conventional scheduled sampling toward the pushforward strategy of Brandstetter et al. The pushforward trick deliberately makes the input to the second prediction resemble the model's own first prediction, while stopping gradients through the first prediction. This directly attacks the train/test distribution shift of autoregressive PDE solvers.
+
+For your model, that means:
+
+$$ S_t^{\rm true} \rightarrow \widehat S_{t+1} \rightarrow \operatorname{stopgrad}(\widehat S_{t+1}) \rightarrow \widehat S_{t+2}. $$
+
+The second prediction is then supervised against
+
+$$ S_{t+2}^{\rm true}. $$
+
+This is much closer to your actual deployment loop.
+
+4. Add GNS-style noise, but adapt it to your residual formulation
+
+This should be a separate module:
+
+training/noise.py
+
+and contain something like:
+
+perturb_state(...)
+perturb_velocity(...)
+perturb_sequence(...)
+
+GNS uses random-walk noise rather than independent white noise because the purpose is to approximate the accumulated error generated by previous rollout steps. Their supplementary ablations found random-walk noise to perform best among their tested noise strategies.
+
+For your residual GINO, the physically consistent target is
+
+$$ \widetilde R^\star_t = S_{t+1}^{\rm true} - \widetilde S_t - B( \widetilde S_t, \widetilde U_t, \widetilde{\nabla U}_t ). $$
+
+This is better than simply taking your existing residual and adding noise to the input.
+
+The GNS implementation itself adjusts the target consistently with its noisy input trajectory rather than simply changing the inputs and leaving the target untouched. learned_simulator.py
+
+5. One particularly important checkpointing problem
+
+Your training notebook currently chooses the best checkpoint based on
+
+$$ \texttt{val["field\_rel\_l2"]}. $$
+
+That means the model called
+
+sharedlatent_GINO_4_best_model.pt
+
+is selected primarily for field reconstruction, not long-horizon stability.
+
+This is a serious methodological problem if the paper's goal is a dynamical surrogate.
+
+Suppose Model A has
+
+$$ L_{\rm field}=0.10, \qquad L_{\rm rollout}=10, $$
+
+and Model B has
+
+$$ L_{\rm field}=0.11, \qquad L_{\rm rollout}=0.01. $$
+
+Your current checkpoint criterion selects Model A.
+
+For the paper, that is not the model you actually care about.
+
+Once rollout training is enabled, checkpoint selection should use a validation criterion such as
+
+$$ J_{\rm val} = \lambda_1 L_{\rm field} + \lambda_2 L_{\rm one-step} + \lambda_3 L_{\rm rollout}. $$
+
+I would make the primary checkpoint criterion validation rollout error at a fixed declared horizon, with one-step and field metrics reported separately.
+
+That alone may change which checkpoint you are currently loading.
+
+6. Normalize the rollout loss in state space
+
+Your current rollout objective uses
+
+$$ \operatorname{MSE} (\widehat S,S) $$
+
+directly over
+
+$$ X,\Gamma,\sigma. $$
+
+Those quantities have different physical units and scales. The current code indeed passes the entire seven-component physical state into F.mse_loss.
+
+Instead define
+
+$$ \bar S = D_S^{-1}(S-\mu_S), $$
+
+where
+
+$$ D_S= \operatorname{diag} (\sigma_X,\sigma_\Gamma,\sigma_\sigma), $$
+
+using statistics computed only from training trajectories.
+
+Then
+
+$$ L_{\rm roll} = \sum_{k=1}^{K} w_k \left\| \bar{\widehat S}{t+k} - \bar S{t+k} \right\|_2^2. $$
+
+This makes the rollout objective mathematically compatible with the different state variables.
+
+The preprocessing pipeline already computes train-only normalization statistics for the model inputs and residual targets, so this fits naturally into your data contract.
