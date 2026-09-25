@@ -1,0 +1,56 @@
+seed: 42
+device: auto
+data:
+  dataset: ../../Processed_Data/processed_data_split3/particle_evolution_dataset.npz
+  native_task2_root: ""
+  input_features: [u_x, u_y, u_z, sigma, geom_dist, Gamma_x, Gamma_y, Gamma_z, gradU_xx, gradU_xy, gradU_xz, gradU_yx, gradU_yy, gradU_yz, gradU_zx, gradU_zy, gradU_zz]
+  global_condition_channels: [angle_of_attack, freestream_magnitude, phase]
+  max_particles: 4096
+  max_queries: 2048
+model:
+  latent_res: 24
+  hidden_channels: 128
+  fno_layers: 6
+  fno_modes: 6
+  gno_radius: 0.15
+  mlp_layers: 3
+  mlp_hidden: 128
+  query_pos_encoding_frequencies: 4
+  use_attention: true
+  use_skip: true
+  use_global_conditioning: true
+  use_task_adapters: false
+  predict_delta_u: true
+training:
+  run_dir: runs/baseline
+  epochs: 80
+  batch_size: 1
+  gradient_accumulation_steps: 4
+  learning_rate: 0.0003
+  weight_decay: 0.00003
+  scheduler: plateau
+  grad_clip_norm: 1.0
+  early_stopping_patience: 20
+  mixed_precision: false
+  use_state_loss: true
+  use_field_loss: true
+  use_rollout_loss: false
+  rollout_weight: 0.0
+  rollout_horizon_max: 1
+  rollout_horizon_schedule: [1, 2, 4, 8, 16]
+  use_scheduled_sampling: false
+  scheduled_sampling_max_probability: 0.3
+  use_gns_noise: false
+  gns_initial_std: 0.0
+  gns_walk_std: 0.0
+  use_pushforward: false
+  use_homoscedastic_weighting: true
+  state_loss_weight: 1.0
+  field_loss_weight: 1.0
+  use_relative_l2_field_loss: false
+evaluation:
+  checkpoint: ""
+  split: test
+  rollout_horizons: [1, 2, 4, 8, 16]
+  max_batches: 0
+  save_plots: true
