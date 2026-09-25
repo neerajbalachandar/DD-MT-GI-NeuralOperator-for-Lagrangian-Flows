@@ -1,7 +1,45 @@
+You are working on:
+
 FLOW-reconstruction-in-VPM-using-FNO/FINAL/
-│
+
+Goal:
+Refactor the current GINO-based VPM flow-reconstruction and temporal-evolution code into a modular, reproducible, debuggable research codebase while preserving the existing scientific formulation.
+
+============================================================
+1. SOURCE OF TRUTH
+============================================================
+
+Use ONLY these three existing implementations as the source of truth:
+
+1. process_data.py
+2. GINO_sharedlatent.ipynb
+3. GINO_analysis.py
+
+Do NOT use GINO_analysis.ipynb.
+
+Before coding, inspect all three completely and map:
+
+data → preprocessing → normalization → model → physics → state transition → training → rollout → evaluation → visualization.
+
+Do not invent missing physics or silently change:
+- state definition
+- feature ordering
+- normalization
+- tensor conventions
+- model dimensions
+- architecture
+- checkpoint format.
+
+The existing trained checkpoint must remain loadable.
+
+============================================================
+2. TARGET STRUCTURE
+============================================================
+
+Use:
+
+FINAL/
 ├── gino/
-│   │
 │   ├── model/
 │   │   ├── gino.py
 │   │   ├── gno.py
@@ -9,11 +47,13 @@ FLOW-reconstruction-in-VPM-using-FNO/FINAL/
 │   │   ├── attention.py
 │   │   ├── skip.py
 │   │   ├── positional_encoding.py
-│   │   └── decoders.py
+│   │   ├── decoders.py
+│   │   └── adapters.py
 │   │
 │   ├── data/
 │   │   ├── hdf5.py
 │   │   ├── geometry.py
+│   │   ├── preprocessing.py
 │   │   ├── dataset.py
 │   │   └── normalization.py
 │   │
@@ -49,209 +89,649 @@ FLOW-reconstruction-in-VPM-using-FNO/FINAL/
 │   ├── test_physics.py
 │   ├── test_model.py
 │   └── test_rollout.py
-|
+│
 └── notebooks/
     ├── inspect_data.ipynb
     ├── inspect_training.ipynb
+    ├── analyze_results.ipynb
     └── visualize_results.ipynb
 
-Can you also make the changes according to the current structure of FINAL folder, epecially with the pt model and processed data.
+Also update the ROOT:
+GINO_sharedlatent.ipynb
 
-Refer to the current set of files process_data.py, GINO_sharedlatent.ipynb, GINO_analysis.py for the following modular code development. (no need to refer to GINO_analysis.ipynb).
+Do not create a giant YAML/JSON ablation framework. The mechanisms should remain easy to manually enable/disable in Python.
 
-The functionality of each of these files should be as follows:
+============================================================
+3. DATA AND PHYSICS
+============================================================
 
-| File                    | Responsibility                                                 | What should not be inside it |
-| ----------------------- | -------------------------------------------------------------- | ---------------------------- |
-| config.py             | Dataclass/config loading                                       | Model implementation         |
-| paths.py              | Resolve raw, processed, checkpoint, and output paths           | Training logic               |
-| hdf5_io.py            | Read Task-1 particle HDF5 and Task-2 field HDF5                | Normalization                |
-| geometry.py           | VTK geometry, distances, normals, geometry channels            | Neural network               |
-| preprocessing.py      | Construct \(S_t\), \(S_{t+1}\), \(\Delta S\), residual targets | Training                     |
-| dataset.py            | PyTorch Dataset and DataLoader                             | HDF5 discovery               |
-| normalization.py      | Train-only means/stds and transforms                           | Model                        |
-| gino_shared_latent.py | Entire neural architecture                                     | Losses                       |
-| physics.py            | Euler/residual state transition                                | Neural network               |
-| losses.py             | One-step, field, rollout, uncertainty-weighted objectives      | Data loading                 |
-| noise.py              | GNS-style random-walk corruption                               | Rollout metrics              |
-| rollout.py            | One exact canonical autoregressive step and rollout            | Plotting                     |
-| trainer.py            | Optimizer, scheduler, checkpointing                            | Model architecture           |
-| one_step.py           | One-step test evaluation                                       | Training                     |
-| autoregressive.py     | Closed-loop rollout evaluation                                 | Plot styling                 |
-| field.py              | Native-HDF5 versus GINO field comparison                       | Temporal metrics             |
-| temporal.py           | Figure A/B                                                     | Model                        |
-| fields.py             | Field figures                                                  | Training                     |
-| train.py              | CLI entry point                                                | Architecture details         |
-| evaluate.py           | CLI entry point                                                | Model definition             |
+State ordering is:
 
+S_t = [x,y,z,Gamma_x,Gamma_y,Gamma_z,sigma].
 
-There are few errors which needs to be corrected:
-1. Your preprocessing computes geometry features from the current particle positions:
+Preserve the exact feature ordering and normalization used by the existing implementation.
 
-curr_xyz = ...
-geom_feat = _particle_geometry_features(curr_xyz, ...)
+data/hdf5.py:
+- Task-1 particle HDF5
+- Task-2 native Eulerian HDF5
 
-and consequently geom_dist is a function of the current particle configuration.
+data/geometry.py:
+- geometry
+- distances
+- normals
+- geometry channels
+- nearest-neighbor/search functionality
 
-But during the current rollout, _make_rollout_x() reconstructs the model input by copying the old input features and replacing state, velocity, and gradient. The geometry features are not recomputed from the predicted particle positions.
+data/preprocessing.py:
+- S_t
+- S_{t+1}
+- ΔS
+- residual targets
+- field targets
+- geometry features
+- global conditioning
 
-That means you can have
+data/dataset.py:
+- PyTorch Dataset/DataLoader only
 
-$$ \widehat X_n \neq X_n $$
+data/normalization.py:
+- train-only statistics
+- normalization/denormalization for all required quantities
 
-but still provide the model with
+Never calculate normalization statistics from validation/test data.
 
-$$ d_{\rm geom}(\widehat X_n) = d_{\rm geom}(X_0). $$
+============================================================
+4. CANONICAL STATE TRANSITION
+============================================================
 
-For the current checkpoint, geom_dist is one of the input features, so this is particularly important.
+Separate:
 
-The rollout input should instead be constructed as
+physical/base transition B(...)
++
+learned residual
 
-$$ X_n \rightarrow d_{\rm geom}(X_n) $$
+physics.py contains the physical transition.
 
-at every autoregressive step.
+state_transition.py contains the complete transition.
 
-I would implement:
+rollout.py contains autoregressive iteration.
 
-geometry_features = compute_geometry_features(
-    predicted_positions,
-    case_geometry,
-)
+There must be exactly ONE canonical state-transition implementation used by training and evaluation.
 
-inside the canonical rollout step.
+CRITICAL:
+At every autoregressive step, geometry must be recomputed from the predicted particle positions:
 
-2. Your second major problem is that your rollout training horizon is far too short
+S_hat_t
+→ predicted xyz
+→ geometry(S_hat_t)
+→ model input
+→ S_hat_{t+1}.
 
-The current notebook defaults to
+Never reuse geometry features from S_0 unless physically justified.
 
-$$ K_{\max}=1. $$
+============================================================
+5. EXISTING GINO ARCHITECTURE
+============================================================
 
-The curriculum only increases this to \(K=2\) under a validation criterion, and the maximum rollout loss weight is then set to \(0.05\).
+Reproduce the actual architecture in GINO_sharedlatent.ipynb.
 
-That is a very weak long-horizon objective compared with your 100-step evaluation.
+Preserve:
+- GNO
+- FNO/shared latent representation
+- Fourier positional encoding
+- global conditioning
+- attention
+- skip/residual connections
+- particle/state decoder
+- Eulerian field decoder
+- residual state prediction
+- hidden dimensions
+- latent dimensions
+- GNO radius/neighborhood behavior
+- Fourier modes
+- activations
+- normalization
+- output ordering.
 
-GNS itself trains on one-step examples but explicitly adds noise to approximate rollout-state errors; the authors report that noise corruption is one of the principal factors governing long-term performance.
+Checkpoint compatibility is mandatory.
 
-For neural operators, the TUM long-horizon study gives an even more relevant result: in their experiments, unrolling for \(m\le4\) was insufficient for stable long rollouts, while \(m\ge8\) produced stable rollouts on their difficult flow task. They also found that residual versus direct prediction had little effect compared with training unroll length.
+The shared latent representation must remain explicit:
 
-Therefore I would change your temporal curriculum to
+particle input
+→ encoder/GNO
+→ shared latent
+→ operator processing
+→ particle decoder
+→ field decoder.
 
-$$ 1\rightarrow2\rightarrow4\rightarrow8, $$
+Do not collapse the two tasks.
 
-and possibly
+============================================================
+6. EXISTING FEATURES VS NEW FEATURES
+============================================================
 
-$$ 8\rightarrow16. $$
+The following ALREADY EXIST and must be preserved/modularized:
 
-I would not jump from \(K=2\) to \(K=100\).
+- GNO
+- FNO/shared latent
+- positional encoding
+- global conditioning
+- attention
+- skip connections
+- residual prediction
+- particle decoder
+- field decoder
+- one-step state loss
+- field loss
+- homoscedastic multi-task weighting
+- scheduled sampling
+- short-horizon rollout loss
+- one-step evaluation
+- autoregressive evaluation
+- native-HDF5 field evaluation.
 
-3. Your current scheduled sampling is not full rollout exposure
+Do NOT describe these as newly introduced methods.
 
-The notebook currently uses a probability
+The following are NEW and must be implemented explicitly:
 
-$$ p=\min(0.3,(e-1)/30) $$
+1. GNS-style random-walk noise
+2. pushforward training
+3. longer unrolled training
+4. normalized multi-step rollout loss
+5. optional shared-latent task adapters
+6. any additional stability regularizer.
 
-to replace field inputs with predictions. However, it primarily replaces the velocity/gradient channels, while the geometric/state input remains largely teacher-forced. The field loss also continues to use the clean first forward pass.
+============================================================
+7. MODEL ABLATIONS
+============================================================
 
-Therefore deployment is approximately
+attention.py:
+Implement existing attention independently so it can be disabled.
 
-$$ (\widehat X,\widehat\Gamma,\widehat\sigma, \widehat U,\widehat{\nabla U}) \rightarrow F_\theta(\cdot), $$
+skip.py:
+Implement existing architectural skip connections independently.
 
-while training only partially exposes the network to that distribution.
+IMPORTANT:
+Architectural skip connections are different from residual prediction of physical state increments.
 
-This is why I would move from conventional scheduled sampling toward the pushforward strategy of Brandstetter et al. The pushforward trick deliberately makes the input to the second prediction resemble the model's own first prediction, while stopping gradients through the first prediction. This directly attacks the train/test distribution shift of autoregressive PDE solvers.
+adapters.py:
+Optional new task-specific latent adapters:
 
-For your model, that means:
+L_field = A_field(L)
+L_particle = A_particle(L)
 
-$$ S_t^{\rm true} \rightarrow \widehat S_{t+1} \rightarrow \operatorname{stopgrad}(\widehat S_{t+1}) \rightarrow \widehat S_{t+2}. $$
+The baseline must remain the original shared latent architecture.
 
-The second prediction is then supervised against
+Do not introduce adapters into the baseline checkpoint.
 
-$$ S_{t+2}^{\rm true}. $$
+============================================================
+8. LOSSES
+============================================================
 
-This is much closer to your actual deployment loop.
+Put ALL losses in training/losses.py.
 
-4. Add GNS-style noise, but adapt it to your residual formulation
+Support:
+- one-step state loss
+- residual loss
+- field loss
+- relative L2 field loss
+- rollout loss
+- normalized rollout loss
+- homoscedastic multi-task weighting
+- combined loss.
 
-This should be a separate module:
+Conceptually:
+
+L_total =
+λ_state L_state
++ λ_field L_field
++ λ_rollout L_rollout.
+
+Each term must be independently disableable.
+
+The existing homoscedastic formulation must first be reproduced exactly before modification.
+
+============================================================
+9. SCHEDULED SAMPLING
+============================================================
+
+Move the EXISTING scheduled-sampling implementation into:
+
+training/scheduled_sampling.py
+
+Preserve its current behavior first.
+
+Clearly distinguish:
+- teacher forcing
+- scheduled sampling
+- closed-loop rollout
+- pushforward training.
+
+Do not claim partial replacement of velocity/gradient inputs is equivalent to full autoregressive exposure.
+
+============================================================
+10. NEW GNS-STYLE NOISE
+============================================================
+
+Implement in:
 
 training/noise.py
 
-and contain something like:
+This is NOT assumed to exist in the current code.
 
-perturb_state(...)
-perturb_velocity(...)
-perturb_sequence(...)
+Use temporally correlated random-walk noise rather than independent white noise.
 
-GNS uses random-walk noise rather than independent white noise because the purpose is to approximate the accumulated error generated by previous rollout steps. Their supplementary ablations found random-walk noise to perform best among their tested noise strategies.
+For example:
 
-For your residual GINO, the physically consistent target is
+ε_0 ~ N(0,σ²I)
+ε_t = ε_{t-1}+η_t
 
-$$ \widetilde R^\star_t = S_{t+1}^{\rm true} - \widetilde S_t - B( \widetilde S_t, \widetilde U_t, \widetilde{\nabla U}_t ). $$
+with:
 
-This is better than simply taking your existing residual and adding noise to the input.
+η_t ~ N(0,σ_η²I).
 
-The GNS implementation itself adjusts the target consistently with its noisy input trajectory rather than simply changing the inputs and leaving the target untouched. learned_simulator.py
+Perturbed state:
 
-5. One particularly important checkpointing problem
+S_tilde = S_t + ε_t.
 
-Your training notebook currently chooses the best checkpoint based on
+For residual prediction, construct a consistent target:
 
-$$ \texttt{val["field\_rel\_l2"]}. $$
+R*_t =
+S^true_{t+1}
+− S_tilde
+− B(S_tilde,U_tilde,∇U_tilde).
 
-That means the model called
+Do not corrupt the input while leaving an inconsistent residual target.
 
-sharedlatent_GINO_4_best_model.pt
+Make it independently switchable:
 
-is selected primarily for field reconstruction, not long-horizon stability.
+USE_GNS_NOISE = False/True.
 
-This is a serious methodological problem if the paper's goal is a dynamical surrogate.
+============================================================
+11. NEW PUSHFORWARD TRAINING
+============================================================
 
-Suppose Model A has
+Implement in:
 
-$$ L_{\rm field}=0.10, \qquad L_{\rm rollout}=10, $$
+training/pushforward.py
 
-and Model B has
+Sequence:
 
-$$ L_{\rm field}=0.11, \qquad L_{\rm rollout}=0.01. $$
+S_t^true
+→ model
+→ S_hat_{t+1}
+→ stop-gradient
+→ model
+→ S_hat_{t+2}
 
-Your current checkpoint criterion selects Model A.
+with supervision against S^true_{t+2}.
 
-For the paper, that is not the model you actually care about.
+The second model input must therefore be model-generated rather than ground truth.
 
-Once rollout training is enabled, checkpoint selection should use a validation criterion such as
+Keep pushforward independent from scheduled sampling.
 
-$$ J_{\rm val} = \lambda_1 L_{\rm field} + \lambda_2 L_{\rm one-step} + \lambda_3 L_{\rm rollout}. $$
+============================================================
+12. LONGER UNROLLED TRAINING
+============================================================
 
-I would make the primary checkpoint criterion validation rollout error at a fixed declared horizon, with one-step and field metrics reported separately.
+The existing rollout loss is NOT new.
 
-That alone may change which checkpoint you are currently loading.
+The new change is increasing its training horizon.
 
-6. Normalize the rollout loss in state space
+Support:
 
-Your current rollout objective uses
+K = 1 → 2 → 4 → 8 → optionally 16.
 
-$$ \operatorname{MSE} (\widehat S,S) $$
+Implement the curriculum in trainer.py.
 
-directly over
+rollout.py performs the rollout; trainer.py determines the training horizon.
 
-$$ X,\Gamma,\sigma. $$
+Do not immediately train with extremely long horizons.
 
-Those quantities have different physical units and scales. The current code indeed passes the entire seven-component physical state into F.mse_loss.
+============================================================
+13. NORMALIZED ROLLOUT LOSS
+============================================================
 
-Instead define
+Implement in training/losses.py.
 
-$$ \bar S = D_S^{-1}(S-\mu_S), $$
+For:
 
-where
+S = [x,y,z,Gamma_x,Gamma_y,Gamma_z,sigma],
 
-$$ D_S= \operatorname{diag} (\sigma_X,\sigma_\Gamma,\sigma_\sigma), $$
+use training-set statistics:
 
-using statistics computed only from training trajectories.
+S_bar = (S−μ_S)/σ_S.
 
-Then
+Then:
 
-$$ L_{\rm roll} = \sum_{k=1}^{K} w_k \left\| \bar{\widehat S}{t+k} - \bar S{t+k} \right\|_2^2. $$
+L_rollout =
+Σ_{k=1}^K w_k
+||S_bar_hat_{t+k} − S_bar_{t+k}||².
 
-This makes the rollout objective mathematically compatible with the different state variables.
+This must coexist with the existing one-step, field, and homoscedastic losses.
 
-The preprocessing pipeline already computes train-only normalization statistics for the model inputs and residual targets, so this fits naturally into your data contract.
+============================================================
+14. TRAINER
+============================================================
+
+trainer.py contains only:
+- optimizer
+- scheduler
+- training loop
+- validation
+- gradients
+- checkpointing
+- metrics.
+
+It must support independent activation of:
+- one-step loss
+- field loss
+- rollout loss
+- scheduled sampling
+- pushforward
+- GNS noise
+- homoscedastic weighting.
+
+Do not put model architecture, HDF5 loading, or plotting here.
+
+============================================================
+15. EVALUATION
+============================================================
+
+one_step.py:
+True state → one-step prediction.
+
+autoregressive.py:
+Completely closed-loop prediction.
+
+At every rollout step, feed the model's own previous prediction.
+
+Never replace predictions with ground truth during evaluation.
+
+field.py:
+Compare predicted Eulerian fields against native Task-2 HDF5 fields.
+
+When native HDF5 exists, TRUE fields must always come from HDF5, not from reconstructed predicted particles.
+
+Visualization interpolation onto a common grid is for plotting only and must not alter numerical evaluation.
+
+============================================================
+16. VISUALIZATION
+============================================================
+
+Keep plotting separate from evaluation.
+
+temporal.py:
+Only required temporal figures:
+1. one-step error
+2. autoregressive rollout error.
+
+Do not generate unnecessary evolution plots.
+
+fields.py:
+For selected phases:
+
+row 1 = true fields
+row 2 = predicted fields
+row 3 = corresponding velocity profiles.
+
+True and predicted fields MUST use identical:
+- spatial extent
+- aspect ratio
+- coordinate system
+- color limits.
+
+Never independently zoom the true field.
+
+Numerical results must be saved before plotting so plotting failures cannot invalidate evaluation.
+
+============================================================
+17. TESTS
+============================================================
+
+test_dataset.py:
+- feature shapes
+- ordering
+- targets
+- normalization
+
+test_physics.py:
+- physical transition
+- residual transition
+- dimensions/units
+
+test_model.py:
+- forward shapes
+- decoder shapes
+- checkpoint loading
+- attention on/off
+- skip on/off
+
+test_rollout.py:
+- predicted state propagation
+- geometry recomputation
+- no teacher forcing
+- state dimensions
+- one-step/multi-step consistency.
+
+Explicitly verify:
+
+geometry(S_hat_t) != geometry(S_0)
+
+when predicted positions change.
+
+============================================================
+18. ROOT GINO_sharedlatent.ipynb
+============================================================
+
+IMPORTANT: Also update the ROOT GINO_sharedlatent.ipynb.
+
+It should become a compact, readable reference notebook for the current training pipeline.
+
+It must:
+- use the modular Python implementation
+- preserve the existing baseline architecture
+- expose the important experimental mechanisms clearly
+- allow training/evaluating the same model as scripts
+- document the mathematical formulation and training flow.
+
+Do NOT duplicate the implementation inside notebook cells.
+
+The notebook should import from:
+
+gino.model
+gino.data
+gino.dynamics
+gino.training
+gino.evaluation
+
+Add clearly separated sections for:
+
+1. imports/paths
+2. dataset loading
+3. normalization
+4. model construction
+5. baseline loss
+6. optional rollout loss
+7. optional scheduled sampling
+8. optional GNS noise
+9. optional pushforward
+10. training
+11. validation
+12. checkpoint saving
+13. basic evaluation.
+
+Keep the notebook compact enough to serve as a human-readable research record.
+
+The notebook must not become a second source of truth.
+
+============================================================
+19. ANALYSIS NOTEBOOK
+============================================================
+
+Create:
+
+notebooks/analyze_results.ipynb
+
+It must import the modular evaluation code and NOT duplicate:
+- model
+- HDF5 loading
+- normalization
+- rollout
+- metrics.
+
+It should analyze:
+- one-step error
+- autoregressive error
+- position/circulation/sigma errors
+- error versus rollout step
+- field comparisons
+- checkpoint comparisons
+- M0–M5 experiments.
+
+visualize_results.ipynb should operate only on saved evaluation results.
+
+============================================================
+20. ABLATION ORDER
+============================================================
+
+First establish:
+
+M0:
+Current architecture + current training.
+
+Then:
+
+M1:
+M0 + corrected canonical rollout.
+
+M2:
+M1 + normalized rollout loss.
+
+M3:
+M2 + longer unrolled training.
+
+M4:
+M3 + GNS noise.
+
+M5:
+M4 + pushforward.
+
+Separately:
+
+A1: remove attention
+A2: remove skip connections
+A3: remove global conditioning
+A4: shared latent + task adapters.
+
+Do not combine multiple changes before establishing the effect of each individual mechanism.
+
+============================================================
+21. REPRODUCIBILITY
+============================================================
+
+Every evaluation must record:
+- checkpoint
+- dataset
+- architecture
+- input features
+- target features
+- normalization source
+- rollout horizon
+- one-step metric
+- field metric
+- rollout metric.
+
+Every checkpoint should record:
+- architecture version
+- enabled/disabled mechanisms
+- rollout horizon
+- loss terms
+- noise settings
+- scheduled-sampling settings
+- pushforward settings
+- normalization statistics
+- dataset split.
+
+Use deterministic seeds where appropriate.
+
+Do not silently change preprocessing.
+
+============================================================
+22. IMPLEMENTATION ORDER
+============================================================
+
+Do this sequentially:
+
+1. Inspect the three source implementations.
+2. Produce old-function → new-file → new-function mapping.
+3. Implement data/preprocessing.
+4. Verify exact feature ordering, normalization and targets.
+5. Implement GINO and verify checkpoint compatibility.
+6. Implement canonical physics/state transition.
+7. Implement canonical rollout.
+8. Run unit tests.
+9. Implement one-step evaluation.
+10. Implement autoregressive evaluation.
+11. Implement native-HDF5 field evaluation.
+12. Implement visualization.
+13. Update root GINO_sharedlatent.ipynb.
+14. Create analyze_results.ipynb.
+15. Only then add/modify:
+    - rollout loss
+    - scheduled sampling
+    - longer unrolling
+    - normalized rollout loss
+    - GNS noise
+    - pushforward
+    - latent adapters.
+
+For every modification, state exactly what changed.
+
+============================================================
+23. MOST IMPORTANT SCIENTIFIC REQUIREMENT
+============================================================
+
+First demonstrate that the modular baseline reproduces the existing implementation:
+
+- normalized inputs
+- model outputs
+- one-step predictions
+- physical transition
+- field predictions.
+
+Only after baseline equivalence is established should temporal-stability modifications be tested.
+
+Keep the dataset, preprocessing, normalization, physics, evaluation and metrics identical across experiments.
+
+The research question is to determine which mechanisms reduce the observed amplification from approximately:
+
+one-step error: 10^-2–10^-3
+
+to
+
+autoregressive error: 10^0–10^1.
+
+Do not claim improvement without numerical evidence.
+
+============================================================
+24. FINAL DELIVERABLE
+============================================================
+
+Provide:
+
+1. final directory tree
+2. dependency graph
+3. old → new code mapping
+4. functions/classes in every module
+5. checkpoint compatibility result
+6. unit-test results
+7. one-step results
+8. autoregressive results
+9. field results
+10. list of independently switchable mechanisms
+11. updated root GINO_sharedlatent.ipynb
+12. analyze_results.ipynb.
+
+The final code must be modular enough that individual mechanisms can
+be manually commented/enabled without modifying unrelated components.
