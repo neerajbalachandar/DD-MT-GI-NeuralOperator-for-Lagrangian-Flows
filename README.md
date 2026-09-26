@@ -4,11 +4,6 @@ The architecture DD-MT-GINO is a multi-task neural operator that utilizes a shar
 
 Arxiv publication:
 
-The main codes are:
-1. GINO_sharedlatent_4.ipynb
-2. GINO_analysis_new.ipynb
-3. process_evolution_field_data.py
-
 
 The current issues:
 
