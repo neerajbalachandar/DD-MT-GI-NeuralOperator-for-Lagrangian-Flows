@@ -1,7 +1,6 @@
 # Virtual environments
 neuralop-env/
 fno-env/
-train/
 
 # Python cache
 __pycache__/
@@ -9,6 +8,7 @@ __pycache__/
 *.pyo
 *.pt
 *.png
+*.pdf
 
 # ML artifacts
 *.pth
@@ -17,45 +17,8 @@ torch_extensions/
 # OS files
 .DS_Store
 
-# Data Path
-data/
-!FINAL/gino/data/
-!FINAL/gino/data/**
-
-final-2/processed_data_task1/
-final-2/processed_data_task2/
-final-2/processed_data
-
-FINAL/processed_data_task1/
-FINAL/processed_data_task2/
-FINAL/process_data_ugradu/
-FINAL/process_data_evolution/
-
-FINAL/GNO evolution/process_data_evolution/
-FINAL/GNO ugradu/process_data_ugradu/
-
-
-results/
-
-FINAL/julia_time_forward/surrogate_ml_initial/
-FINAL/julia_time_forward/surrogate_ml_rollout_phyloss/
-FINAL/julia_time_forward/output/
-
-FINAL/processed_data/
-
-
-# Master branch
-GNO_ugradu_deployment/GNO ugradu/process_data_ugradu/
-GNO_ugradu_deployment/input_distribution/
-GNO_ugradu_deployment/GNO ugradu/ugradu prediction/
 processed_data/
-
-result_gino_sharedlatent/
-
-
-# Final branch ignore
-pt_model/
-processed_data_split1/
-processed_data_split2/
-processed_data_split3/
+Pt_Model/
 plots/
+
+refer.md/
