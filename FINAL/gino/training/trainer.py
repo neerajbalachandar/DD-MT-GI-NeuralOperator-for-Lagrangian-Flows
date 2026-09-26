@@ -8,8 +8,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from .losses import combined_loss, field_loss, state_loss, normalized_rollout_loss
-from .noise import perturb_flow_inputs
-from .scheduled_sampling import scheduled_sampling_probability
+from .noise import perturb_flow_inputs, random_walk_noise
+from .scheduled_sampling import scheduled_sampling_probability, choose_predicted_flow_inputs
 from gino.data.reconstruction import rebuild_next_batch_training
 from gino.dynamics.rollout import training_rollout, pushforward_rollout
 
@@ -61,6 +61,8 @@ class Trainer:
         use_rollout = bool(train and self.config.get("use_rollout_loss", False))
         use_pushforward = bool(train and self.config.get("use_pushforward", False))
         do_sequence = (use_rollout or use_pushforward) and active_horizon > 1
+        if train and self.config.get("use_scheduled_sampling", False) and not do_sequence:
+            raise ValueError("Scheduled sampling requires a generated multi-step rollout or pushforward input.")
         if train:
             self.optimizer.zero_grad(set_to_none=True)
         for step, batch in enumerate(loader):
@@ -70,27 +72,10 @@ class Trainer:
             use_noise = bool(train and self.config.get("use_gns_noise", False))
             noise = None
             if use_noise and (float(self.config.get("gns_initial_std", 0.0)) or float(self.config.get("gns_walk_std", 0.0))):
-                batch["x"], noise = perturb_flow_inputs(batch, noise, flow_indices,
+                noise = random_walk_noise(batch["x"][..., flow_indices].unsqueeze(0).expand(active_horizon, -1, -1, -1),
                     self.config.get("gns_initial_std", 0.0), self.config.get("gns_walk_std", 0.0))
+                batch["x"], _ = perturb_flow_inputs(batch, noise[0], flow_indices)
             with torch.set_grad_enabled(train), torch.autocast(device_type="cuda", enabled=self.scaler.is_enabled()):
-                if sample_probability > 0 and flow_indices:
-                    with torch.no_grad():
-                        encoded = self.model.encode_process(batch["input_geom"], self.latent_grid,
-                                                            batch["x"], batch["global_params"])
-                        flow_norm = self.model.decode_field(encoded, batch["particle_queries"])
-                        flow_phys = self.normalization.denormalize_field(flow_norm)
-                        if bool(torch.rand((), device=self.device) < sample_probability):
-                            means = torch.as_tensor(batch["input_mean"], dtype=batch["x"].dtype, device=self.device).reshape(-1)
-                            stds = torch.as_tensor(batch["input_std"], dtype=batch["x"].dtype, device=self.device).reshape(-1).clamp_min(1e-8)
-                            batch["x"] = batch["x"].clone()
-                            grad_names = [f"gradU_{i}{j}" for i in "xyz" for j in "xyz"]
-                            for j in flow_indices:
-                                name = batch["feature_names"][j]
-                                if name in ("u_x", "u_y", "u_z"):
-                                    value = flow_phys[..., ("u_x", "u_y", "u_z").index(name)]
-                                else:
-                                    value = flow_phys[..., 3 + grad_names.index(name)]
-                                batch["x"][..., j] = (value - means[j]) / stds[j]
                 pred, field = self.model(batch["input_geom"], self.latent_grid, batch["output_queries"], batch["x"], batch["global_params"], batch_dict=batch)
                 state_term = state_loss(pred[..., :batch["delta_target"].shape[-1]], batch["delta_target"])
                 field_term = field_loss(field, batch["field_target"], bool(self.config.get("use_relative_l2_field_loss", False)))
@@ -108,17 +93,21 @@ class Trainer:
                         state_mean = self.normalization.state_mean if self.normalization.state_mean is not None else np.zeros(7, dtype=np.float32)
                         state_std = self.normalization.state_std if self.normalization.state_std is not None else np.ones(7, dtype=np.float32)
                         def make_rebuild(differentiable):
-                            walk_noise = noise
+                            transition_index = 0
                             def rebuild(old, predicted, field_phys):
-                                nonlocal walk_noise
+                                nonlocal transition_index
                                 nxt = rebuild_next_batch_training(old, predicted, field_phys, self.normalization,
                                                                  pushforward=not differentiable)
-                                if sample_probability > 0 and flow_indices:
-                                    if bool(torch.rand((), device=self.device) >= sample_probability):
-                                        nxt["x"][..., flow_indices] = old["x"][..., flow_indices]
-                                if use_noise and (float(self.config.get("gns_initial_std", 0.0)) or float(self.config.get("gns_walk_std", 0.0))):
-                                    nxt["x"], walk_noise = perturb_flow_inputs(nxt, walk_noise, flow_indices,
-                                        self.config.get("gns_initial_std", 0.0), self.config.get("gns_walk_std", 0.0))
+                                if self.config.get("use_scheduled_sampling", False) and flow_indices:
+                                    teacher = old.get("rollout_teacher_inputs")
+                                    teacher = teacher[:, 0] if teacher is not None and teacher.shape[1] else None
+                                    velocity = torch.stack([field_phys[..., 0], field_phys[..., 1], field_phys[..., 2]], dim=-1)
+                                    gradient = field_phys[..., 3:12].reshape(*field_phys.shape[:-1], 3, 3)
+                                    nxt["x"], _ = choose_predicted_flow_inputs(nxt, velocity, gradient,
+                                        sample_probability, teacher_x=teacher)
+                                if noise is not None and transition_index + 1 < noise.shape[0]:
+                                    nxt["x"], _ = perturb_flow_inputs(nxt, noise[transition_index + 1], flow_indices)
+                                transition_index += 1
                                 return nxt
                             return rebuild
                         if use_rollout:

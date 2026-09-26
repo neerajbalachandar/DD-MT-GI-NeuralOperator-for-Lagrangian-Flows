@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from .context import RolloutContext
 
 
 def load_processed_dataset(path):
@@ -39,7 +40,8 @@ def assert_no_sequence_leakage(data, splits):
 
 class EvolutionDataset(Dataset):
     def __init__(self, data, pair_ids, input_features, global_features, max_particles=4096,
-                 max_queries=2048, rollout_horizon=16, normalization=None, residual_channels=None):
+                 max_queries=2048, rollout_horizon=16, normalization=None, residual_channels=None,
+                 include_teacher_inputs=False):
         self.data = data
         self.pair_ids = np.asarray(pair_ids, dtype=np.int64)
         self.features = [str(x) for x in input_features]
@@ -50,6 +52,7 @@ class EvolutionDataset(Dataset):
         self.rollout_horizon = max(1, int(rollout_horizon))
         self.normalization = normalization
         self.residual_channels = residual_channels
+        self.include_teacher_inputs = bool(include_teacher_inputs)
         self.coord_min = np.asarray(data["coord_min"], dtype=np.float32).reshape(3) if normalization is None else np.asarray(normalization.coord_min).reshape(3)
         self.coord_span = np.maximum(np.asarray(data["coord_span"], dtype=np.float32).reshape(3), 1e-8) if normalization is None else np.maximum(np.asarray(normalization.coord_span).reshape(3), 1e-8)
         self.input_mean = (np.asarray(data["in_mean"], dtype=np.float32).reshape(-1)[self.feature_indices]
@@ -65,26 +68,75 @@ class EvolutionDataset(Dataset):
     def __len__(self):
         return len(self.pair_ids)
 
+    def _pair_particle_ids(self, pair_id, kind="t"):
+        row = self.data["pair_ranges"][int(pair_id)]
+        start, end = int(row[3]), int(row[4])
+        key = f"particle_ids_{kind}"
+        if key in self.data:
+            ids = np.asarray([str(value) for value in np.asarray(self.data[key][start:end]).reshape(-1)])
+        else:
+            # Legacy archives can only rely on the original canonical row order.
+            ids = np.asarray([f"legacy-row:{i}" for i in range(end - start)])
+        if len(np.unique(ids)) != len(ids):
+            raise ValueError(f"Pair {pair_id} has duplicate particle identities in {key}")
+        return ids
+
     def __getitem__(self, index):
         pid = int(self.pair_ids[index])
         row = self.data["pair_ranges"][pid]
         _, _, _, start, end, count = row
-        count = min(int(count), self.max_particles)
-        start, end = int(start), int(start) + count
-        full = np.asarray(self.data["inputs_t"][start:end], dtype=np.float32)
+        start, end, count = int(start), int(end), int(count)
+        contexts = self.data.get("pair_contexts")
+        context = contexts[pid] if contexts is not None else {}
+        if isinstance(context, np.ndarray):
+            context = context.item()
+
+        future_pair_ids = []
+        future_id_sets = []
+        rollout_time_indices = []
+        next_id = self.next_pair.get(pid)
+        expected_frame = str(row[2])
+        while next_id is not None and len(future_pair_ids) < self.rollout_horizon - 1:
+            next_row = self.data["pair_ranges"][next_id]
+            if str(next_row[0]) != str(row[0]) or str(next_row[1]) != expected_frame:
+                raise ValueError(f"Broken adjacent pair chain after pair {pid}: expected frame {expected_frame}")
+            future_pair_ids.append(int(next_id))
+            future_id_sets.append(self._pair_particle_ids(next_id, "t"))
+            rollout_time_indices.append(len(future_pair_ids) + 1)
+            expected_frame = str(next_row[2])
+            next_id = self.next_pair.get(next_id)
+
+        current_ids = self._pair_particle_ids(pid, "t")
+        next_ids = self._pair_particle_ids(pid, "tp1")
+        if not np.array_equal(current_ids, next_ids):
+            raise ValueError(f"Pair {pid} preprocessing did not align current/next particle identities")
+        future_id_sets = [set(ids.tolist()) for ids in future_id_sets]
+        common_ids = [identity for identity in current_ids
+                      if all(identity in available for available in future_id_sets)]
+        common_ids = common_ids[:self.max_particles]
+        if not common_ids:
+            raise ValueError(f"Pair {pid} has no particle identities valid across the requested rollout")
+        current_lookup = {identity: i for i, identity in enumerate(current_ids.tolist())}
+        selected_indices = np.asarray([current_lookup[identity] for identity in common_ids], dtype=np.int64)
+        count = len(selected_indices)
+        selected_rows = start + selected_indices
+        future_indices = []
+        for future_pid in future_pair_ids:
+            future_ids = self._pair_particle_ids(future_pid, "t")
+            future_target_ids = self._pair_particle_ids(future_pid, "tp1")
+            if not np.array_equal(future_ids, future_target_ids):
+                raise ValueError(f"Pair {future_pid} preprocessing did not align current/next particle identities")
+            lookup = {identity: i for i, identity in enumerate(future_ids.tolist())}
+            future_indices.append(np.asarray([lookup[identity] for identity in common_ids], dtype=np.int64))
+        full = np.asarray(self.data["inputs_t"][selected_rows], dtype=np.float32)
         x = full[:, self.feature_indices]
-        mean = np.asarray(self.data["in_mean"], dtype=np.float32).reshape(-1)[self.feature_indices]
-        std = np.maximum(np.asarray(self.data["in_std"], dtype=np.float32).reshape(-1)[self.feature_indices], 1e-8)
+        mean, std = self.input_mean, self.input_std
         x = (x - mean) / std
         raw_names = [str(n) for n in self.data["feature_names"]]
         xyz_idx = [raw_names.index(k) for k in ("x", "y", "z")]
         xyz = full[:, xyz_idx]
         coord_min, coord_span = self.coord_min, self.coord_span
         geom = np.clip((xyz - coord_min) / coord_span, 0.0, 1.0)
-        contexts = self.data.get("pair_contexts")
-        context = contexts[pid] if contexts is not None else {}
-        if isinstance(context, np.ndarray):
-            context = context.item()
         global_values = []
         for name in self.global_features:
             if name == "phase": value = context.get("phase_t", 0.0)
@@ -95,8 +147,8 @@ class EvolutionDataset(Dataset):
             else: value = 0.0
             global_values.append(value)
         state_idx = [raw_names.index(k) for k in ("x", "y", "z", "Gamma_x", "Gamma_y", "Gamma_z", "sigma")]
-        next_state = np.asarray(self.data["targets_next_state"][start:end], dtype=np.float32)
-        residuals = np.asarray(self.data.get("targets_residual", self.data["targets_delta"])[start:end], dtype=np.float32)
+        next_state = np.asarray(self.data["targets_next_state"][selected_rows], dtype=np.float32)
+        residuals = np.asarray(self.data.get("targets_residual", self.data["targets_delta"])[selected_rows], dtype=np.float32)
         residual_mean = np.asarray(self.data.get("residual_mean", self.data["out_mean"]), dtype=np.float32).reshape(-1) if self.normalization is None else self.normalization.residual_mean
         residual_std = np.maximum(np.asarray(self.data.get("residual_std", self.data["out_std"]), dtype=np.float32).reshape(-1), 1e-8) if self.normalization is None else np.maximum(self.normalization.residual_std, 1e-8)
         residuals = residuals[:, :int(self.residual_channels or len(residual_mean))]
@@ -109,13 +161,16 @@ class EvolutionDataset(Dataset):
         fstd = np.maximum(np.asarray(self.data["field_std"], dtype=np.float32).reshape(-1), 1e-8) if self.normalization is None else np.maximum(self.normalization.field_std, 1e-8)
         field = (np.asarray(self.data["targets_velocity_field"][pid, qmask], dtype=np.float32) - fmean) / fstd
         future = []
-        future_fields, future_queries, future_contexts, future_pair_ids = [], [], [], []
-        next_id = self.next_pair.get(pid)
-        while next_id is not None and len(future) < self.rollout_horizon - 1:
+        future_fields, future_queries, future_contexts, future_teacher_inputs = [], [], [], []
+        for future_pid, row_indices in zip(future_pair_ids, future_indices):
+            next_id = future_pid
             next_row = self.data["pair_ranges"][next_id]
-            ns, ne = int(next_row[3]), int(next_row[4])
-            n_future = min(count, int(next_row[5]))
-            future.append(np.asarray(self.data["targets_next_state"][ns:ns + n_future], dtype=np.float32))
+            ns = int(next_row[3])
+            future_rows = ns + row_indices
+            future.append(np.asarray(self.data["targets_next_state"][future_rows, :7], dtype=np.float32))
+            if self.include_teacher_inputs:
+                next_raw = np.asarray(self.data["inputs_t"][ns + row_indices], dtype=np.float32)[:, self.feature_indices]
+                future_teacher_inputs.append((next_raw - self.input_mean) / self.input_std)
             future_mask = np.flatnonzero(np.asarray(self.data["field_query_mask"][next_id], dtype=bool))
             if len(future_mask) > self.max_queries:
                 future_mask = future_mask[np.linspace(0, len(future_mask) - 1, self.max_queries, dtype=np.int64)]
@@ -125,17 +180,16 @@ class EvolutionDataset(Dataset):
             next_context = self.data.get("pair_contexts", [])[next_id]
             if isinstance(next_context, np.ndarray):
                 next_context = next_context.item()
-            future_contexts.append(dict(next_context))
-            future_pair_ids.append(int(next_id))
-            next_id = self.next_pair.get(next_id)
+            future_contexts.append(RolloutContext.from_mapping(next_context, pair_id=next_id))
         if future:
-            n_common = min([count] + [len(x) for x in future])
-            future = np.stack([x[:n_common, :7] for x in future], axis=0)
-            rollout_states = np.concatenate((next_state[None, :n_common, :7], future[:, :n_common, :7]), axis=0)
+            future = np.stack(future, axis=0)
+            rollout_states = np.concatenate((next_state[None, :, :7], future), axis=0)
             q_common = min([len(queries)] + [len(x) for x in future_queries])
             queries, coords, field = queries[:q_common], coords[:q_common], field[:q_common]
             future_queries = np.stack([x[:q_common] for x in future_queries], axis=0)
             future_fields = np.stack([x[:q_common] for x in future_fields], axis=0)
+            if self.include_teacher_inputs:
+                future_teacher_inputs = np.stack(future_teacher_inputs, axis=0)
             rollout_phases = np.asarray([context.get("phase_tp1", context.get("phase_t", 0.0))] +
                                         [item.get("phase_tp1", item.get("phase_t", 0.0)) for item in future_contexts],
                                         dtype=np.float32)
@@ -144,6 +198,8 @@ class EvolutionDataset(Dataset):
             rollout_states = next_state[None, :, :7]
             future_queries = np.zeros((0, len(queries), 3), dtype=np.float32)
             future_fields = np.zeros((0, len(queries), len(fmean)), dtype=np.float32)
+            if self.include_teacher_inputs:
+                future_teacher_inputs = np.zeros((0, count, len(self.features)), dtype=np.float32)
             rollout_phases = np.asarray([context.get("phase_tp1", context.get("phase_t", 0.0))], dtype=np.float32)
         rollout_field_targets = np.concatenate((field[None], future_fields), axis=0)
         return {"pair_id": pid, "input_geom": geom, "output_queries": queries, "x": x,
@@ -153,16 +209,22 @@ class EvolutionDataset(Dataset):
                 "next_state_phys": next_state[:, :7], "one_step_target": next_state[:, :7],
                 "rollout_state_targets": rollout_states,
                 "rollout_queries": future_queries, "rollout_field_targets": rollout_field_targets,
-                "rollout_contexts": future_contexts, "rollout_pair_ids": future_pair_ids,
+                "rollout_contexts": future_contexts,
+                "rollout_time_indices": np.arange(1, len(rollout_states) + 1, dtype=np.int64),
                 "rollout_phases": rollout_phases,
                 "feature_names": self.features, "all_feature_names": raw_names,
-                "global_feature_names": self.global_features, "pair_context": context,
+                "global_feature_names": self.global_features,
+                "pair_context": RolloutContext.from_mapping(context, pair_id=pid),
                 "input_mean": self.input_mean, "input_std": self.input_std,
                 "particle_queries": geom.copy(),
                 "query_xyz_phys": coords, "particle_features_phys": full,
                 "phase_next": float(context.get("phase_tp1", context.get("phase_t", 0.0))),
                 "phase_delta": float(context.get("phase_delta", 0.0)),
-                "particle_correspondence": "canonical row ordering; shared leading rows as used by process_data.py"}
+                "particle_ids": np.asarray(common_ids, dtype=str),
+                "particle_correspondence": str(context.get("correspondence_source", "legacy_row_index_assumption_unverified")),
+                "rollout_teacher_inputs": (np.stack(future_teacher_inputs, axis=0) if self.include_teacher_inputs and future_teacher_inputs else
+                                           np.zeros((0, count, len(self.features)), dtype=np.float32) if self.include_teacher_inputs else None)}
+
 
 
 def collate_one(items):

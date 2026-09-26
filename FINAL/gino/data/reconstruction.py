@@ -1,6 +1,7 @@
 import torch
 
 from .geometry import particle_geometry_features
+from .context import RolloutContext
 
 
 def rebuild_next_batch(batch, state_phys, particle_field_phys, normalization, differentiable=False):
@@ -23,11 +24,9 @@ def rebuild_next_batch(batch, state_phys, particle_field_phys, normalization, di
     # VTK/NumPy geometry is an external non-differentiable boundary. Other
     # reconstructed features and normalized particle coordinates retain their graph.
     xyz = state_phys[..., :3].detach().cpu().numpy()
-    contexts = batch.get("rollout_contexts", [])
-    current_context = batch["pair_context"]
-    context = contexts[0] if contexts else dict(current_context)
-    if isinstance(context, list):
-        context = context[0]
+    contexts = tuple(batch.get("rollout_contexts", ()))
+    current_context = RolloutContext.from_mapping(batch["pair_context"])
+    context = RolloutContext.from_mapping(contexts[0]) if contexts else current_context.advance_terminal()
     vtk_path = context.get("vtk_path", "")
     geom_features = particle_geometry_features(xyz.reshape(-1, 3), vtk_path)
     for name, values in geom_features.items():
@@ -35,13 +34,8 @@ def rebuild_next_batch(batch, state_phys, particle_field_phys, normalization, di
             tensor = torch.as_tensor(values, dtype=full.dtype, device=full.device).reshape(*state_phys.shape[:-1])
             full[..., idx[name]] = tensor
 
-    phase = float(context.get("phase_t", batch.get("phase_next", 0.0)))
-    phase_delta = float(context.get("phase_delta", batch.get("phase_delta", 0.0)))
-    if not contexts:
-        phase = float(batch.get("phase_next", phase))
-        context.update({"frame_t": current_context.get("frame_tp1", current_context.get("frame_t", "")),
-                        "phase_t": phase, "phase_tp1": phase + phase_delta,
-                        "vtk_path": current_context.get("vtk_path_tp1", "")})
+    phase = float(context.phase_t)
+    phase_delta = float(context.phase_delta)
     if "phase" in idx:
         full[..., idx["phase"]] = phase
     active_indices = [names.index(name) for name in active]
@@ -68,10 +62,13 @@ def rebuild_next_batch(batch, state_phys, particle_field_phys, normalization, di
         out["rollout_queries"] = batch["rollout_queries"][:, 1:]
         out["rollout_field_targets"] = batch["rollout_field_targets"][:, 1:]
         out["rollout_contexts"] = contexts[1:]
-        if batch.get("rollout_pair_ids"):
-            next_pair = int(batch["rollout_pair_ids"][0])
+        if batch.get("rollout_time_indices") is not None:
+            out["rollout_time_indices"] = batch["rollout_time_indices"][1:]
+        if context.pair_id is not None:
+            next_pair = context.pair_id
             out["pair_id"] = torch.tensor([next_pair], device=state_phys.device, dtype=torch.long)
-            out["rollout_pair_ids"] = batch["rollout_pair_ids"][1:]
+        if batch.get("rollout_teacher_inputs") is not None:
+            out["rollout_teacher_inputs"] = batch["rollout_teacher_inputs"][:, 1:]
         if batch.get("rollout_phases") is not None:
             out["rollout_phases"] = batch["rollout_phases"][:, 1:]
     out["phase_next"] = float(context.get("phase_tp1", phase + phase_delta))

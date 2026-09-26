@@ -18,18 +18,19 @@ class NormalizationStats:
     state_std: np.ndarray = None
 
     @classmethod
-    def from_dataset(cls, data, feature_indices):
+    def from_checkpoint(cls, checkpoint):
+        nested = checkpoint.get("normalization", {})
+        def required(primary, fallback=None):
+            value = checkpoint.get(primary, nested.get(fallback or primary))
+            if value is None:
+                raise ValueError(f"Checkpoint is missing required normalization statistic: {primary}")
+            return np.asarray(value, dtype=np.float32).reshape(-1)
         return cls(
-            np.asarray(data["in_mean"], dtype=np.float32).reshape(-1)[feature_indices],
-            np.asarray(data["in_std"], dtype=np.float32).reshape(-1)[feature_indices],
-            np.asarray(data.get("residual_mean", data["out_mean"]), dtype=np.float32).reshape(-1),
-            np.asarray(data.get("residual_std", data["out_std"]), dtype=np.float32).reshape(-1),
-            np.asarray(data["field_mean"], dtype=np.float32).reshape(-1),
-            np.asarray(data["field_std"], dtype=np.float32).reshape(-1),
-            np.asarray(data["coord_min"], dtype=np.float32).reshape(3),
-            np.asarray(data["coord_span"], dtype=np.float32).reshape(3),
-            np.asarray(data.get("next_mean", np.zeros(7)), dtype=np.float32).reshape(-1)[:7],
-            np.asarray(data.get("next_std", np.ones(7)), dtype=np.float32).reshape(-1)[:7],
+            required("input_mean"), required("input_std"),
+            required("target_mean", "residual_mean"), required("target_std", "residual_std"),
+            required("field_mean"), required("field_std"),
+            required("coord_min"), required("coord_span"),
+            required("state_mean")[:7], required("state_std")[:7],
         )
 
     @classmethod

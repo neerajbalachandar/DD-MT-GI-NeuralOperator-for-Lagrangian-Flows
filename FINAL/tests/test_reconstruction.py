@@ -16,7 +16,8 @@ def test_rebuild_updates_physical_features_geometry_and_phase(monkeypatch):
     full = torch.zeros(1, 2, len(names))
     batch = {"particle_features_phys": full, "all_feature_names": names, "feature_names": active,
              "global_feature_names": ["phase"], "global_params": torch.zeros(1, 1),
-             "pair_context": {"vtk_path": "mock.vtk"}, "phase_next": 0.4, "phase_delta": 0.1,
+             "pair_context": {"vtk_path": "mock.vtk", "vtk_path_tp1": "next.vtk",
+                              "phase_t": 0.3, "phase_tp1": 0.4, "phase_delta": 0.1}, "phase_next": 0.4, "phase_delta": 0.1,
              "rollout_queries": torch.zeros(1, 1, 2, 3), "rollout_field_targets": torch.zeros(1, 2, 2, 12),
              "rollout_contexts": [], "rollout_pair_ids": [], "rollout_phases": torch.tensor([[0.4]])}
     stats = NormalizationStats(np.zeros(6), np.ones(6), np.zeros(7), np.ones(7),
@@ -27,6 +28,8 @@ def test_rebuild_updates_physical_features_geometry_and_phase(monkeypatch):
     field[..., 0] = 2.0
     field[..., 3] = 3.0
     rebuilt = rebuild_next_batch(batch, state, field, stats)
+    assert rebuilt["geometry_differentiable"] is False
+    assert "VTK/NumPy" in rebuilt["geometry_gradient_boundary"]
     torch.testing.assert_close(rebuilt["x"][..., 0], torch.full((1, 2), 2.0))
     torch.testing.assert_close(rebuilt["x"][..., 1], state[..., 6])
     torch.testing.assert_close(rebuilt["x"][..., 2], torch.full((1, 2), 0.25))

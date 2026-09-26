@@ -201,6 +201,22 @@ def read_h5_selected(path: Path, key_map: Dict[str, str]) -> Dict[str, np.ndarra
     return out
 
 
+def _read_particle_ids(path: Path, count: int, source: str) -> np.ndarray:
+    candidates = {"particle_id", "particle_ids", "id", "ids"}
+    found = None
+    with h5py.File(path, "r") as handle:
+        def visit(name, node):
+            nonlocal found
+            if found is None and isinstance(node, h5py.Dataset) and name.rsplit("/", 1)[-1].lower() in candidates:
+                value = np.asarray(node).reshape(-1)
+                if len(value) == count:
+                    found = value
+        handle.visititems(visit)
+    if found is None:
+        return np.asarray([f"{source}:row:{i}" for i in range(count)], dtype=object)
+    return np.asarray([f"{source}:id:{value}" for value in found], dtype=object)
+
+
 # ========== Field-grid query bounds / filtering ==========
 def _field_query_bounds() -> Optional[Tuple[float, float, float, float, float, float]]:
     raw = os.environ.get("FIELD_QUERY_BOUNDS", "").strip()
@@ -1121,7 +1137,11 @@ def merge_frames() -> List[Path]:
             pstatic = static_map.get(fr, None)
             dynamic_payload = read_h5_selected(pin, INPUT_KEYS)
             static_payload = read_h5_selected(pstatic, INPUT_KEYS) if pstatic is not None else None
+            dynamic_ids = _read_particle_ids(pin, len(as_xyz(dynamic_payload["particle_xyz"])), "dynamic")
+            static_ids = (_read_particle_ids(pstatic, len(as_xyz(static_payload["particle_xyz"])), "static")
+                          if pstatic is not None and static_payload is not None else np.zeros(0, dtype=object))
             payload = _merge_particle_payloads(dynamic_payload, static_payload)
+            payload["particle_ids"] = np.concatenate((dynamic_ids, static_ids)) if len(static_ids) else dynamic_ids
 
             payload["source_dataset"] = np.asarray(ds, dtype=object)
             payload["frame_id"] = np.asarray(fr, dtype=object)
@@ -1293,11 +1313,15 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
             grad_z = as_xyz(data["velocity_gradient_z"])
             fr = str(np.asarray(data["frame_id"]).reshape(-1)[0])
             vtk_path = str(np.asarray(data.get("source_vtk_path", "")).reshape(-1)[0])
+            particle_ids = np.asarray(data.get("particle_ids", [f"row:{j}" for j in range(len(state["x"]))])).reshape(-1)
+            if len(particle_ids) != len(state["x"]):
+                raise ValueError(f"Particle ID count does not match state rows in {p}")
             phase = 0.0 if T <= 1 else float(i) / float(T - 1)
             fr_list.append(
                 {
                     "frame_id": fr,
                     "state": state,
+                    "particle_ids": particle_ids,
                     "velocity": velocity,
                     "velocity_gradient_x": grad_x,
                     "velocity_gradient_y": grad_y,
@@ -1314,6 +1338,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     rows_delta: List[np.ndarray] = []
     rows_residual: List[np.ndarray] = []
     rows_next: List[np.ndarray] = []
+    rows_particle_ids: List[np.ndarray] = []
     field_query_coords_by_pair: List[np.ndarray] = []
     field_velocity_by_pair: List[np.ndarray] = []
     skipped_pairs_missing_field = 0
@@ -1360,18 +1385,31 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
             s0 = curr["state"]
             s1 = nxt["state"]
 
-            n0 = len(s0["x"])
-            n1 = len(s1["x"])
-            n = min(n0, n1)
+            ids0, ids1 = curr["particle_ids"], nxt["particle_ids"]
+            if len(np.unique(ids0)) != len(ids0) or len(np.unique(ids1)) != len(ids1):
+                raise ValueError(f"Duplicate particle identity in consecutive frames for case {case}")
+            lookup1 = {str(identity): j for j, identity in enumerate(ids1)}
+            common_ids = [identity for identity in ids0 if str(identity) in lookup1]
+            idx0 = np.asarray([j for j, identity in enumerate(ids0) if str(identity) in lookup1], dtype=np.int64)
+            idx1 = np.asarray([lookup1[str(identity)] for identity in common_ids], dtype=np.int64)
+            n = len(common_ids)
             if n <= 0:
                 continue
 
-            curr_xyz = np.stack([s0["x"][:n], s0["y"][:n], s0["z"][:n]], axis=1)
+            s0 = {key: np.asarray(value)[idx0] if np.asarray(value).ndim > 0 and len(np.asarray(value)) == len(ids0) else value
+                  for key, value in s0.items()}
+            s1 = {key: np.asarray(value)[idx1] if np.asarray(value).ndim > 0 and len(np.asarray(value)) == len(ids1) else value
+                  for key, value in s1.items()}
+            curr = {key: (np.asarray(value)[idx0] if isinstance(value, np.ndarray) and value.ndim > 0
+                          and len(value) == len(ids0) else value) for key, value in curr.items()}
+            nxt = {key: (np.asarray(value)[idx1] if isinstance(value, np.ndarray) and value.ndim > 0
+                         and len(value) == len(ids1) else value) for key, value in nxt.items()}
+            curr_xyz = np.stack([s0["x"], s0["y"], s0["z"]], axis=1)
             geom_feat = _particle_geometry_features(curr_xyz, str(curr.get("vtk_path", "")), n)
 
-            grad_x = np.asarray(curr.get("velocity_gradient_x", np.zeros((n,3))), dtype=np.float32)[:n]
-            grad_y = np.asarray(curr.get("velocity_gradient_y", np.zeros((n,3))), dtype=np.float32)[:n]
-            grad_z = np.asarray(curr.get("velocity_gradient_z", np.zeros((n,3))), dtype=np.float32)[:n]
+            grad_x = np.asarray(curr.get("velocity_gradient_x", np.zeros((n,3))), dtype=np.float32)
+            grad_y = np.asarray(curr.get("velocity_gradient_y", np.zeros((n,3))), dtype=np.float32)
+            grad_z = np.asarray(curr.get("velocity_gradient_z", np.zeros((n,3))), dtype=np.float32)
             gradient = np.concatenate([grad_x, grad_y, grad_z], axis=1)
 
             x_feat = _feature_matrix_from_state(
@@ -1388,8 +1426,8 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
             st0 = _state_matrix(s0, n)
             st1 = _state_matrix(s1, n)
             delta = st1 - st0
-            velocity_current = np.asarray(curr["velocity"], dtype=np.float32)[:n]
-            velocity_next = np.asarray(nxt["velocity"], dtype=np.float32)[:n]
+            velocity_current = np.asarray(curr["velocity"], dtype=np.float32)
+            velocity_next = np.asarray(nxt["velocity"], dtype=np.float32)
             delta_u = velocity_next - velocity_current
             dt = float(meta["dt"])
             gamma0 = st0[:, 3:6]
@@ -1425,6 +1463,8 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
                     "vtk_path": str(curr.get("vtk_path", "")),
                     "vtk_path_tp1": str(nxt.get("vtk_path", "")),
                     "phase_delta": float(nxt["phase"] - curr["phase"]),
+                    "correspondence_source": ("matched_source_particle_ids" if all(":id:" in str(v) for v in common_ids)
+                                               else "tagged_source_row_index_fallback"),
                 }
             )
 
@@ -1432,6 +1472,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
             rows_delta.append(target)
             rows_residual.append(residual)
             rows_next.append(st1.astype(np.float32))
+            rows_particle_ids.append(np.asarray(common_ids, dtype=object))
             grid_coords, grid_velocity = field_grid
             field_query_coords_by_pair.append(grid_coords.astype(np.float32))
             field_velocity_by_pair.append(grid_velocity.astype(np.float32))
@@ -1518,6 +1559,8 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     np.savez_compressed(
         out_path,
         inputs_t=X,
+        particle_ids_t=np.concatenate(rows_particle_ids) if rows_particle_ids else np.zeros(0, dtype=object),
+        particle_ids_tp1=np.concatenate(rows_particle_ids) if rows_particle_ids else np.zeros(0, dtype=object),
         targets_delta=Y_delta,
         targets_residual=Y_residual,
         query_coords=field_query_coords,

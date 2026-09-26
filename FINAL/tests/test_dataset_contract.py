@@ -41,5 +41,6 @@ def test_train_only_statistics_and_index_zero_is_one_step_target():
     sample = dataset[0]
     np.testing.assert_allclose(sample["rollout_state_targets"][0], sample["one_step_target"])
     assert sample["rollout_state_targets"].shape == (2, 2, 7)
+    assert sample["rollout_time_indices"].tolist() == [1, 2]
     assert sample["rollout_phases"].tolist() == [0.5, 1.0]
     assert sample["rollout_contexts"][0]["vtk_path"] == "frame2.vtk"

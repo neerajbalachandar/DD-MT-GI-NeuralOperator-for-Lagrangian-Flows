@@ -77,19 +77,7 @@ def main():
                            f"{checkpoint_parameter_count}/{model_parameter_count}, missing={missing_keys}, "
                            f"unexpected={unexpected_keys}, shapes={shape_mismatches}")
     print("Checkpoint architecture/configuration: compatible")
-    stats = NormalizationStats.from_dataset(data, [list(data["feature_names"]).index(x) for x in features])
-    if "input_mean" in checkpoint:
-        stats.input_mean = np.asarray(checkpoint["input_mean"]).reshape(-1)
-        stats.input_std = np.asarray(checkpoint["input_std"]).reshape(-1)
-        stats.residual_mean = np.asarray(checkpoint.get("target_mean", checkpoint.get("residual_mean"))).reshape(-1)
-        stats.residual_std = np.asarray(checkpoint.get("target_std", checkpoint.get("residual_std"))).reshape(-1)
-        stats.field_mean = np.asarray(checkpoint["field_mean"]).reshape(-1)
-        stats.field_std = np.asarray(checkpoint["field_std"]).reshape(-1)
-        stats.coord_min = np.asarray(checkpoint["coord_min"]).reshape(3)
-        stats.coord_span = np.asarray(checkpoint["coord_span"]).reshape(3)
-        if "state_mean" in checkpoint:
-            stats.state_mean = np.asarray(checkpoint["state_mean"]).reshape(-1)[:7]
-            stats.state_std = np.asarray(checkpoint["state_std"]).reshape(-1)[:7]
+    stats = NormalizationStats.from_checkpoint(checkpoint)
     split = cfg["evaluation"]["split"]
     pair_ids = data[f"{split}_pair_ids"]
     rollout_horizon = max(int(h) for h in cfg["evaluation"]["rollout_horizons"])
@@ -204,15 +192,21 @@ def main():
                 "frame": context.get("frame_t", ""), "phase": float(context.get("phase_t", 0.0)), "hdf5": str(path),
                 "field_mse": mse(predicted, truth), "field_relative_l2": relative_l2(predicted, truth),
                 "n_points": int(len(truth))})
+            component_names = ("u_x", "u_y", "u_z", "gradU_xx", "gradU_xy", "gradU_xz",
+                               "gradU_yx", "gradU_yy", "gradU_yz", "gradU_zx", "gradU_zy", "gradU_zz")
+            component_label = str(cfg["evaluation"].get("field_component", "u_x"))
+            if component_label not in component_names:
+                raise ValueError(f"Unsupported evaluation field component: {component_label}")
+            component_index = component_names.index(component_label)
             x_axis, z_axis, true_slice, plane_xyz, _ = native_field_plane(native_xyz, native_truth,
-                                                                           y_plane=float(cfg["evaluation"].get("field_y_plane", 0.0)))
+                y_plane=float(cfg["evaluation"].get("field_y_plane", 0.0)), component=component_index)
             plane_batch = dict(batch)
             plane_batch["output_queries"] = stats.normalize_positions(
                 torch.as_tensor(plane_xyz, dtype=torch.float32).unsqueeze(0).to(device)).clamp(0.0, 1.0)
             plane_batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in plane_batch.items()}
             with torch.inference_mode():
                 plane_result = predict_next_state(model, plane_batch, latent, stats)
-                predicted_slice = plane_result["field_phys"][0, :, 0].cpu().numpy().reshape(true_slice.shape)
+                predicted_slice = plane_result["field_phys"][0, :, component_index].cpu().numpy().reshape(true_slice.shape)
             case_name = context.get("case", "unknown")
             native_visual_candidates.setdefault(case_name, []).append({
                 "phase": float(context.get("phase_t", 0.0)), "y_plane": float(plane_xyz[0, 1]),
@@ -251,7 +245,7 @@ def main():
                 np.stack([item["true"] for item in selected]),
                 np.stack([item["pred"] for item in selected]),
                 out_dir / f"native_field_{case_name.replace('/', '_')}.png",
-                phases=[item["phase"] for item in selected], component_label="u_x",
+                phases=[item["phase"] for item in selected], component_label=str(cfg["evaluation"].get("field_component", "u_x")),
                 y_plane=selected[0]["y_plane"])
     if cfg["evaluation"].get("save_plots", True):
         plot_temporal_errors(records, rollout_records, out_dir)

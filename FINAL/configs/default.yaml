@@ -57,3 +57,4 @@ evaluation:
   max_batches: 0
   save_plots: true
   field_y_plane: 0.0
+  field_component: u_x
