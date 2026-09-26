@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from collections import OrderedDict
 from torch import nn
 
 from .attention import cross_attention
@@ -51,6 +52,12 @@ class GINOSharedLatent(nn.Module):
         if self.use_task_adapters:
             self.task_adapters = TaskAdapters(hidden)
 
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        # neuralop stores constructor metadata as a plain state-dict key; it is
+        # configuration, not a learned tensor, and the checkpoint stores config separately.
+        weights = OrderedDict((key, value) for key, value in state_dict.items() if key != "_metadata")
+        return super().load_state_dict(weights, strict=strict, assign=assign)
+
     def apply_gno(self, block, source_coords, query_coords, source_features):
         return block(y=source_coords, x=query_coords, f_y=source_features)
 
@@ -72,7 +79,8 @@ class GINOSharedLatent(nn.Module):
             grids.append(processed)
             flattened.append(flat)
             particle_skips.append(self.particle_skip_proj(h_raw))
-        return base_latent, grids, flattened, particle_skips
+        return {"latent_coords": base_latent, "grids": grids, "flattened": flattened,
+                "particle_skips": particle_skips, "input_geom": input_geom}
 
     def sample_grid(self, grid, queries):
         q = queries.clamp(0.0, 1.0)
@@ -80,7 +88,11 @@ class GINOSharedLatent(nn.Module):
         sampled = F.grid_sample(grid, sample_coords, align_corners=True, mode="bilinear")
         return sampled.squeeze(0).squeeze(-1).squeeze(-1).transpose(0, 1)
 
-    def delta_from_latents(self, base_latent, flat_latents, particle_skips, input_geom):
+    def decode_particle(self, encoded):
+        base_latent = encoded["latent_coords"]
+        flat_latents = encoded["flattened"]
+        particle_skips = encoded["particle_skips"]
+        input_geom = encoded["input_geom"]
         grid_pe = fourier_positional_encoding(base_latent.unsqueeze(0), self.query_pe_freqs).squeeze(0)
         result = []
         for b, (flat, skip) in enumerate(zip(flat_latents, particle_skips)):
@@ -103,15 +115,17 @@ class GINOSharedLatent(nn.Module):
             result.append(self.delta_head(fused).unsqueeze(0))
         return torch.cat(result, dim=0)
 
-    def forward(self, input_geom, latent_queries, output_queries, x, global_params, batch_dict=None):
-        base, grids, flat, skips = self.encode_process(input_geom, latent_queries, x, global_params)
-        delta = self.delta_from_latents(base, flat, skips, input_geom)
+    def decode_field(self, encoded, output_queries):
         field = []
-        for b, grid in enumerate(grids):
+        for b, grid in enumerate(encoded["grids"]):
             q = output_queries[b].clamp(0.0, 1.0)
             sampled = self.sample_grid(grid, q)
             pe = fourier_positional_encoding(q.unsqueeze(0), self.query_pe_freqs).squeeze(0)
             if self.use_task_adapters:
                 sampled = self.task_adapters.field(sampled)
             field.append(self.field_decoder(torch.cat((sampled, pe), dim=-1)).unsqueeze(0))
-        return delta, torch.cat(field, dim=0)
+        return torch.cat(field, dim=0)
+
+    def forward(self, input_geom, latent_queries, output_queries, x, global_params, batch_dict=None):
+        encoded = self.encode_process(input_geom, latent_queries, x, global_params)
+        return self.decode_particle(encoded), self.decode_field(encoded, output_queries)

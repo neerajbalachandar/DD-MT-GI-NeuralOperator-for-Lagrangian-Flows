@@ -38,7 +38,8 @@ def assert_no_sequence_leakage(data, splits):
 
 
 class EvolutionDataset(Dataset):
-    def __init__(self, data, pair_ids, input_features, global_features, max_particles=4096, max_queries=2048, rollout_horizon=16):
+    def __init__(self, data, pair_ids, input_features, global_features, max_particles=4096,
+                 max_queries=2048, rollout_horizon=16, normalization=None, residual_channels=None):
         self.data = data
         self.pair_ids = np.asarray(pair_ids, dtype=np.int64)
         self.features = [str(x) for x in input_features]
@@ -47,8 +48,14 @@ class EvolutionDataset(Dataset):
         self.feature_indices = [names.index(name) for name in self.features]
         self.max_particles, self.max_queries = int(max_particles), int(max_queries)
         self.rollout_horizon = max(1, int(rollout_horizon))
-        self.input_mean = np.asarray(data["in_mean"], dtype=np.float32).reshape(-1)[self.feature_indices]
-        self.input_std = np.maximum(np.asarray(data["in_std"], dtype=np.float32).reshape(-1)[self.feature_indices], 1e-8)
+        self.normalization = normalization
+        self.residual_channels = residual_channels
+        self.coord_min = np.asarray(data["coord_min"], dtype=np.float32).reshape(3) if normalization is None else np.asarray(normalization.coord_min).reshape(3)
+        self.coord_span = np.maximum(np.asarray(data["coord_span"], dtype=np.float32).reshape(3), 1e-8) if normalization is None else np.maximum(np.asarray(normalization.coord_span).reshape(3), 1e-8)
+        self.input_mean = (np.asarray(data["in_mean"], dtype=np.float32).reshape(-1)[self.feature_indices]
+                           if normalization is None else np.asarray(normalization.input_mean).reshape(-1))
+        self.input_std = (np.maximum(np.asarray(data["in_std"], dtype=np.float32).reshape(-1)[self.feature_indices], 1e-8)
+                          if normalization is None else np.maximum(np.asarray(normalization.input_std).reshape(-1), 1e-8))
         ranges = list(data["pair_ranges"])
         self.next_pair = {}
         starts = {(str(row[0]), str(row[1])): i for i, row in enumerate(ranges)}
@@ -72,8 +79,7 @@ class EvolutionDataset(Dataset):
         raw_names = [str(n) for n in self.data["feature_names"]]
         xyz_idx = [raw_names.index(k) for k in ("x", "y", "z")]
         xyz = full[:, xyz_idx]
-        coord_min = np.asarray(self.data["coord_min"], dtype=np.float32).reshape(3)
-        coord_span = np.maximum(np.asarray(self.data["coord_span"], dtype=np.float32).reshape(3), 1e-8)
+        coord_min, coord_span = self.coord_min, self.coord_span
         geom = np.clip((xyz - coord_min) / coord_span, 0.0, 1.0)
         contexts = self.data.get("pair_contexts")
         context = contexts[pid] if contexts is not None else {}
@@ -91,18 +97,19 @@ class EvolutionDataset(Dataset):
         state_idx = [raw_names.index(k) for k in ("x", "y", "z", "Gamma_x", "Gamma_y", "Gamma_z", "sigma")]
         next_state = np.asarray(self.data["targets_next_state"][start:end], dtype=np.float32)
         residuals = np.asarray(self.data.get("targets_residual", self.data["targets_delta"])[start:end], dtype=np.float32)
-        residual_mean = np.asarray(self.data.get("residual_mean", self.data["out_mean"]), dtype=np.float32).reshape(-1)
-        residual_std = np.maximum(np.asarray(self.data.get("residual_std", self.data["out_std"]), dtype=np.float32).reshape(-1), 1e-8)
+        residual_mean = np.asarray(self.data.get("residual_mean", self.data["out_mean"]), dtype=np.float32).reshape(-1) if self.normalization is None else self.normalization.residual_mean
+        residual_std = np.maximum(np.asarray(self.data.get("residual_std", self.data["out_std"]), dtype=np.float32).reshape(-1), 1e-8) if self.normalization is None else np.maximum(self.normalization.residual_std, 1e-8)
+        residuals = residuals[:, :int(self.residual_channels or len(residual_mean))]
         qmask = np.flatnonzero(np.asarray(self.data["field_query_mask"][pid], dtype=bool))
         if len(qmask) > self.max_queries:
             qmask = qmask[np.linspace(0, len(qmask)-1, self.max_queries, dtype=np.int64)]
         coords = np.asarray(self.data["query_coords"][pid, qmask], dtype=np.float32)
         queries = np.clip((coords - coord_min) / coord_span, 0.0, 1.0)
-        fmean = np.asarray(self.data["field_mean"], dtype=np.float32).reshape(-1)
-        fstd = np.maximum(np.asarray(self.data["field_std"], dtype=np.float32).reshape(-1), 1e-8)
+        fmean = np.asarray(self.data["field_mean"], dtype=np.float32).reshape(-1) if self.normalization is None else self.normalization.field_mean
+        fstd = np.maximum(np.asarray(self.data["field_std"], dtype=np.float32).reshape(-1), 1e-8) if self.normalization is None else np.maximum(self.normalization.field_std, 1e-8)
         field = (np.asarray(self.data["targets_velocity_field"][pid, qmask], dtype=np.float32) - fmean) / fstd
         future = []
-        future_fields, future_queries = [], []
+        future_fields, future_queries, future_contexts, future_pair_ids = [], [], [], []
         next_id = self.next_pair.get(pid)
         while next_id is not None and len(future) < self.rollout_horizon - 1:
             next_row = self.data["pair_ranges"][next_id]
@@ -115,34 +122,47 @@ class EvolutionDataset(Dataset):
             future_xyz = np.asarray(self.data["query_coords"][next_id, future_mask], dtype=np.float32)
             future_queries.append(np.clip((future_xyz - coord_min) / coord_span, 0.0, 1.0))
             future_fields.append((np.asarray(self.data["targets_velocity_field"][next_id, future_mask], dtype=np.float32) - fmean) / fstd)
+            next_context = self.data.get("pair_contexts", [])[next_id]
+            if isinstance(next_context, np.ndarray):
+                next_context = next_context.item()
+            future_contexts.append(dict(next_context))
+            future_pair_ids.append(int(next_id))
             next_id = self.next_pair.get(next_id)
         if future:
             n_common = min([count] + [len(x) for x in future])
             future = np.stack([x[:n_common, :7] for x in future], axis=0)
-            rollout_initial = next_state[:n_common, :7]
+            rollout_states = np.concatenate((next_state[None, :n_common, :7], future[:, :n_common, :7]), axis=0)
             q_common = min([len(queries)] + [len(x) for x in future_queries])
             queries, coords, field = queries[:q_common], coords[:q_common], field[:q_common]
             future_queries = np.stack([x[:q_common] for x in future_queries], axis=0)
             future_fields = np.stack([x[:q_common] for x in future_fields], axis=0)
+            rollout_phases = np.asarray([context.get("phase_tp1", context.get("phase_t", 0.0))] +
+                                        [item.get("phase_tp1", item.get("phase_t", 0.0)) for item in future_contexts],
+                                        dtype=np.float32)
         else:
             future = np.zeros((0, count, 7), dtype=np.float32)
-            rollout_initial = next_state[:, :7]
+            rollout_states = next_state[None, :, :7]
             future_queries = np.zeros((0, len(queries), 3), dtype=np.float32)
             future_fields = np.zeros((0, len(queries), len(fmean)), dtype=np.float32)
+            rollout_phases = np.asarray([context.get("phase_tp1", context.get("phase_t", 0.0))], dtype=np.float32)
+        rollout_field_targets = np.concatenate((field[None], future_fields), axis=0)
         return {"pair_id": pid, "input_geom": geom, "output_queries": queries, "x": x,
                 "global_params": np.asarray(global_values, dtype=np.float32), "state_phys": full[:, state_idx],
                 "delta_target": (residuals - residual_mean) / residual_std,
                 "field_target": field, "dt": float(context.get("dt", 0.0034)),
-                "next_state_phys": next_state[:, :7], "rollout_initial_target": rollout_initial,
-                "rollout_targets": future, "rollout_queries": future_queries,
-                "rollout_field_target": future_fields,
+                "next_state_phys": next_state[:, :7], "one_step_target": next_state[:, :7],
+                "rollout_state_targets": rollout_states,
+                "rollout_queries": future_queries, "rollout_field_targets": rollout_field_targets,
+                "rollout_contexts": future_contexts, "rollout_pair_ids": future_pair_ids,
+                "rollout_phases": rollout_phases,
                 "feature_names": self.features, "all_feature_names": raw_names,
                 "global_feature_names": self.global_features, "pair_context": context,
                 "input_mean": self.input_mean, "input_std": self.input_std,
                 "particle_queries": geom.copy(),
                 "query_xyz_phys": coords, "particle_features_phys": full,
                 "phase_next": float(context.get("phase_tp1", context.get("phase_t", 0.0))),
-                "phase_delta": float(context.get("phase_delta", 0.0))}
+                "phase_delta": float(context.get("phase_delta", 0.0)),
+                "particle_correspondence": "canonical row ordering; shared leading rows as used by process_data.py"}
 
 
 def collate_one(items):

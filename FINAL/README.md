@@ -7,11 +7,13 @@ This directory is the modular research implementation for the VPM GINO workflow.
 ```bash
 python scripts/preprocess.py
 python scripts/train.py --config configs/default.yaml
-python scripts/train.py --config configs/default.yaml --set training.use_rollout_loss=true --set training.rollout_weight=1.0
+python scripts/train.py --config configs/default.yaml --set training.use_rollout_loss=true --set training.rollout_weight=1.0 --set training.rollout_horizon_max=16 --set training.rollout_horizon_schedule='[1, 2, 4, 8, 16]'
 python scripts/evaluate.py --config configs/default.yaml --set evaluation.checkpoint=runs/baseline/best_model.pt
 ```
 
 Override any config value using `--set section.key=value`. Training requires a preprocessed NPZ with whole-case split metadata and a nonempty validation case split. It records resolved config, environment, history, split IDs, normalization, and mechanism flags beside the checkpoint. Validation selects checkpoints; test data is not used for selection.
+
+After the physical-spacing gradient and VTK-context corrections, rerun preprocessing from the mounted Task-1/Task-2 sources before training. Older NPZ files may lack frame-specific VTK paths and cannot support geometry-correct autoregressive reconstruction.
 
 ## Dependency flow
 

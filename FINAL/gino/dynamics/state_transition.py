@@ -4,15 +4,10 @@ from .physics import physical_transition
 
 def predict_next_state(model, batch, latent_grid, normalization, dt=None):
     """Canonical model + field denormalization + physical and residual transition."""
-    field_queries = batch["output_queries"]
-    particle_queries = batch.get("particle_queries", batch["input_geom"])
-    residual_norm, particle_field_norm = model(batch["input_geom"], latent_grid, particle_queries,
-                                               batch["x"], batch["global_params"], batch_dict=batch)
-    if particle_queries.shape[1] == field_queries.shape[1] and torch.equal(particle_queries, field_queries):
-        field_norm = particle_field_norm
-    else:
-        _, field_norm = model(batch["input_geom"], latent_grid, field_queries,
-                              batch["x"], batch["global_params"], batch_dict=batch)
+    encoded = model.encode_process(batch["input_geom"], latent_grid, batch["x"], batch["global_params"])
+    residual_norm = model.decode_particle(encoded)
+    particle_field_norm = model.decode_field(encoded, batch.get("particle_queries", batch["input_geom"]))
+    field_norm = model.decode_field(encoded, batch["output_queries"])
     residual = normalization.denormalize_residual(residual_norm)[..., :7]
     field = normalization.denormalize_field(particle_field_norm)
     velocity, grad = field[..., :3], field[..., 3:12].reshape(*field.shape[:-1], 3, 3)

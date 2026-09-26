@@ -246,16 +246,8 @@ def read_field_grid_h5(path: Path) -> Tuple[np.ndarray, np.ndarray]:
         coords = as_xyz(np.asarray(f["nodes"]))
         vel = as_vec_field(np.asarray(f["U"]))
 
-    grid_shape = (65, 65, 65, 3)
-    vel_grid = vel.reshape(grid_shape)
-
-    spacing = (1.0, 1.0, 1.0)
-    grad = np.gradient(vel_grid, axis=(0,1,2))
-    dU_dx, dU_dy, dU_dz = grad[0], grad[1], grad[2]
-
-    vel_flat = vel_grid.reshape(-1, 3)
-    grad_flat = np.concatenate([dU_dx.reshape(-1,3), dU_dy.reshape(-1,3), dU_dz.reshape(-1,3)], axis=1)
-    combined = np.concatenate([vel_flat, grad_flat], axis=1)
+    from FINAL.gino.data.hdf5 import physical_field_values
+    combined = physical_field_values(coords, vel)
 
     return _filter_field_queries(coords, combined, path)
 
@@ -1431,6 +1423,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
                     "freestream": [float(v) for v in np.asarray(meta["freestream"]).reshape(-1)],
                     "dt": float(meta["dt"]),
                     "vtk_path": str(curr.get("vtk_path", "")),
+                    "vtk_path_tp1": str(nxt.get("vtk_path", "")),
                     "phase_delta": float(nxt["phase"] - curr["phase"]),
                 }
             )

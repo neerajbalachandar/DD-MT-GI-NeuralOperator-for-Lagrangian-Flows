@@ -27,16 +27,28 @@ def _as_vec(value):
     raise ValueError(f"Expected vector field, got {arr.shape}")
 
 
+def physical_field_values(coords, velocity, shape=(65, 65, 65)):
+    """Attach xyz-ordered velocity derivatives computed against physical axes."""
+    coords, velocity = np.asarray(coords), np.asarray(velocity)
+    coord_grid = coords.reshape(*shape, 3)
+    velocity_grid = velocity.reshape(*shape, 3)
+    axes = tuple(coord_grid[tuple(0 if j != axis else slice(None) for j in range(3)) + (axis,)]
+                 for axis in range(3))
+    mesh = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1)
+    if not np.allclose(coord_grid, mesh, rtol=1e-5, atol=1e-7):
+        raise ValueError("Native nodes are not a rectilinear xyz grid in canonical row order")
+    derivatives = np.gradient(velocity_grid, *axes, axis=(0, 1, 2), edge_order=2)
+    gradient_channels = np.concatenate([part.reshape(-1, 3) for part in derivatives], axis=1)
+    return np.concatenate((velocity_grid.reshape(-1, 3), gradient_channels), axis=1).astype(np.float32)
+
+
 def read_task2_field(path):
     """Read native HDF5 nodes/U and return canonical velocity plus gradients."""
     with h5py.File(path, "r") as handle:
         coords = _as_xyz(handle["nodes"])
         velocity = _as_vec(handle["U"])
     if velocity.shape[0] == 65 ** 3:
-        grid = velocity.reshape(65, 65, 65, 3)
-        deriv = np.gradient(grid, axis=(0, 1, 2))
-        gradients = np.concatenate([part.reshape(-1, 3) for part in deriv], axis=1)
-        values = np.concatenate((velocity, gradients), axis=1)
+        values = physical_field_values(coords, velocity)
     else:
         values = velocity
     return coords, values

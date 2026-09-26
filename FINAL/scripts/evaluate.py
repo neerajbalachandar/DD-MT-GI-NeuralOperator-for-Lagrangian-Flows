@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader
 from gino.data.dataset import EvolutionDataset, load_processed_dataset, collate_one
 from gino.data.normalization import NormalizationStats
 from gino.evaluation.one_step import evaluate_one_step
-from gino.data.reconstruction import rebuild_next_batch
+from gino.data.reconstruction import rebuild_next_batch_inference
 from gino.data.hdf5 import find_task2_file, read_task2_field, native_field_plane
 from gino.evaluation.metrics import mse, relative_l2, state_component_metrics, normalized_state_component_metrics
 from gino.dynamics.rollout import inference_rollout
@@ -39,16 +39,44 @@ def main():
     data_path = (HERE / cfg["data"]["dataset"]).resolve()
     data = load_processed_dataset(data_path)
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    model_cfg = checkpoint.get("config", cfg)["model"] if "model" in checkpoint.get("config", {}) else checkpoint.get("config", cfg)
+    checkpoint_cfg = checkpoint.get("config", {})
+    model_cfg = checkpoint_cfg.get("model", checkpoint_cfg or cfg)
+    architecture_keys = ("latent_res", "hidden_channels", "fno_layers", "fno_modes", "gno_radius",
+                         "mlp_layers", "mlp_hidden", "query_pos_encoding_frequencies",
+                         "use_attention", "use_skip", "use_global_conditioning", "use_task_adapters")
+    mismatches = {key: (model_cfg.get(key), cfg["model"].get(key)) for key in architecture_keys
+                  if key in model_cfg and key in cfg["model"] and model_cfg[key] != cfg["model"][key]}
+    if mismatches:
+        print(f"Checkpoint/config architecture mismatch: {mismatches}")
     features = checkpoint.get("feature_names", cfg["data"]["input_features"])
     global_names = checkpoint.get("global_condition_channels", cfg["data"]["global_condition_channels"])
     field_names = checkpoint.get("field_target_names", data["field_target_names"])
     target_names = checkpoint.get("target_names", data["target_names"])
-    state = checkpoint["model_state_dict"]
+    state = {key: value for key, value in checkpoint["model_state_dict"].items() if key != "_metadata"}
     model = GINOSharedLatent(len(features), len(target_names), len(field_names), len(global_names), model_cfg).to(device)
-    missing, unexpected = model.load_state_dict(state, strict=False)
-    if missing or unexpected:
-        raise RuntimeError(f"Checkpoint incompatibility. Missing={missing}; unexpected={unexpected}")
+    checkpoint_parameter_count = sum(value.numel() for value in state.values() if torch.is_tensor(value))
+    model_parameter_count = sum(value.numel() for value in model.state_dict().values() if torch.is_tensor(value))
+    print(f"Checkpoint parameters: {checkpoint_parameter_count}; configured model parameters: {model_parameter_count}")
+    model_state = {key: value for key, value in model.state_dict().items() if key != "_metadata"}
+    model_keys, checkpoint_keys = set(model_state), set(state)
+    missing_keys, unexpected_keys = sorted(model_keys - checkpoint_keys), sorted(checkpoint_keys - model_keys)
+    shape_mismatches = {key: (tuple(state[key].shape), tuple(model.state_dict()[key].shape))
+                        for key in model_keys & checkpoint_keys
+                        if torch.is_tensor(state[key]) and state[key].shape != model_state[key].shape}
+    print(f"Checkpoint missing keys: {missing_keys}")
+    print(f"Checkpoint unexpected keys: {unexpected_keys}")
+    print(f"Checkpoint tensor shape mismatches: {shape_mismatches}")
+    if checkpoint_parameter_count != model_parameter_count:
+        print("Checkpoint parameter-count mismatch")
+    if not shape_mismatches:
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        if missing or unexpected:
+            missing_keys, unexpected_keys = missing, unexpected
+    if mismatches or checkpoint_parameter_count != model_parameter_count or missing_keys or unexpected_keys or shape_mismatches:
+        raise RuntimeError(f"Checkpoint incompatibility: architecture={mismatches}, parameter_count="
+                           f"{checkpoint_parameter_count}/{model_parameter_count}, missing={missing_keys}, "
+                           f"unexpected={unexpected_keys}, shapes={shape_mismatches}")
+    print("Checkpoint architecture/configuration: compatible")
     stats = NormalizationStats.from_dataset(data, [list(data["feature_names"]).index(x) for x in features])
     if "input_mean" in checkpoint:
         stats.input_mean = np.asarray(checkpoint["input_mean"]).reshape(-1)
@@ -65,7 +93,8 @@ def main():
     split = cfg["evaluation"]["split"]
     pair_ids = data[f"{split}_pair_ids"]
     rollout_horizon = max(int(h) for h in cfg["evaluation"]["rollout_horizons"])
-    ds = EvolutionDataset(data, pair_ids, features, global_names, cfg["data"]["max_particles"], cfg["data"]["max_queries"], rollout_horizon)
+    residual_channels = len(target_names)
+    ds = EvolutionDataset(data, pair_ids, features, global_names, cfg["data"]["max_particles"], cfg["data"]["max_queries"], rollout_horizon, stats, residual_channels)
     loader = DataLoader(ds, batch_size=1, shuffle=False, collate_fn=collate_one)
     max_batches = int(cfg["evaluation"].get("max_batches", 0))
     if max_batches:
@@ -86,7 +115,7 @@ def main():
     rollout_records = []
     max_horizon = max(int(h) for h in cfg["evaluation"]["rollout_horizons"])
     rollout_ds = EvolutionDataset(data, pair_ids, features, global_names,
-                                 cfg["data"]["max_particles"], cfg["data"]["max_queries"], rollout_horizon)
+                                 cfg["data"]["max_particles"], cfg["data"]["max_queries"], rollout_horizon, stats, residual_channels)
     rollout_loader = DataLoader(rollout_ds, batch_size=1, shuffle=False, collate_fn=collate_one)
     if max_batches:
         from itertools import islice
@@ -94,13 +123,13 @@ def main():
     model.eval()
     with torch.inference_mode():
         for batch in rollout_loader:
-            targets = torch.cat((batch["rollout_initial_target"].unsqueeze(1), batch["rollout_targets"]), dim=1)
+            targets = batch["rollout_state_targets"]
             steps = min(max_horizon, int(targets.shape[1]))
             if steps <= 0:
                 continue
             batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
             targets = targets[:, :steps].to(device)
-            rebuild = lambda old, state, field: rebuild_next_batch(old, state, field, stats)
+            rebuild = lambda old, state, field: rebuild_next_batch_inference(old, state, field, stats)
             pred_states, pred_fields = inference_rollout(model, batch, latent, stats, steps, rebuild, store_on_cpu=True)
             context = batch["pair_context"]
             for horizon in cfg["evaluation"]["rollout_horizons"]:
@@ -108,13 +137,17 @@ def main():
                 if h <= steps:
                     truth = targets[:, h - 1].cpu().numpy()
                     prediction = pred_states[:, h - 1, :truth.shape[1]].numpy()
-                    field_target_norm = batch["field_target"] if h == 1 else batch["rollout_field_target"][:, h - 2]
+                    field_context = context if h == 1 else batch["rollout_contexts"][h - 2]
+                    state_frame = ((context.get("frame_tp1", ""),) +
+                                   tuple(c.get("frame_tp1", "") for c in batch["rollout_contexts"]))[h - 1]
+                    field_target_norm = batch["rollout_field_targets"][:, h - 1]
                     field_target = stats.denormalize_field(field_target_norm).cpu().numpy()
                     field_prediction = pred_fields[:, h - 1].numpy()
                     rollout_records.append({"pair_id": int(batch["pair_id"][0]),
                         "case": context.get("case", "unknown"), "horizon": h,
-                        "phase": float(batch.get("phase_next", 0.0)) + (h - 1) * float(batch.get("phase_delta", 0.0)),
-                        "field_phase": float(context.get("phase_t", 0.0)) + (h - 1) * float(batch.get("phase_delta", 0.0)),
+                        "phase": float(batch["rollout_phases"][0, h - 1]),
+                        "field_phase": float(field_context.get("phase_t", 0.0)),
+                        "frame": state_frame, "field_frame": field_context.get("frame_t", ""),
                         **state_component_metrics(prediction, truth),
                         **normalized_state_component_metrics(prediction, truth,
                                                              stats.state_mean, stats.state_std),
@@ -133,13 +166,20 @@ def main():
                   f"sigma RMSE={np.mean([row['sigma_rmse'] for row in rows]):.6g} | "
                   f"field MSE={np.mean([row['field_mse'] for row in rows]):.6g} | "
                   f"field relL2={np.mean([row['field_relative_l2'] for row in rows]):.6g}")
+        final_horizon = max(int(row["horizon"]) for row in case_records)
+        final_rows = [row for row in case_records if int(row["horizon"]) == final_horizon]
+        time_average = float(np.mean([row["position_rmse"] for row in case_records]))
+        final_error = float(np.mean([row["position_rmse"] for row in final_rows]))
+        final_phase = float(np.mean([row["phase"] for row in final_rows]))
+        print(f"rollout summary {case}: time-averaged position RMSE={time_average:.6g}; "
+              f"final H={final_horizon} phase={final_phase:.6g} position RMSE={final_error:.6g}")
     native_records = []
     native_visual_candidates = {}
     native_root_value = str(cfg["data"].get("native_task2_root", "")).strip()
     native_root = str((HERE / native_root_value).resolve()) if native_root_value and not Path(native_root_value).is_absolute() else native_root_value
     if native_root:
         native_ds = EvolutionDataset(data, pair_ids, features, global_names,
-                                     cfg["data"]["max_particles"], cfg["data"]["max_queries"], rollout_horizon)
+                                     cfg["data"]["max_particles"], cfg["data"]["max_queries"], rollout_horizon, stats, residual_channels)
         native_loader = DataLoader(native_ds, batch_size=1, shuffle=False, collate_fn=collate_one)
         if max_batches:
             from itertools import islice
@@ -175,7 +215,8 @@ def main():
                 predicted_slice = plane_result["field_phys"][0, :, 0].cpu().numpy().reshape(true_slice.shape)
             case_name = context.get("case", "unknown")
             native_visual_candidates.setdefault(case_name, []).append({
-                "phase": float(context.get("phase_t", 0.0)), "x": x_axis, "z": z_axis,
+                "phase": float(context.get("phase_t", 0.0)), "y_plane": float(plane_xyz[0, 1]),
+                "x": x_axis, "z": z_axis,
                 "true": true_slice, "pred": predicted_slice})
             del native_batch, plane_batch, result, plane_result
             if torch.cuda.is_available():
@@ -203,11 +244,15 @@ def main():
                 index = min(range(len(remaining)), key=lambda i: abs(remaining[i]["phase"] - phase))
                 selected.append(remaining.pop(index))
             x_axis, z_axis = selected[0]["x"], selected[0]["z"]
+            if any(not np.allclose(item["x"], x_axis) or not np.allclose(item["z"], z_axis)
+                   or item["true"].shape != selected[0]["true"].shape for item in selected[1:]):
+                raise ValueError(f"Native field grids differ across selected phases for case {case_name}")
             plot_field_comparison(x_axis, z_axis,
                 np.stack([item["true"] for item in selected]),
                 np.stack([item["pred"] for item in selected]),
                 out_dir / f"native_field_{case_name.replace('/', '_')}.png",
-                phases=[item["phase"] for item in selected], component_label="u_x")
+                phases=[item["phase"] for item in selected], component_label="u_x",
+                y_plane=selected[0]["y_plane"])
     if cfg["evaluation"].get("save_plots", True):
         plot_temporal_errors(records, rollout_records, out_dir)
     if records:

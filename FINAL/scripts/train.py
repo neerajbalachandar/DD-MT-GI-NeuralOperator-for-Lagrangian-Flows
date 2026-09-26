@@ -29,14 +29,14 @@ def main():
     names = [str(x) for x in data["feature_names"].tolist()]
     in_names = cfg["data"]["input_features"]
     indices = [names.index(n) for n in in_names]
-    stats = NormalizationStats.from_dataset(data, indices)
+    stats = NormalizationStats.fit_train_sequences(data, data["train_pair_ids"], indices)
     max_p, max_q = cfg["data"]["max_particles"], cfg["data"]["max_queries"]
     max_h = int(cfg["training"].get("rollout_horizon_max", 16))
-    make_ds = lambda ids: EvolutionDataset(data, ids, in_names, cfg["data"]["global_condition_channels"], max_p, max_q, max_h)
+    delta_channels = 10 if cfg["model"].get("predict_delta_u", True) else 7
+    make_ds = lambda ids: EvolutionDataset(data, ids, in_names, cfg["data"]["global_condition_channels"], max_p, max_q, max_h, stats, delta_channels)
     train_ds, val_ds = make_ds(data["train_pair_ids"]), make_ds(data.get("val_pair_ids", []))
     if not len(val_ds):
         raise ValueError("Validation split is empty; training uses validation only for checkpoint selection.")
-    delta_channels = 10 if cfg["model"].get("predict_delta_u", True) else 7
     model = GINOSharedLatent(len(in_names), delta_channels, len(data["field_target_names"]),
                              len(cfg["data"]["global_condition_channels"]), cfg["model"]).to(device)
     latent = build_latent_grid(cfg["model"]["latent_res"], device)
@@ -44,7 +44,7 @@ def main():
     norm_meta = {k: np.asarray(v).tolist() for k, v in vars(stats).items()}
     trainer = Trainer(model, latent, train_ds, val_ds, stats, cfg["training"], run_dir, device)
     trainer.fit(cfg, {"dataset_path": str(dataset_path), "split": {k: np.asarray(data[k]).tolist() for k in ("train_pair_ids", "val_pair_ids", "test_pair_ids")}, "normalization": norm_meta,
-                      "feature_names": in_names, "target_names": [str(x) for x in data["target_names"]],
+                      "feature_names": in_names, "target_names": [str(x) for x in data["target_names"][:delta_channels]],
                       "field_target_names": [str(x) for x in data["field_target_names"]],
                       "global_condition_channels": cfg["data"]["global_condition_channels"]})
     print(f"Best checkpoint: {run_dir / 'best_model.pt'}")

@@ -20,7 +20,7 @@ model:
   use_skip: true
   use_global_conditioning: true
   use_task_adapters: false
-  predict_delta_u: true
+  predict_delta_u: false
 training:
   run_dir: runs/baseline
   epochs: 80
@@ -35,12 +35,13 @@ training:
   use_state_loss: true
   use_field_loss: true
   use_rollout_loss: false
-  rollout_weight: 1.0
-  rollout_horizon_max: 16
-  rollout_horizon_schedule: [1, 2, 4, 8, 16]
-  pushforward_weight: 1.0
+  rollout_weight: 0.0
+  rollout_horizon_max: 1
+  rollout_horizon_schedule: [1]
+  pushforward_weight: 0.0
   use_scheduled_sampling: false
   scheduled_sampling_max_probability: 0.3
+  scheduled_sampling_ramp_epochs: 30
   use_gns_noise: false
   gns_initial_std: 0.0
   gns_walk_std: 0.0

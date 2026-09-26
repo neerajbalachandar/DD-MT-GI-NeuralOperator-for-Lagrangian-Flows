@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader
 from .losses import combined_loss, field_loss, state_loss, normalized_rollout_loss
 from .noise import perturb_flow_inputs
 from .scheduled_sampling import scheduled_sampling_probability
-from gino.data.reconstruction import rebuild_next_batch
+from gino.data.reconstruction import rebuild_next_batch_training
 from gino.dynamics.rollout import training_rollout, pushforward_rollout
 
 
@@ -50,10 +50,12 @@ class Trainer:
 
     def _epoch(self, loader, train, epoch=1):
         self.model.train(train)
-        totals = {k: [] for k in ("total_loss", "state_loss", "field_loss", "rollout_loss", "pushforward_loss", "gradient_norm")}
+        totals = {k: [] for k in ("total_loss", "state_loss", "field_loss", "rollout_loss", "pushforward_loss", "gradient_norm", "effective_horizon")}
         accum = max(int(self.config.get("gradient_accumulation_steps", 1)), 1)
         max_probability = float(self.config.get("scheduled_sampling_max_probability", 0.3))
-        sample_probability = scheduled_sampling_probability(epoch, max_probability) if train and self.config.get("use_scheduled_sampling", False) else 0.0
+        sample_probability = scheduled_sampling_probability(
+            epoch, max_probability, self.config.get("scheduled_sampling_ramp_epochs", 30)
+        ) if train and self.config.get("use_scheduled_sampling", False) else 0.0
         schedule = self.config.get("rollout_horizon_schedule", [1])
         active_horizon = min(int(self.config.get("rollout_horizon_max", max(schedule))), horizon_for_epoch(epoch, self.config.get("epochs", 1), schedule))
         use_rollout = bool(train and self.config.get("use_rollout_loss", False))
@@ -62,7 +64,7 @@ class Trainer:
         if train:
             self.optimizer.zero_grad(set_to_none=True)
         for step, batch in enumerate(loader):
-            batch["rollout_targets"] = batch["rollout_targets"][:, :max(active_horizon - 1, 0)]
+            batch["rollout_state_targets"] = batch["rollout_state_targets"][:, :active_horizon]
             batch = move_batch(batch, self.device)
             flow_indices = [i for i, name in enumerate(batch["feature_names"]) if name in ("u_x", "u_y", "u_z") or name.startswith("gradU_")]
             use_noise = bool(train and self.config.get("use_gns_noise", False))
@@ -73,8 +75,9 @@ class Trainer:
             with torch.set_grad_enabled(train), torch.autocast(device_type="cuda", enabled=self.scaler.is_enabled()):
                 if sample_probability > 0 and flow_indices:
                     with torch.no_grad():
-                        _, flow_norm = self.model(batch["input_geom"], self.latent_grid, batch["particle_queries"],
-                                                  batch["x"], batch["global_params"], batch_dict=batch)
+                        encoded = self.model.encode_process(batch["input_geom"], self.latent_grid,
+                                                            batch["x"], batch["global_params"])
+                        flow_norm = self.model.decode_field(encoded, batch["particle_queries"])
                         flow_phys = self.normalization.denormalize_field(flow_norm)
                         if bool(torch.rand((), device=self.device) < sample_probability):
                             means = torch.as_tensor(batch["input_mean"], dtype=batch["x"].dtype, device=self.device).reshape(-1)
@@ -98,17 +101,18 @@ class Trainer:
                                       homoscedastic=bool(self.config.get("use_homoscedastic_weighting", True)))
                 rollout_term = pushforward_term = None
                 if do_sequence:
-                    available = batch["rollout_targets"].shape[1] + 1
-                    horizon = min(active_horizon, available)
+                    horizon = min(active_horizon, batch["rollout_state_targets"].shape[1])
+                    totals["effective_horizon"].append(float(horizon))
                     if horizon > 1:
-                        target = torch.cat((batch["rollout_initial_target"].unsqueeze(1), batch["rollout_targets"][:, :horizon - 1]), dim=1)
+                        target = batch["rollout_state_targets"][:, :horizon]
                         state_mean = self.normalization.state_mean if self.normalization.state_mean is not None else np.zeros(7, dtype=np.float32)
                         state_std = self.normalization.state_std if self.normalization.state_std is not None else np.ones(7, dtype=np.float32)
-                        def make_rebuild():
+                        def make_rebuild(differentiable):
                             walk_noise = noise
                             def rebuild(old, predicted, field_phys):
                                 nonlocal walk_noise
-                                nxt = rebuild_next_batch(old, predicted, field_phys, self.normalization)
+                                nxt = rebuild_next_batch_training(old, predicted, field_phys, self.normalization,
+                                                                 pushforward=not differentiable)
                                 if sample_probability > 0 and flow_indices:
                                     if bool(torch.rand((), device=self.device) >= sample_probability):
                                         nxt["x"][..., flow_indices] = old["x"][..., flow_indices]
@@ -119,15 +123,17 @@ class Trainer:
                             return rebuild
                         if use_rollout:
                             rollout_pred, _ = training_rollout(self.model, batch, self.latent_grid,
-                                self.normalization, horizon, make_rebuild())
+                                self.normalization, horizon, make_rebuild(True))
                             n = min(rollout_pred.shape[2], target.shape[2])
                             rollout_term = normalized_rollout_loss(rollout_pred[:, :, :n], target[:, :, :n], state_mean, state_std)
                         if use_pushforward:
                             pushforward_pred, _ = pushforward_rollout(self.model, batch, self.latent_grid,
-                                self.normalization, horizon, make_rebuild())
+                                self.normalization, horizon, make_rebuild(False))
                             n = min(pushforward_pred.shape[2], target.shape[2])
                             pushforward_term = normalized_rollout_loss(pushforward_pred[:, :, :n], target[:, :, :n], state_mean, state_std)
                 total = one_step
+                if not do_sequence:
+                    totals["effective_horizon"].append(1.0)
                 if rollout_term is not None:
                     total = total + float(self.config.get("rollout_weight", 0.0)) * rollout_term
                 if pushforward_term is not None:
@@ -181,8 +187,11 @@ class Trainer:
                    **{f"train_{k}": v for k, v in train_metrics.items()},
                    **{f"val_{k}": v for k, v in val_metrics.items()},
                    "learning_rate": float(self.optimizer.param_groups[0]["lr"]),
+                   "train_effective_rollout_horizon": train_metrics["effective_horizon"],
                    "rollout_horizon": active_horizon if self.config.get("use_rollout_loss") or self.config.get("use_pushforward") else 1,
-                   "scheduled_sampling_probability": scheduled_sampling_probability(epoch, max_probability) if self.config.get("use_scheduled_sampling") else 0.0,
+                   "scheduled_sampling_probability": scheduled_sampling_probability(
+                       epoch, max_probability, self.config.get("scheduled_sampling_ramp_epochs", 30)
+                   ) if self.config.get("use_scheduled_sampling") else 0.0,
                    "noise_initial_std": float(self.config.get("gns_initial_std", 0.0)) if self.config.get("use_gns_noise") else 0.0,
                    "noise_walk_std": float(self.config.get("gns_walk_std", 0.0)) if self.config.get("use_gns_noise") else 0.0,
                    "log_state_variance": float(self.model.log_delta_var.detach().cpu()),
