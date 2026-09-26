@@ -1,18 +1,29 @@
 from pathlib import Path
-import sys
+
+from . import preprocessing_pipeline
 
 
-def run_legacy_preprocessing(source_root=None, output_dir=None, field_root=None):
-    repo_root = Path(__file__).resolve().parents[3]
-    if str(repo_root) not in sys.path:
-        sys.path.insert(0, str(repo_root))
-    import process_data
-    if source_root is not None:
-        process_data.RAW_ROOT_CANDIDATES = [Path(source_root).expanduser().resolve()]
-    if field_root is not None:
-        process_data.FIELD_ROOT_CANDIDATES = [Path(field_root).expanduser().resolve()]
-    if output_dir is not None:
-        process_data.OUT_ROOT = Path(output_dir).expanduser().resolve()
-        process_data.MERGED_ROOT = process_data.OUT_ROOT / "merged_frames"
-    process_data.main()
-    return process_data.OUT_ROOT / "particle_evolution_dataset.npz"
+DEFAULT_TASK1_ROOT = Path("/media/neerajc/New Volume/Neeraj/NeuralOp_Data/task1")
+DEFAULT_TASK2_ROOT = Path("/media/neerajc/New Volume/Neeraj/NeuralOp_Data/task2")
+
+
+def run_preprocessing(source_root=None, output_dir=None, field_root=None):
+    """Build the canonical processed dataset from Task-1 particles and Task-2 fields."""
+    task1_root = Path(source_root or DEFAULT_TASK1_ROOT).expanduser().resolve()
+    task2_root = Path(field_root or DEFAULT_TASK2_ROOT).expanduser().resolve()
+    output_path = Path(output_dir or preprocessing_pipeline.SCRIPT_DIR / "processed_data").expanduser().resolve()
+    if not task1_root.is_dir():
+        raise FileNotFoundError(f"Task-1 source directory does not exist: {task1_root}")
+    if not task2_root.is_dir():
+        raise FileNotFoundError(f"Task-2 source directory does not exist: {task2_root}")
+
+    preprocessing_pipeline.RAW_ROOT_CANDIDATES = [task1_root]
+    preprocessing_pipeline.FIELD_ROOT_CANDIDATES = [task2_root]
+    preprocessing_pipeline.OUT_ROOT = output_path
+    preprocessing_pipeline.MERGED_ROOT = output_path / "merged_frames"
+    preprocessing_pipeline.main()
+    return output_path / "particle_evolution_dataset.npz"
+
+
+# Kept as a compatibility alias for callers from earlier package revisions.
+run_legacy_preprocessing = run_preprocessing

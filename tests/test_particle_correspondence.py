@@ -1,6 +1,6 @@
 import numpy as np
 
-from process_data import match_particle_identities
+from gino.data.preprocessing_pipeline import match_particle_identities
 
 
 def test_particle_correspondence_matches_identity_not_row_position():

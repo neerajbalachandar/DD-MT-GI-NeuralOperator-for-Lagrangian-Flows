@@ -4,7 +4,7 @@ import sys
 
 HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
-from gino.data.preprocessing import run_legacy_preprocessing
+from gino.data.preprocessing import run_preprocessing
 
 
 def main():
@@ -13,7 +13,7 @@ def main():
     parser.add_argument("--field-root", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)
     args = parser.parse_args()
-    print(run_legacy_preprocessing(args.source_root, args.output_dir, args.field_root))
+    print(run_preprocessing(args.source_root, args.output_dir, args.field_root))
 
 
 if __name__ == "__main__":
