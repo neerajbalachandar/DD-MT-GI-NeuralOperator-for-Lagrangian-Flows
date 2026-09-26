@@ -1,12 +1,13 @@
 seed: 42
 device: auto
 data:
-  dataset: ../Processed_Data/processed_data_split3/particle_evolution_dataset.npz
+  dataset: processed_data/particle_evolution_dataset.npz
   native_task2_root: ""
   input_features: [u_x, u_y, u_z, sigma, geom_dist, Gamma_x, Gamma_y, Gamma_z, gradU_xx, gradU_xy, gradU_xz, gradU_yx, gradU_yy, gradU_yz, gradU_zx, gradU_zy, gradU_zz]
   global_condition_channels: [angle_of_attack, freestream_magnitude, phase]
   max_particles: 4096
   max_queries: 2048
+  
 model:
   latent_res: 24
   hidden_channels: 128
@@ -21,6 +22,7 @@ model:
   use_global_conditioning: true
   use_task_adapters: false
   predict_delta_u: false
+
 training:
   run_dir: runs/baseline
   epochs: 80
