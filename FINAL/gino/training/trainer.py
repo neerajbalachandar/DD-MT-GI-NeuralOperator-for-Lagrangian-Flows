@@ -8,8 +8,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from .losses import combined_loss, field_loss, state_loss, normalized_rollout_loss
-from .noise import perturb_flow_inputs, random_walk_noise
-from .scheduled_sampling import scheduled_sampling_probability, choose_predicted_flow_inputs
+from .noise import perturb_flow_inputs, random_walk_noise, noise_for_rollout_input
+from .scheduled_sampling import scheduled_sampling_probability, choose_predicted_flow_inputs, teacher_input_at
 from gino.data.reconstruction import rebuild_next_batch_training
 from gino.dynamics.rollout import training_rollout, pushforward_rollout
 
@@ -74,7 +74,7 @@ class Trainer:
             if use_noise and (float(self.config.get("gns_initial_std", 0.0)) or float(self.config.get("gns_walk_std", 0.0))):
                 noise = random_walk_noise(batch["x"][..., flow_indices].unsqueeze(0).expand(active_horizon, -1, -1, -1),
                     self.config.get("gns_initial_std", 0.0), self.config.get("gns_walk_std", 0.0))
-                batch["x"], _ = perturb_flow_inputs(batch, noise[0], flow_indices)
+                batch["x"], _ = perturb_flow_inputs(batch, noise_for_rollout_input(noise, 0), flow_indices)
             with torch.set_grad_enabled(train), torch.autocast(device_type="cuda", enabled=self.scaler.is_enabled()):
                 pred, field = self.model(batch["input_geom"], self.latent_grid, batch["output_queries"], batch["x"], batch["global_params"], batch_dict=batch)
                 state_term = state_loss(pred[..., :batch["delta_target"].shape[-1]], batch["delta_target"])
@@ -99,14 +99,14 @@ class Trainer:
                                 nxt = rebuild_next_batch_training(old, predicted, field_phys, self.normalization,
                                                                  pushforward=not differentiable)
                                 if self.config.get("use_scheduled_sampling", False) and flow_indices:
-                                    teacher = old.get("rollout_teacher_inputs")
-                                    teacher = teacher[:, 0] if teacher is not None and teacher.shape[1] else None
+                                    teacher = teacher_input_at(old.get("rollout_teacher_inputs"), transition_index)
                                     velocity = torch.stack([field_phys[..., 0], field_phys[..., 1], field_phys[..., 2]], dim=-1)
                                     gradient = field_phys[..., 3:12].reshape(*field_phys.shape[:-1], 3, 3)
                                     nxt["x"], _ = choose_predicted_flow_inputs(nxt, velocity, gradient,
                                         sample_probability, teacher_x=teacher)
-                                if noise is not None and transition_index + 1 < noise.shape[0]:
-                                    nxt["x"], _ = perturb_flow_inputs(nxt, noise[transition_index + 1], flow_indices)
+                                if noise is not None:
+                                    nxt["x"], _ = perturb_flow_inputs(
+                                        nxt, noise_for_rollout_input(noise, transition_index + 1), flow_indices)
                                 transition_index += 1
                                 return nxt
                             return rebuild

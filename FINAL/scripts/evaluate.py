@@ -103,7 +103,8 @@ def main():
     rollout_records = []
     max_horizon = max(int(h) for h in cfg["evaluation"]["rollout_horizons"])
     rollout_ds = EvolutionDataset(data, pair_ids, features, global_names,
-                                 cfg["data"]["max_particles"], cfg["data"]["max_queries"], rollout_horizon, stats, residual_channels)
+                                 cfg["data"]["max_particles"], cfg["data"]["max_queries"], rollout_horizon,
+                                 stats, residual_channels, require_verified_correspondence=max_horizon > 1)
     rollout_loader = DataLoader(rollout_ds, batch_size=1, shuffle=False, collate_fn=collate_one)
     if max_batches:
         from itertools import islice

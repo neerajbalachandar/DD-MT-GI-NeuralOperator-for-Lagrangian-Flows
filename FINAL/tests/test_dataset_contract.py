@@ -44,3 +44,16 @@ def test_train_only_statistics_and_index_zero_is_one_step_target():
     assert sample["rollout_time_indices"].tolist() == [1, 2]
     assert sample["rollout_phases"].tolist() == [0.5, 1.0]
     assert sample["rollout_contexts"][0]["vtk_path"] == "frame2.vtk"
+
+
+def test_rollout_rejects_unverified_legacy_row_correspondence():
+    data = _toy_data()
+    stats = NormalizationStats.fit_train_sequences(data, [0], [3])
+    dataset = EvolutionDataset(data, [0], ["u_x"], [], max_particles=8, max_queries=8,
+        rollout_horizon=2, normalization=stats, require_verified_correspondence=True)
+    try:
+        dataset[0]
+    except ValueError as error:
+        assert "no verified physical particle correspondence" in str(error)
+    else:
+        raise AssertionError("unverified row ordering must not support rollout evaluation")

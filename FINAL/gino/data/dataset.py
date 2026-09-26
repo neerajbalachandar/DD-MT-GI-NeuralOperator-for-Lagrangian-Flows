@@ -41,7 +41,7 @@ def assert_no_sequence_leakage(data, splits):
 class EvolutionDataset(Dataset):
     def __init__(self, data, pair_ids, input_features, global_features, max_particles=4096,
                  max_queries=2048, rollout_horizon=16, normalization=None, residual_channels=None,
-                 include_teacher_inputs=False):
+                 include_teacher_inputs=False, require_verified_correspondence=False):
         self.data = data
         self.pair_ids = np.asarray(pair_ids, dtype=np.int64)
         self.features = [str(x) for x in input_features]
@@ -53,6 +53,7 @@ class EvolutionDataset(Dataset):
         self.normalization = normalization
         self.residual_channels = residual_channels
         self.include_teacher_inputs = bool(include_teacher_inputs)
+        self.require_verified_correspondence = bool(require_verified_correspondence)
         self.coord_min = np.asarray(data["coord_min"], dtype=np.float32).reshape(3) if normalization is None else np.asarray(normalization.coord_min).reshape(3)
         self.coord_span = np.maximum(np.asarray(data["coord_span"], dtype=np.float32).reshape(3), 1e-8) if normalization is None else np.maximum(np.asarray(normalization.coord_span).reshape(3), 1e-8)
         self.input_mean = (np.asarray(data["in_mean"], dtype=np.float32).reshape(-1)[self.feature_indices]
@@ -90,6 +91,12 @@ class EvolutionDataset(Dataset):
         context = contexts[pid] if contexts is not None else {}
         if isinstance(context, np.ndarray):
             context = context.item()
+        correspondence = str(context.get("correspondence_source", "legacy_row_index_assumption_unverified"))
+        if self.require_verified_correspondence and correspondence != "matched_source_particle_ids":
+            raise ValueError(
+                f"Pair {pid} has no verified physical particle correspondence; "
+                f"recorded source is {correspondence!r}. Reprocess with persistent source particle IDs."
+            )
 
         future_pair_ids = []
         future_id_sets = []
@@ -221,7 +228,7 @@ class EvolutionDataset(Dataset):
                 "phase_next": float(context.get("phase_tp1", context.get("phase_t", 0.0))),
                 "phase_delta": float(context.get("phase_delta", 0.0)),
                 "particle_ids": np.asarray(common_ids, dtype=str),
-                "particle_correspondence": str(context.get("correspondence_source", "legacy_row_index_assumption_unverified")),
+                "particle_correspondence": correspondence,
                 "rollout_teacher_inputs": (np.stack(future_teacher_inputs, axis=0) if self.include_teacher_inputs and future_teacher_inputs else
                                            np.zeros((0, count, len(self.features)), dtype=np.float32) if self.include_teacher_inputs else None)}
 

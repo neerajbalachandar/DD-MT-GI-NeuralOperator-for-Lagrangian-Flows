@@ -202,7 +202,7 @@ def read_h5_selected(path: Path, key_map: Dict[str, str]) -> Dict[str, np.ndarra
 
 
 def _read_particle_ids(path: Path, count: int, source: str) -> np.ndarray:
-    candidates = {"particle_id", "particle_ids", "id", "ids"}
+    candidates = {"particle_id", "particle_ids"}
     found = None
     with h5py.File(path, "r") as handle:
         def visit(name, node):
@@ -215,6 +215,19 @@ def _read_particle_ids(path: Path, count: int, source: str) -> np.ndarray:
     if found is None:
         return np.asarray([f"{source}:row:{i}" for i in range(count)], dtype=object)
     return np.asarray([f"{source}:id:{value}" for value in found], dtype=object)
+
+
+def match_particle_identities(ids_t: np.ndarray, ids_tp1: np.ndarray):
+    """Return row indices mapping one frame to the next by persistent source identity."""
+    ids_t = np.asarray(ids_t).reshape(-1)
+    ids_tp1 = np.asarray(ids_tp1).reshape(-1)
+    if len(np.unique(ids_t)) != len(ids_t) or len(np.unique(ids_tp1)) != len(ids_tp1):
+        raise ValueError("Particle identity arrays must be unique within each frame")
+    next_lookup = {str(identity): j for j, identity in enumerate(ids_tp1)}
+    indices_t = np.asarray([j for j, identity in enumerate(ids_t) if str(identity) in next_lookup], dtype=np.int64)
+    indices_tp1 = np.asarray([next_lookup[str(ids_t[j])] for j in indices_t], dtype=np.int64)
+    identities = ids_t[indices_t]
+    return indices_t, indices_tp1, identities
 
 
 # ========== Field-grid query bounds / filtering ==========
@@ -1386,12 +1399,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
             s1 = nxt["state"]
 
             ids0, ids1 = curr["particle_ids"], nxt["particle_ids"]
-            if len(np.unique(ids0)) != len(ids0) or len(np.unique(ids1)) != len(ids1):
-                raise ValueError(f"Duplicate particle identity in consecutive frames for case {case}")
-            lookup1 = {str(identity): j for j, identity in enumerate(ids1)}
-            common_ids = [identity for identity in ids0 if str(identity) in lookup1]
-            idx0 = np.asarray([j for j, identity in enumerate(ids0) if str(identity) in lookup1], dtype=np.int64)
-            idx1 = np.asarray([lookup1[str(identity)] for identity in common_ids], dtype=np.int64)
+            idx0, idx1, common_ids = match_particle_identities(ids0, ids1)
             n = len(common_ids)
             if n <= 0:
                 continue

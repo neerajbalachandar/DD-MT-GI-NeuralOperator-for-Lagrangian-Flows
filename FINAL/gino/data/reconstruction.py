@@ -67,8 +67,6 @@ def rebuild_next_batch(batch, state_phys, particle_field_phys, normalization, di
         if context.pair_id is not None:
             next_pair = context.pair_id
             out["pair_id"] = torch.tensor([next_pair], device=state_phys.device, dtype=torch.long)
-        if batch.get("rollout_teacher_inputs") is not None:
-            out["rollout_teacher_inputs"] = batch["rollout_teacher_inputs"][:, 1:]
         if batch.get("rollout_phases") is not None:
             out["rollout_phases"] = batch["rollout_phases"][:, 1:]
     out["phase_next"] = float(context.get("phase_tp1", phase + phase_delta))

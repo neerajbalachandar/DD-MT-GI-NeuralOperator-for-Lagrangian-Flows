@@ -5,6 +5,16 @@ def scheduled_sampling_probability(epoch, max_probability=0.3, ramp_epochs=30):
     return min(float(max_probability), max(0.0, (int(epoch) - 1) / max(float(ramp_epochs), 1) * float(max_probability)))
 
 
+def teacher_input_at(teacher_sequence, rollout_step):
+    """Select ground-truth input at t + rollout_step + 1 from an unshifted timeline."""
+    if teacher_sequence is None:
+        return None
+    step = int(rollout_step)
+    if step < 0 or step >= teacher_sequence.shape[1]:
+        raise IndexError(f"Teacher input step {step} is outside sequence length {teacher_sequence.shape[1]}")
+    return teacher_sequence[:, step]
+
+
 def choose_predicted_flow_inputs(batch, predicted_velocity, predicted_gradient, probability, generator=None,
                                  teacher_x=None):
     """Make one Bernoulli choice for one generated input; flow features are normalized."""

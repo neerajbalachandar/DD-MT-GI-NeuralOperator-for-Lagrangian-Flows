@@ -1,8 +1,9 @@
 import torch
 
 from gino.training.losses import normalized_rollout_loss
-from gino.training.noise import perturb_flow_inputs, random_walk_noise
-from gino.training.scheduled_sampling import choose_predicted_flow_inputs, scheduled_sampling_probability
+from gino.training.noise import perturb_flow_inputs, random_walk_noise, noise_for_rollout_input
+from gino.training.scheduled_sampling import (choose_predicted_flow_inputs,
+    scheduled_sampling_probability, teacher_input_at)
 
 
 def test_random_walk_noise_shape_and_zero_variance():
@@ -10,6 +11,21 @@ def test_random_walk_noise_shape_and_zero_variance():
     noise = random_walk_noise(sequence, initial_std=0.0, walk_std=0.0)
     assert noise.shape == sequence.shape
     assert torch.count_nonzero(noise) == 0
+
+
+def test_random_walk_noise_is_temporally_correlated_and_indexed_by_input_time():
+    torch.manual_seed(5)
+    sequence = torch.zeros(4, 1, 1, 1)
+    noise = random_walk_noise(sequence, initial_std=0.2, walk_std=0.05)
+    assert noise_for_rollout_input(noise, 0).data_ptr() == noise[0].data_ptr()
+    assert noise_for_rollout_input(noise, 2).data_ptr() == noise[2].data_ptr()
+    increments = noise[1:] - noise[:-1]
+    assert torch.isfinite(increments).all()
+    assert torch.count_nonzero(increments) == 3
+    # A fixed seed makes the indexed input sequence reproducible across rollout callbacks.
+    torch.manual_seed(5)
+    repeated = random_walk_noise(sequence, initial_std=0.2, walk_std=0.05)
+    torch.testing.assert_close(noise, repeated)
 
 
 def test_zero_gns_noise_preserves_baseline_input():
@@ -45,6 +61,12 @@ def test_scheduled_sampling_uses_one_choice_and_teacher_flow_only():
     assert not used
     torch.testing.assert_close(changed[..., :2], teacher[..., :2])
     torch.testing.assert_close(changed[..., 2], torch.zeros(1, 2))
+
+
+def test_teacher_input_selection_advances_with_rollout_timestep():
+    teachers = torch.arange(4 * 2 * 3, dtype=torch.float32).reshape(1, 4, 2, 3)
+    torch.testing.assert_close(teacher_input_at(teachers, 0), teachers[:, 0])
+    torch.testing.assert_close(teacher_input_at(teachers, 2), teachers[:, 2])
 
 
 def test_normalized_rollout_loss_scales_each_state_component():

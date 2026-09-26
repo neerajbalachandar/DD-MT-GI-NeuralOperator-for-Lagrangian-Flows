@@ -1,6 +1,14 @@
 import torch
 
 
+def noise_for_rollout_input(noise_sequence, rollout_step):
+    """Map rollout step h to normalized noise epsilon_(t+h), with h=0 at input t."""
+    step = int(rollout_step)
+    if step < 0 or step >= noise_sequence.shape[0]:
+        raise IndexError(f"Noise input step {step} outside sequence length {noise_sequence.shape[0]}")
+    return noise_sequence[step]
+
+
 def random_walk_noise(states, initial_std: float, walk_std: float, generator=None):
     """Pre-generate normalized-feature noise [time, ...] for one rollout sequence."""
     if states.ndim < 2:

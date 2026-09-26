@@ -33,7 +33,11 @@ def main():
     max_p, max_q = cfg["data"]["max_particles"], cfg["data"]["max_queries"]
     max_h = int(cfg["training"].get("rollout_horizon_max", 16))
     delta_channels = 10 if cfg["model"].get("predict_delta_u", True) else 7
-    make_ds = lambda ids, teacher=False: EvolutionDataset(data, ids, in_names, cfg["data"]["global_condition_channels"], max_p, max_q, max_h, stats, delta_channels, include_teacher_inputs=teacher)
+    sequence_training = bool(cfg["training"].get("use_rollout_loss") or cfg["training"].get("use_pushforward"))
+    make_ds = lambda ids, teacher=False: EvolutionDataset(
+        data, ids, in_names, cfg["data"]["global_condition_channels"], max_p, max_q,
+        max_h, stats, delta_channels, include_teacher_inputs=teacher,
+        require_verified_correspondence=sequence_training)
     train_ds, val_ds = make_ds(data["train_pair_ids"], cfg["training"].get("use_scheduled_sampling", False)), make_ds(data.get("val_pair_ids", []))
     if not len(val_ds):
         raise ValueError("Validation split is empty; training uses validation only for checkpoint selection.")
