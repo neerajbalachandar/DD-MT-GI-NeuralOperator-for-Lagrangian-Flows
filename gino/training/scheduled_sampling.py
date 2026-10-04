@@ -2,7 +2,8 @@ import torch
 
 
 def scheduled_sampling_probability(epoch, max_probability=0.3, ramp_epochs=30):
-    return min(float(max_probability), max(0.0, (int(epoch) - 1) / max(float(ramp_epochs), 1) * float(max_probability)))
+    progress = max(0.0, (int(epoch) - 1) / max(float(ramp_epochs), 1))
+    return min(float(max_probability), progress * float(max_probability))
 
 
 def teacher_input_at(teacher_sequence, rollout_step):

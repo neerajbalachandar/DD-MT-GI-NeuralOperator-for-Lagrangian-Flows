@@ -36,7 +36,7 @@ def test_train_only_statistics_and_index_zero_is_one_step_target():
     data = _toy_data()
     stats = NormalizationStats.fit_train_sequences(data, [0], [3])
     np.testing.assert_allclose(stats.input_mean, [2.])
-    dataset = EvolutionDataset(data, [0], ["u_x"], [], max_particles=8, max_queries=8,
+    dataset = EvolutionDataset(data, [0, 1], ["u_x"], [], max_particles=8, max_queries=8,
                                rollout_horizon=2, normalization=stats)
     sample = dataset[0]
     np.testing.assert_allclose(sample["rollout_state_targets"][0], sample["one_step_target"])
@@ -57,3 +57,15 @@ def test_rollout_rejects_unverified_legacy_row_correspondence():
         assert "no verified physical particle correspondence" in str(error)
     else:
         raise AssertionError("unverified row ordering must not support rollout evaluation")
+
+
+def test_rollouts_stop_at_pair_ids_outside_the_active_split_and_field_holdout_is_masked():
+    data = _toy_data()
+    stats = NormalizationStats.fit_train_sequences(data, [0], [3])
+    dataset = EvolutionDataset(data, [0], ["u_x"], [], max_particles=8, max_queries=8,
+                               rollout_horizon=2, normalization=stats,
+                               field_target_exclude_ids=[0])
+    sample = dataset[0]
+    assert sample["rollout_state_targets"].shape[0] == 1
+    assert not sample["field_available"]
+    assert not sample["rollout_field_available"].any()

@@ -28,30 +28,59 @@ def _as_vec(value):
 
 
 def physical_field_values(coords, velocity, shape=(65, 65, 65)):
-    """Attach xyz-ordered velocity derivatives computed against physical axes."""
+    """Attach xyz derivatives, independent of the native HDF5 node row order."""
     coords, velocity = np.asarray(coords), np.asarray(velocity)
-    coord_grid = coords.reshape(*shape, 3)
-    velocity_grid = velocity.reshape(*shape, 3)
-    axes = tuple(coord_grid[tuple(0 if j != axis else slice(None) for j in range(3)) + (axis,)]
-                 for axis in range(3))
-    mesh = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1)
-    if not np.allclose(coord_grid, mesh, rtol=1e-5, atol=1e-7):
-        raise ValueError("Native nodes are not a rectilinear xyz grid in canonical row order")
+    if coords.ndim != 2 or coords.shape[1] != 3 or velocity.shape != coords.shape:
+        raise ValueError(f"Expected matching [N,3] coordinates and velocity, got {coords.shape}, {velocity.shape}")
+    expected_count = int(np.prod(shape)) if shape is not None else len(coords)
+    if len(coords) != expected_count or len(velocity) != expected_count:
+        raise ValueError(
+            f"Expected N_nodes=N_U=prod(shape)={expected_count}, "
+            f"got N_nodes={len(coords)}, N_U={len(velocity)}"
+        )
+    axes = tuple(np.unique(coords[:, axis]) for axis in range(3))
+    grid_shape = tuple(len(axis) for axis in axes)
+    if shape is not None and tuple(shape) != grid_shape:
+        raise ValueError(f"Native grid shape {grid_shape} does not match requested shape {tuple(shape)}")
+    if int(np.prod(grid_shape)) != len(coords):
+        raise ValueError("Native nodes do not form a complete rectilinear xyz grid")
+    indices = tuple(np.searchsorted(axes[axis], coords[:, axis]) for axis in range(3))
+    flat = np.ravel_multi_index(indices, grid_shape)
+    if len(np.unique(flat)) != len(coords):
+        raise ValueError("Native nodes contain duplicate or missing rectilinear grid locations")
+
+    velocity_grid = np.empty((*grid_shape, 3), dtype=np.result_type(velocity.dtype, np.float64))
+    velocity_grid[indices] = velocity
+    sample_rows = np.unique(np.asarray([0, len(coords) // 2, len(coords) - 1], dtype=np.int64))
+    sampled_indices = tuple(index[sample_rows] for index in indices)
+    if not np.array_equal(velocity_grid[sampled_indices], velocity[sample_rows]):
+        raise ValueError("Native coordinate-to-velocity row pairing failed round-trip checks")
+    sampled_grid_xyz = np.column_stack([axes[axis][indices[axis][sample_rows]] for axis in range(3)])
+    if not np.array_equal(sampled_grid_xyz, coords[sample_rows]):
+        raise ValueError("Native node coordinates failed grid-index round-trip checks")
     derivatives = np.gradient(velocity_grid, *axes, axis=(0, 1, 2), edge_order=2)
-    gradient_channels = np.concatenate([part.reshape(-1, 3) for part in derivatives], axis=1)
-    return np.concatenate((velocity_grid.reshape(-1, 3), gradient_channels), axis=1).astype(np.float32)
+    gradient_grid = np.concatenate(derivatives, axis=-1)
+    gradient_rows = gradient_grid[indices]
+    return np.concatenate((velocity, gradient_rows), axis=1).astype(np.float32)
 
 
-def read_task2_field(path):
-    """Read native HDF5 nodes/U and return canonical velocity plus gradients."""
+def read_task2_velocity(path):
+    """Read the simulation's nodal coordinates and stored velocity without interpolation."""
     with h5py.File(path, "r") as handle:
         coords = _as_xyz(handle["nodes"])
         velocity = _as_vec(handle["U"])
-    if velocity.shape[0] == 65 ** 3:
-        values = physical_field_values(coords, velocity)
-    else:
-        values = velocity
-    return coords, values
+    expected = 65 ** 3
+    if len(coords) != expected or len(velocity) != expected:
+        raise ValueError(
+            f"{path}: expected N_nodes=N_U={expected}, got {len(coords)} and {len(velocity)}"
+        )
+    return coords, velocity
+
+
+def read_task2_field(path):
+    """Read native velocity and attach finite-difference gradient channels."""
+    coords, velocity = read_task2_velocity(path)
+    return coords, physical_field_values(coords, velocity)
 
 
 def find_task2_file(root, case, frame):
@@ -77,3 +106,14 @@ def native_field_plane(coords, values, y_plane=0.0, component=0):
     field[iz, ix] = plane_values
     order = np.lexsort((plane_xyz[:, 0], plane_xyz[:, 2]))
     return x_axis.astype(np.float32), z_axis.astype(np.float32), field, plane_xyz[order].astype(np.float32), plane_values[order]
+
+
+def highest_energy_y_plane(coords, velocity):
+    """Choose a native y slice with the greatest mean kinetic-energy density."""
+    coords, velocity = np.asarray(coords), np.asarray(velocity)
+    if coords.shape != velocity.shape or coords.ndim != 2 or coords.shape[1] != 3:
+        raise ValueError("Expected matching [N,3] coordinates and velocities")
+    y_values = np.unique(coords[:, 1])
+    energy = np.asarray([np.mean(np.sum(velocity[np.isclose(coords[:, 1], y)] ** 2, axis=1))
+                         for y in y_values])
+    return float(y_values[int(np.argmax(energy))])

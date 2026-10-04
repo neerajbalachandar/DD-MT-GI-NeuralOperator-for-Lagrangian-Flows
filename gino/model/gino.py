@@ -74,7 +74,10 @@ class GINOSharedLatent(nn.Module):
             if self.use_global_conditioning:
                 cond = self.global_condition_mlp(global_params[b]).view(1, -1, 1, 1, 1)
                 grid = grid + cond
-            processed = self.fno(grid)
+            # cuFFT half-precision transforms require power-of-two dimensions;
+            # keep the spectral path in float32 for resolutions such as 24^3.
+            with torch.autocast(device_type=grid.device.type, enabled=False):
+                processed = self.fno(grid.float())
             flat = processed.squeeze(0).permute(1, 2, 3, 0).reshape(-1, processed.shape[1])
             grids.append(processed)
             flattened.append(flat)

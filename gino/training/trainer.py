@@ -22,10 +22,9 @@ def set_deterministic_seed(seed):
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    try:
-        torch.use_deterministic_algorithms(True, warn_only=True)
-    except AttributeError:
-        pass
+    # CUDA grid_sample backward has no deterministic implementation. Enabling
+    # deterministic algorithms only produces a warning for this model's path.
+    torch.use_deterministic_algorithms(False)
 
 
 def horizon_for_epoch(epoch, epochs, schedule):
@@ -42,7 +41,7 @@ class Trainer:
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.optimizer = torch.optim.AdamW(model.parameters(), lr=float(config["learning_rate"]), weight_decay=float(config["weight_decay"]))
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode="min", patience=5) if config.get("scheduler") == "plateau" else None
-        self.scaler = torch.amp.GradScaler("cuda", enabled=bool(config.get("mixed_precision")) and str(device).startswith("cuda"))
+        self.mixed_precision = bool(config.get("mixed_precision")) and str(device).startswith("cuda")
         self.history = []
 
     def _loader(self, dataset, shuffle):
@@ -58,13 +57,17 @@ class Trainer:
         ) if train and self.config.get("use_scheduled_sampling", False) else 0.0
         schedule = self.config.get("rollout_horizon_schedule", [1])
         active_horizon = min(int(self.config.get("rollout_horizon_max", max(schedule))), horizon_for_epoch(epoch, self.config.get("epochs", 1), schedule))
-        use_rollout = bool(train and self.config.get("use_rollout_loss", False))
+        # Evaluate the autoregressive objective on validation data as well, so
+        # checkpoint selection cannot silently optimize only the one-step task.
+        use_rollout = bool(self.config.get("use_rollout_loss", False))
         use_pushforward = bool(train and self.config.get("use_pushforward", False))
         do_sequence = (use_rollout or use_pushforward) and active_horizon > 1
         if train and self.config.get("use_scheduled_sampling", False) and not do_sequence:
             raise ValueError("Scheduled sampling requires a generated multi-step rollout or pushforward input.")
         if train:
             self.optimizer.zero_grad(set_to_none=True)
+        if train and len(loader) == 0:
+            raise ValueError("Training dataset is empty; no batches are available for an epoch.")
         for step, batch in enumerate(loader):
             batch["rollout_state_targets"] = batch["rollout_state_targets"][:, :active_horizon]
             batch = move_batch(batch, self.device)
@@ -75,10 +78,12 @@ class Trainer:
                 noise = random_walk_noise(batch["x"][..., flow_indices].unsqueeze(0).expand(active_horizon, -1, -1, -1),
                     self.config.get("gns_initial_std", 0.0), self.config.get("gns_walk_std", 0.0))
                 batch["x"], _ = perturb_flow_inputs(batch, noise_for_rollout_input(noise, 0), flow_indices)
-            with torch.set_grad_enabled(train), torch.autocast(device_type="cuda", enabled=self.scaler.is_enabled()):
+            with torch.set_grad_enabled(train), torch.autocast(device_type="cuda", enabled=self.mixed_precision):
                 pred, field = self.model(batch["input_geom"], self.latent_grid, batch["output_queries"], batch["x"], batch["global_params"], batch_dict=batch)
                 state_term = state_loss(pred[..., :batch["delta_target"].shape[-1]], batch["delta_target"])
-                field_term = field_loss(field, batch["field_target"], bool(self.config.get("use_relative_l2_field_loss", False)))
+                has_field_target = bool(batch.get("field_available", True))
+                field_term = (field_loss(field, batch["field_target"], bool(self.config.get("use_relative_l2_field_loss", False)))
+                              if has_field_target else None)
                 one_step = combined_loss(state_term if self.config.get("use_state_loss", True) else None,
                                       field_term if self.config.get("use_field_loss", True) else None,
                                       weights={"state": self.config.get("state_loss_weight", 1.0), "field": self.config.get("field_loss_weight", 1.0)},
@@ -98,7 +103,7 @@ class Trainer:
                                 nonlocal transition_index
                                 nxt = rebuild_next_batch_training(old, predicted, field_phys, self.normalization,
                                                                  pushforward=not differentiable)
-                                if self.config.get("use_scheduled_sampling", False) and flow_indices:
+                                if train and self.config.get("use_scheduled_sampling", False) and flow_indices:
                                     teacher = teacher_input_at(old.get("rollout_teacher_inputs"), transition_index)
                                     velocity = torch.stack([field_phys[..., 0], field_phys[..., 1], field_phys[..., 2]], dim=-1)
                                     gradient = field_phys[..., 3:12].reshape(*field_phys.shape[:-1], 3, 3)
@@ -128,12 +133,12 @@ class Trainer:
                 if pushforward_term is not None:
                     total = total + float(self.config.get("pushforward_weight", 1.0)) * pushforward_term
             if train:
-                self.scaler.scale(total / accum).backward()
-                if (step + 1) % accum == 0:
-                    self.scaler.unscale_(self.optimizer)
+                group_start = (step // accum) * accum
+                group_size = min(accum, len(loader) - group_start)
+                (total / group_size).backward()
+                if (step + 1) % accum == 0 or step + 1 == len(loader):
                     grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), float(self.config.get("grad_clip_norm", 1.0)))
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
+                    self.optimizer.step()
                     self.optimizer.zero_grad(set_to_none=True)
                 else:
                     grad_norm = None
@@ -141,18 +146,12 @@ class Trainer:
                 grad_norm = None
             totals["total_loss"].append(float(total.detach().cpu()))
             totals["state_loss"].append(float(state_term.detach().cpu()))
-            totals["field_loss"].append(float(field_term.detach().cpu()))
+            if field_term is not None:
+                totals["field_loss"].append(float(field_term.detach().cpu()))
             totals["rollout_loss"].append(float(rollout_term.detach().cpu()) if rollout_term is not None else 0.0)
             totals["pushforward_loss"].append(float(pushforward_term.detach().cpu()) if pushforward_term is not None else 0.0)
             if grad_norm is not None:
                 totals["gradient_norm"].append(float(grad_norm.detach().cpu()))
-        if train and len(loader) % accum:
-            self.scaler.unscale_(self.optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), float(self.config.get("grad_clip_norm", 1.0)))
-            totals["gradient_norm"].append(float(grad_norm.detach().cpu()))
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-            self.optimizer.zero_grad(set_to_none=True)
         return {key: float(np.mean(values)) if values else float("nan") for key, values in totals.items()}
 
     def fit(self, resolved_config, metadata):
@@ -192,7 +191,8 @@ class Trainer:
                 f"epoch {epoch:03d} | train {train_loss:.6g} | val {val_loss:.6g} | "
                 f"state {train_metrics['state_loss']:.6g} | field {train_metrics['field_loss']:.6g} | "
                 f"rollout {train_metrics['rollout_loss']:.6g} | pushforward {train_metrics['pushforward_loss']:.6g} | "
-                f"H {row['rollout_horizon']} | sampling {row['scheduled_sampling_probability']:.3f} | "
+                f"H {row['rollout_horizon']} (effective {train_metrics['effective_horizon']:.2f}) | "
+                f"sampling {row['scheduled_sampling_probability']:.3f} | "
                 f"noise ({row['noise_initial_std']:.3g}, {row['noise_walk_std']:.3g}) | "
                 f"grad {train_metrics['gradient_norm']:.6g} | lr {row['learning_rate']:.3g}"
             )

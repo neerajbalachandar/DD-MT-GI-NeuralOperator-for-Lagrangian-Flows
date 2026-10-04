@@ -19,6 +19,9 @@ class RolloutContext(Mapping):
     aoa_deg: float = 0.0
     freestream: tuple = (0.0, 0.0, 0.0)
     correspondence_source: str = "canonical_row_index"
+    physical_time_t: Optional[float] = None
+    physical_time_tp1: Optional[float] = None
+    task2_physical_time: Optional[float] = None
 
     @classmethod
     def from_mapping(cls, value, pair_id=None):
@@ -33,6 +36,9 @@ class RolloutContext(Mapping):
             aoa_deg=float(get("aoa_deg", 0.0)),
             freestream=tuple(float(x) for x in get("freestream", (0.0, 0.0, 0.0))),
             correspondence_source=str(get("correspondence_source", "canonical_row_index")),
+            physical_time_t=(None if get("physical_time_t") is None else float(get("physical_time_t"))),
+            physical_time_tp1=(None if get("physical_time_tp1") is None else float(get("physical_time_tp1"))),
+            task2_physical_time=(None if get("task2_physical_time") is None else float(get("task2_physical_time"))),
         )
 
     def advance_terminal(self):
@@ -43,6 +49,9 @@ class RolloutContext(Mapping):
             vtk_path=self.vtk_path_tp1, vtk_path_tp1=self.vtk_path_tp1,
             aoa_deg=self.aoa_deg, freestream=self.freestream,
             correspondence_source=self.correspondence_source,
+            physical_time_t=self.physical_time_tp1,
+            physical_time_tp1=self.physical_time_tp1,
+            task2_physical_time=None,
         )
 
     def __getitem__(self, key):
@@ -54,7 +63,8 @@ class RolloutContext(Mapping):
     def __iter__(self) -> Iterator[str]:
         return iter(("case", "pair_id", "frame_t", "frame_tp1", "phase_t", "phase_tp1",
                      "phase_delta", "dt", "vtk_path", "vtk_path_tp1", "aoa_deg",
-                     "freestream", "correspondence_source"))
+                     "freestream", "correspondence_source", "physical_time_t",
+                     "physical_time_tp1", "task2_physical_time"))
 
     def __len__(self):
-        return 13
+        return 16

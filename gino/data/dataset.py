@@ -5,6 +5,11 @@ import torch
 from torch.utils.data import Dataset
 from .context import RolloutContext
 
+SUPPORTED_ROLLOUT_CORRESPONDENCE = frozenset({
+    "matched_source_particle_ids",
+    "inferred_advected_position_tracking",
+})
+
 
 def load_processed_dataset(path):
     with np.load(Path(path), allow_pickle=True) as archive:
@@ -41,7 +46,8 @@ def assert_no_sequence_leakage(data, splits):
 class EvolutionDataset(Dataset):
     def __init__(self, data, pair_ids, input_features, global_features, max_particles=4096,
                  max_queries=2048, rollout_horizon=16, normalization=None, residual_channels=None,
-                 include_teacher_inputs=False, require_verified_correspondence=False):
+                 include_teacher_inputs=False, require_verified_correspondence=False,
+                 field_target_exclude_ids=None):
         self.data = data
         self.pair_ids = np.asarray(pair_ids, dtype=np.int64)
         self.features = [str(x) for x in input_features]
@@ -54,6 +60,9 @@ class EvolutionDataset(Dataset):
         self.residual_channels = residual_channels
         self.include_teacher_inputs = bool(include_teacher_inputs)
         self.require_verified_correspondence = bool(require_verified_correspondence)
+        self.field_target_exclude_ids = set() if field_target_exclude_ids is None else {
+            int(value) for value in field_target_exclude_ids
+        }
         self.coord_min = np.asarray(data["coord_min"], dtype=np.float32).reshape(3) if normalization is None else np.asarray(normalization.coord_min).reshape(3)
         self.coord_span = np.maximum(np.asarray(data["coord_span"], dtype=np.float32).reshape(3), 1e-8) if normalization is None else np.maximum(np.asarray(normalization.coord_span).reshape(3), 1e-8)
         self.input_mean = (np.asarray(data["in_mean"], dtype=np.float32).reshape(-1)[self.feature_indices]
@@ -61,6 +70,7 @@ class EvolutionDataset(Dataset):
         self.input_std = (np.maximum(np.asarray(data["in_std"], dtype=np.float32).reshape(-1)[self.feature_indices], 1e-8)
                           if normalization is None else np.maximum(np.asarray(normalization.input_std).reshape(-1), 1e-8))
         ranges = list(data["pair_ranges"])
+        self.allowed_pair_ids = set(self.pair_ids.tolist())
         self.next_pair = {}
         starts = {(str(row[0]), str(row[1])): i for i, row in enumerate(ranges)}
         for i, row in enumerate(ranges):
@@ -92,10 +102,11 @@ class EvolutionDataset(Dataset):
         if isinstance(context, np.ndarray):
             context = context.item()
         correspondence = str(context.get("correspondence_source", "legacy_row_index_assumption_unverified"))
-        if self.require_verified_correspondence and correspondence != "matched_source_particle_ids":
+        if self.require_verified_correspondence and correspondence not in SUPPORTED_ROLLOUT_CORRESPONDENCE:
             raise ValueError(
-                f"Pair {pid} has no verified physical particle correspondence; "
-                f"recorded source is {correspondence!r}. Reprocess with persistent source particle IDs."
+                f"Pair {pid} has no verified physical particle correspondence for rollout; "
+                f"recorded source is {correspondence!r}. Reprocess the data with persistent source IDs "
+                "or advected-position tracking enabled."
             )
 
         future_pair_ids = []
@@ -103,7 +114,8 @@ class EvolutionDataset(Dataset):
         rollout_time_indices = []
         next_id = self.next_pair.get(pid)
         expected_frame = str(row[2])
-        while next_id is not None and len(future_pair_ids) < self.rollout_horizon - 1:
+        while (next_id is not None and next_id in self.allowed_pair_ids
+               and len(future_pair_ids) < self.rollout_horizon - 1):
             next_row = self.data["pair_ranges"][next_id]
             if str(next_row[0]) != str(row[0]) or str(next_row[1]) != expected_frame:
                 raise ValueError(f"Broken adjacent pair chain after pair {pid}: expected frame {expected_frame}")
@@ -118,9 +130,19 @@ class EvolutionDataset(Dataset):
         if not np.array_equal(current_ids, next_ids):
             raise ValueError(f"Pair {pid} preprocessing did not align current/next particle identities")
         future_id_sets = [set(ids.tolist()) for ids in future_id_sets]
-        common_ids = [identity for identity in current_ids
-                      if all(identity in available for available in future_id_sets)]
-        common_ids = common_ids[:self.max_particles]
+        while True:
+            common_ids = [identity for identity in current_ids
+                          if all(identity in available for available in future_id_sets)]
+            if common_ids or not future_id_sets:
+                break
+            # End the rollout before correspondence disappears for every particle.
+            future_id_sets.pop()
+            future_pair_ids.pop()
+            rollout_time_indices.pop()
+        if len(common_ids) > self.max_particles:
+            rng = np.random.default_rng(pid)
+            selected = np.sort(rng.choice(len(common_ids), size=self.max_particles, replace=False))
+            common_ids = [common_ids[i] for i in selected]
         if not common_ids:
             raise ValueError(f"Pair {pid} has no particle identities valid across the requested rollout")
         current_lookup = {identity: i for i, identity in enumerate(current_ids.tolist())}
@@ -158,17 +180,33 @@ class EvolutionDataset(Dataset):
         residuals = np.asarray(self.data.get("targets_residual", self.data["targets_delta"])[selected_rows], dtype=np.float32)
         residual_mean = np.asarray(self.data.get("residual_mean", self.data["out_mean"]), dtype=np.float32).reshape(-1) if self.normalization is None else self.normalization.residual_mean
         residual_std = np.maximum(np.asarray(self.data.get("residual_std", self.data["out_std"]), dtype=np.float32).reshape(-1), 1e-8) if self.normalization is None else np.maximum(self.normalization.residual_std, 1e-8)
-        residuals = residuals[:, :int(self.residual_channels or len(residual_mean))]
-        qmask = np.flatnonzero(np.asarray(self.data["field_query_mask"][pid], dtype=bool))
+        n_residual_channels = int(self.residual_channels or len(residual_mean))
+        if (residuals.shape[1] < n_residual_channels
+                or len(residual_mean) < n_residual_channels
+                or len(residual_std) < n_residual_channels):
+            raise ValueError(
+                f"Pair {pid} has {residuals.shape[1]} residual target channels, "
+                f"but {n_residual_channels} are required by the model and normalization."
+            )
+        residuals = residuals[:, :n_residual_channels]
+        residual_mean = residual_mean[:n_residual_channels]
+        residual_std = residual_std[:n_residual_channels]
+        qmask = (np.zeros(0, dtype=np.int64) if pid in self.field_target_exclude_ids else
+                 np.flatnonzero(np.asarray(self.data["field_query_mask"][pid], dtype=bool)))
         if len(qmask) > self.max_queries:
             qmask = qmask[np.linspace(0, len(qmask)-1, self.max_queries, dtype=np.int64)]
+        field_available = bool(len(qmask))
         coords = np.asarray(self.data["query_coords"][pid, qmask], dtype=np.float32)
         queries = np.clip((coords - coord_min) / coord_span, 0.0, 1.0)
         fmean = np.asarray(self.data["field_mean"], dtype=np.float32).reshape(-1) if self.normalization is None else self.normalization.field_mean
         fstd = np.maximum(np.asarray(self.data["field_std"], dtype=np.float32).reshape(-1), 1e-8) if self.normalization is None else np.maximum(self.normalization.field_std, 1e-8)
         field = (np.asarray(self.data["targets_velocity_field"][pid, qmask], dtype=np.float32) - fmean) / fstd
+        if not field_available:
+            coords, queries = xyz[:1].copy(), geom[:1].copy()
+            field = np.zeros((1, len(fmean)), dtype=np.float32)
         future = []
-        future_fields, future_queries, future_contexts, future_teacher_inputs = [], [], [], []
+        future_fields, future_queries, future_query_xyz, future_field_available = [], [], [], []
+        future_contexts, future_teacher_inputs = [], []
         for future_pid, row_indices in zip(future_pair_ids, future_indices):
             next_id = future_pid
             next_row = self.data["pair_ranges"][next_id]
@@ -178,12 +216,22 @@ class EvolutionDataset(Dataset):
             if self.include_teacher_inputs:
                 next_raw = np.asarray(self.data["inputs_t"][ns + row_indices], dtype=np.float32)[:, self.feature_indices]
                 future_teacher_inputs.append((next_raw - self.input_mean) / self.input_std)
-            future_mask = np.flatnonzero(np.asarray(self.data["field_query_mask"][next_id], dtype=bool))
+            future_mask = (np.zeros(0, dtype=np.int64) if int(next_id) in self.field_target_exclude_ids else
+                           np.flatnonzero(np.asarray(self.data["field_query_mask"][next_id], dtype=bool)))
             if len(future_mask) > self.max_queries:
                 future_mask = future_mask[np.linspace(0, len(future_mask) - 1, self.max_queries, dtype=np.int64)]
-            future_xyz = np.asarray(self.data["query_coords"][next_id, future_mask], dtype=np.float32)
-            future_queries.append(np.clip((future_xyz - coord_min) / coord_span, 0.0, 1.0))
-            future_fields.append((np.asarray(self.data["targets_velocity_field"][next_id, future_mask], dtype=np.float32) - fmean) / fstd)
+            has_future_field = bool(len(future_mask))
+            if has_future_field:
+                future_xyz = np.asarray(self.data["query_coords"][next_id, future_mask], dtype=np.float32)
+                future_field = (np.asarray(self.data["targets_velocity_field"][next_id, future_mask], dtype=np.float32) - fmean) / fstd
+                future_queries.append(np.clip((future_xyz - coord_min) / coord_span, 0.0, 1.0))
+            else:
+                future_xyz = coords.copy()
+                future_field = np.zeros_like(field)
+                future_queries.append(queries.copy())
+            future_query_xyz.append(future_xyz)
+            future_field_available.append(has_future_field)
+            future_fields.append(future_field)
             next_context = self.data.get("pair_contexts", [])[next_id]
             if isinstance(next_context, np.ndarray):
                 next_context = next_context.item()
@@ -194,28 +242,35 @@ class EvolutionDataset(Dataset):
             q_common = min([len(queries)] + [len(x) for x in future_queries])
             queries, coords, field = queries[:q_common], coords[:q_common], field[:q_common]
             future_queries = np.stack([x[:q_common] for x in future_queries], axis=0)
+            future_query_xyz = np.stack([x[:q_common] for x in future_query_xyz], axis=0)
             future_fields = np.stack([x[:q_common] for x in future_fields], axis=0)
             if self.include_teacher_inputs:
                 future_teacher_inputs = np.stack(future_teacher_inputs, axis=0)
             rollout_phases = np.asarray([context.get("phase_tp1", context.get("phase_t", 0.0))] +
                                         [item.get("phase_tp1", item.get("phase_t", 0.0)) for item in future_contexts],
                                         dtype=np.float32)
+            rollout_field_available = np.asarray([field_available] + future_field_available, dtype=bool)
         else:
             future = np.zeros((0, count, 7), dtype=np.float32)
             rollout_states = next_state[None, :, :7]
             future_queries = np.zeros((0, len(queries), 3), dtype=np.float32)
+            future_query_xyz = np.zeros((0, len(queries), 3), dtype=np.float32)
             future_fields = np.zeros((0, len(queries), len(fmean)), dtype=np.float32)
             if self.include_teacher_inputs:
                 future_teacher_inputs = np.zeros((0, count, len(self.features)), dtype=np.float32)
             rollout_phases = np.asarray([context.get("phase_tp1", context.get("phase_t", 0.0))], dtype=np.float32)
+            rollout_field_available = np.asarray([field_available], dtype=bool)
         rollout_field_targets = np.concatenate((field[None], future_fields), axis=0)
         return {"pair_id": pid, "input_geom": geom, "output_queries": queries, "x": x,
                 "global_params": np.asarray(global_values, dtype=np.float32), "state_phys": full[:, state_idx],
                 "delta_target": (residuals - residual_mean) / residual_std,
-                "field_target": field, "dt": float(context.get("dt", 0.0034)),
+                "field_target": field, "field_available": field_available,
+                "dt": float(context.get("dt", 0.0034)),
                 "next_state_phys": next_state[:, :7], "one_step_target": next_state[:, :7],
                 "rollout_state_targets": rollout_states,
-                "rollout_queries": future_queries, "rollout_field_targets": rollout_field_targets,
+                "rollout_queries": future_queries, "rollout_query_xyz_phys": future_query_xyz,
+                "rollout_field_targets": rollout_field_targets,
+                "rollout_field_available": rollout_field_available,
                 "rollout_contexts": future_contexts,
                 "rollout_time_indices": np.arange(1, len(rollout_states) + 1, dtype=np.int64),
                 "rollout_phases": rollout_phases,
@@ -229,14 +284,21 @@ class EvolutionDataset(Dataset):
                 "phase_delta": float(context.get("phase_delta", 0.0)),
                 "particle_ids": np.asarray(common_ids, dtype=str),
                 "particle_correspondence": correspondence,
-                "rollout_teacher_inputs": (np.stack(future_teacher_inputs, axis=0) if self.include_teacher_inputs and future_teacher_inputs else
+                "rollout_teacher_inputs": (np.stack(future_teacher_inputs, axis=0) if self.include_teacher_inputs and len(future_teacher_inputs) > 0 else
                                            np.zeros((0, count, len(self.features)), dtype=np.float32) if self.include_teacher_inputs else None)}
 
 
 
 def collate_one(items):
     item = items[0]
-    batch = {k: (torch.as_tensor(v).unsqueeze(0) if isinstance(v, np.ndarray) else v)
-             for k, v in item.items()}
+    batch = {}
+    for key, value in item.items():
+        if isinstance(value, np.ndarray):
+            if value.dtype.kind in "biufc":
+                batch[key] = torch.as_tensor(value).unsqueeze(0)
+            else:
+                batch[key] = value.tolist()
+        else:
+            batch[key] = value
     batch["pair_id"] = torch.tensor([int(item["pair_id"])], dtype=torch.long)
     return batch
