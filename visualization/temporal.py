@@ -86,6 +86,50 @@ def plot_temporal_errors(one_step, rollout, output_dir):
     plot_rollout_error_by_step(rollout, output_dir / "rollout_loss_vs_step.png")
 
 
+def plot_rmse_vs_phase_grid(records, output_path, phase_key="phase"):
+    """Plot one-step state RMSE against phase for low- and high-AoA cases."""
+    import re
+
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+    cases = sorted({str(row.get("case", "unknown")) for row in records})
+    selected = []
+    for prefix in ("21deg", "32deg"):
+        match = next((case for case in cases if case.startswith(prefix)), None)
+        selected.append(match)
+    if any(case is None for case in selected) and cases:
+        def angle(case):
+            match = re.match(r"(\d+(?:\.\d+)?)deg", case)
+            return float(match.group(1)) if match else float("inf")
+        ordered = sorted(cases, key=angle)
+        selected = [ordered[0], ordered[-1]]
+
+    metrics = ("position_rmse", "circulation_rmse", "sigma_rmse")
+    fig, axes = plt.subplots(2, 3, figsize=(13, 7), squeeze=False, constrained_layout=True)
+    for row_index, case in enumerate(selected):
+        case_rows = [row for row in records if str(row.get("case", "unknown")) == case]
+        for column, metric in enumerate(metrics):
+            axis = axes[row_index, column]
+            valid = [(float(row[phase_key]), float(row[metric])) for row in case_rows
+                     if row.get(phase_key) is not None and row.get(metric) is not None
+                     and np.isfinite(row[phase_key]) and np.isfinite(row[metric])]
+            if valid:
+                valid.sort(key=lambda item: item[0])
+                axis.plot([item[0] for item in valid], [item[1] for item in valid],
+                          marker="o", markersize=2.5, linewidth=1.2,
+                          label=case if row_index == 0 else None)
+            axis.set_title(metric.replace("_", " "))
+            axis.set_xlabel("Normalized phase")
+            axis.set_ylabel("RMSE")
+            axis.grid(alpha=0.3)
+            if row_index == 0 and valid:
+                axis.legend(frameon=False)
+        axes[row_index, 0].text(0.02, 0.96, case or "No matching case", transform=axes[row_index, 0].transAxes,
+                                va="top", fontsize=9)
+    fig.savefig(output_path / "rmse_vs_phase_grid.png", dpi=160, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_rollout_snapshots(snapshots, output_path, max_snapshots=6, title=None):
     """Plot paired true/predicted x-z particle snapshots, colored by |Gamma|/sigma^3."""
     if not snapshots:

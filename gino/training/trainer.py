@@ -1,7 +1,9 @@
 import json
+import os
 import platform
 import random
 from pathlib import Path
+import time
 
 import numpy as np
 import torch
@@ -32,8 +34,16 @@ def horizon_for_epoch(epoch, epochs, schedule):
     return int(schedule[index])
 
 
+def _worker_init(worker_id):
+    for variable in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ[variable] = "1"
+
+
 class Trainer:
     def __init__(self, model, latent_grid, train_dataset, val_dataset, normalization, config, run_dir, device):
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
         self.model, self.latent_grid = model, latent_grid
         self.train_dataset, self.val_dataset = train_dataset, val_dataset
         self.normalization, self.config = normalization, config
@@ -45,16 +55,23 @@ class Trainer:
         self.history = []
 
     def _loader(self, dataset, shuffle):
-        return DataLoader(dataset, batch_size=1, shuffle=shuffle, num_workers=0, collate_fn=dataset_collate)
+        num_workers = int(self.config.get("dataloader_num_workers", 0))
+        kwargs = dict(batch_size=1, shuffle=shuffle, collate_fn=dataset_collate,
+                      num_workers=num_workers, pin_memory=True)
+        if num_workers > 0:
+            kwargs["persistent_workers"] = True
+            kwargs["worker_init_fn"] = _worker_init
+        return DataLoader(dataset, **kwargs)
 
     def _epoch(self, loader, train, epoch=1):
         self.model.train(train)
         totals = {k: [] for k in ("total_loss", "state_loss", "field_loss", "rollout_loss", "pushforward_loss", "gradient_norm", "effective_horizon")}
         accum = max(int(self.config.get("gradient_accumulation_steps", 1)), 1)
         max_probability = float(self.config.get("scheduled_sampling_max_probability", 0.3))
+        use_scheduled_sampling = bool(self.config.get("use_scheduled_sampling", False))
         sample_probability = scheduled_sampling_probability(
             epoch, max_probability, self.config.get("scheduled_sampling_ramp_epochs", 30)
-        ) if train and self.config.get("use_scheduled_sampling", False) else 0.0
+        ) if train and use_scheduled_sampling else 0.0
         schedule = self.config.get("rollout_horizon_schedule", [1])
         active_horizon = min(int(self.config.get("rollout_horizon_max", max(schedule))), horizon_for_epoch(epoch, self.config.get("epochs", 1), schedule))
         # Evaluate the autoregressive objective on validation data as well, so
@@ -62,15 +79,33 @@ class Trainer:
         use_rollout = bool(self.config.get("use_rollout_loss", False))
         use_pushforward = bool(train and self.config.get("use_pushforward", False))
         do_sequence = (use_rollout or use_pushforward) and active_horizon > 1
-        if train and self.config.get("use_scheduled_sampling", False) and not do_sequence:
-            raise ValueError("Scheduled sampling requires a generated multi-step rollout or pushforward input.")
+        if train and use_scheduled_sampling and sample_probability > 0.0 and not do_sequence:
+            raise ValueError(
+                "Scheduled sampling is active at probability "
+                f"{sample_probability:.3f} but the current epoch has "
+                f"active_horizon={active_horizon} (<2). Either lower "
+                "training.rollout_horizon_schedule so the first epoch is >= 2, "
+                "or set scheduled_sampling_ramp_epochs so probability stays 0 "
+                "until the horizon is > 1."
+            )
         if train:
             self.optimizer.zero_grad(set_to_none=True)
         if train and len(loader) == 0:
             raise ValueError("Training dataset is empty; no batches are available for an epoch.")
+        t_data = t_fwd = t_bwd = 0.0
+        cuda_timing = torch.device(self.device).type == "cuda"
+        fwd_events, bwd_events = [], []
+        prev = time.perf_counter()
         for step, batch in enumerate(loader):
+            now = time.perf_counter()
+            t_data += now - prev
             batch["rollout_state_targets"] = batch["rollout_state_targets"][:, :active_horizon]
             batch = move_batch(batch, self.device)
+            if cuda_timing:
+                fwd_start = torch.cuda.Event(enable_timing=True)
+                fwd_start.record()
+            else:
+                fwd_start = time.perf_counter()
             flow_indices = [i for i, name in enumerate(batch["feature_names"]) if name in ("u_x", "u_y", "u_z") or name.startswith("gradU_")]
             use_noise = bool(train and self.config.get("use_gns_noise", False))
             noise = None
@@ -78,7 +113,8 @@ class Trainer:
                 noise = random_walk_noise(batch["x"][..., flow_indices].unsqueeze(0).expand(active_horizon, -1, -1, -1),
                     self.config.get("gns_initial_std", 0.0), self.config.get("gns_walk_std", 0.0))
                 batch["x"], _ = perturb_flow_inputs(batch, noise_for_rollout_input(noise, 0), flow_indices)
-            with torch.set_grad_enabled(train), torch.autocast(device_type="cuda", enabled=self.mixed_precision):
+            with torch.set_grad_enabled(train), torch.autocast(
+                    device_type="cuda", enabled=self.mixed_precision, dtype=torch.bfloat16):
                 pred, field = self.model(batch["input_geom"], self.latent_grid, batch["output_queries"], batch["x"], batch["global_params"], batch_dict=batch)
                 state_term = state_loss(pred[..., :batch["delta_target"].shape[-1]], batch["delta_target"])
                 has_field_target = bool(batch.get("field_available", True))
@@ -132,6 +168,15 @@ class Trainer:
                     total = total + float(self.config.get("rollout_weight", 0.0)) * rollout_term
                 if pushforward_term is not None:
                     total = total + float(self.config.get("pushforward_weight", 1.0)) * pushforward_term
+            if cuda_timing:
+                fwd_end = torch.cuda.Event(enable_timing=True)
+                fwd_end.record()
+                fwd_events.append((fwd_start, fwd_end))
+                bwd_start = torch.cuda.Event(enable_timing=True)
+                bwd_start.record()
+            else:
+                t_fwd += time.perf_counter() - fwd_start
+                bwd_start = time.perf_counter()
             if train:
                 group_start = (step // accum) * accum
                 group_size = min(accum, len(loader) - group_start)
@@ -144,32 +189,73 @@ class Trainer:
                     grad_norm = None
             else:
                 grad_norm = None
-            totals["total_loss"].append(float(total.detach().cpu()))
-            totals["state_loss"].append(float(state_term.detach().cpu()))
+            totals["total_loss"].append(total.detach())
+            totals["state_loss"].append(state_term.detach())
             if field_term is not None:
-                totals["field_loss"].append(float(field_term.detach().cpu()))
-            totals["rollout_loss"].append(float(rollout_term.detach().cpu()) if rollout_term is not None else 0.0)
-            totals["pushforward_loss"].append(float(pushforward_term.detach().cpu()) if pushforward_term is not None else 0.0)
+                totals["field_loss"].append(field_term.detach())
+            totals["rollout_loss"].append(rollout_term.detach() if rollout_term is not None else total.detach().new_zeros(()))
+            totals["pushforward_loss"].append(pushforward_term.detach() if pushforward_term is not None else total.detach().new_zeros(()))
             if grad_norm is not None:
-                totals["gradient_norm"].append(float(grad_norm.detach().cpu()))
-        return {key: float(np.mean(values)) if values else float("nan") for key, values in totals.items()}
+                totals["gradient_norm"].append(grad_norm.detach())
+            if cuda_timing and train:
+                bwd_end = torch.cuda.Event(enable_timing=True)
+                bwd_end.record()
+                bwd_events.append((bwd_start, bwd_end))
+            elif not cuda_timing:
+                t_bwd += time.perf_counter() - bwd_start
+            prev = time.perf_counter()
+        if cuda_timing and (fwd_events or bwd_events):
+            torch.cuda.synchronize(self.device)
+            t_fwd = sum(start.elapsed_time(end) for start, end in fwd_events) / 1000.0
+            t_bwd = sum(start.elapsed_time(end) for start, end in bwd_events) / 1000.0
+        metric_means = []
+        for values in totals.values():
+            if not values:
+                metric_means.append(torch.tensor(float("nan"), device=self.device))
+            else:
+                tensors = [value if torch.is_tensor(value) else torch.as_tensor(value, device=self.device)
+                           for value in values]
+                metric_means.append(torch.stack(tensors).mean())
+        values = torch.stack(metric_means).detach().cpu().tolist()
+        metrics = dict(zip(totals, map(float, values)))
+        metrics.update(data_time=t_data, fwd_time=t_fwd, bwd_time=t_bwd)
+        return metrics
 
     def fit(self, resolved_config, metadata):
         set_deterministic_seed(int(resolved_config["seed"]))
+        print(f"[loader] num_workers={int(self.config.get('dataloader_num_workers', 0))}")
         (self.run_dir / "config.json").write_text(json.dumps(resolved_config, indent=2, default=str))
         env = {"python": platform.python_version(), "torch": torch.__version__, "numpy": np.__version__, "device": str(self.device)}
         (self.run_dir / "environment.json").write_text(json.dumps(env, indent=2))
         best, stale = float("inf"), 0
+        previous_val_metrics = None
+        validation_interval = max(int(self.config.get("validation_every_n_epochs", 1)), 1)
         train_loader, val_loader = self._loader(self.train_dataset, True), self._loader(self.val_dataset, False)
-        for epoch in range(1, int(self.config["epochs"]) + 1):
+        total_epochs = int(self.config["epochs"])
+        for epoch in range(1, total_epochs + 1):
             train_metrics = self._epoch(train_loader, True, epoch)
-            val_metrics = self._epoch(val_loader, False, epoch) if len(val_loader.dataset) else train_metrics
+            train_loss = train_metrics["total_loss"]
+            near_best = (np.isfinite(best) and np.isfinite(train_loss)
+                         and abs(best - train_loss) <= 0.05 * max(abs(train_loss), 1e-8))
+            should_validate = (previous_val_metrics is None or epoch % validation_interval == 0
+                               or epoch == total_epochs or near_best)
+            did_validate = bool(len(val_loader.dataset) and should_validate)
+            if did_validate:
+                val_metrics = self._epoch(val_loader, False, epoch)
+                previous_val_metrics = val_metrics
+            elif len(val_loader.dataset):
+                val_metrics = previous_val_metrics
+                next_validation = min(((epoch // validation_interval) + 1) * validation_interval,
+                                      total_epochs)
+                print(f"epoch {epoch:03d} | val skipped (will validate at epoch {next_validation:03d})")
+            else:
+                val_metrics = train_metrics
             train_loss, val_loss = train_metrics["total_loss"], val_metrics["total_loss"]
             schedule = self.config.get("rollout_horizon_schedule", [1])
             active_horizon = min(int(self.config.get("rollout_horizon_max", max(schedule))),
                                  horizon_for_epoch(epoch, self.config["epochs"], schedule))
             max_probability = float(self.config.get("scheduled_sampling_max_probability", 0.3))
-            if self.scheduler:
+            if self.scheduler and did_validate:
                 self.scheduler.step(val_loss)
             row = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss,
                    **{f"train_{k}": v for k, v in train_metrics.items()},
@@ -194,7 +280,9 @@ class Trainer:
                 f"H {row['rollout_horizon']} (effective {train_metrics['effective_horizon']:.2f}) | "
                 f"sampling {row['scheduled_sampling_probability']:.3f} | "
                 f"noise ({row['noise_initial_std']:.3g}, {row['noise_walk_std']:.3g}) | "
-                f"grad {train_metrics['gradient_norm']:.6g} | lr {row['learning_rate']:.3g}"
+                f"grad {train_metrics['gradient_norm']:.6g} | lr {row['learning_rate']:.3g} | "
+                f"data {train_metrics['data_time']:.1f}s fwd {train_metrics['fwd_time']:.1f}s "
+                f"bwd {train_metrics['bwd_time']:.1f}s"
             )
             (self.run_dir / "history.json").write_text(json.dumps(self.history, indent=2))
             if val_loss < best:
@@ -214,14 +302,15 @@ class Trainer:
                             "mechanisms": {k: self.config.get(k) for k in ("use_rollout_loss", "use_scheduled_sampling", "use_gns_noise", "use_pushforward", "use_homoscedastic_weighting")},
                             "history": self.history}, self.run_dir / "best_model.pt")
             else:
-                stale += 1
+                if did_validate:
+                    stale += 1
             if stale >= int(self.config.get("early_stopping_patience", 20)):
                 break
         return self.history
 
 
 def move_batch(batch, device):
-    return {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
+    return {k: (v.to(device, non_blocking=True) if torch.is_tensor(v) else v) for k, v in batch.items()}
 
 
 def dataset_collate(items):

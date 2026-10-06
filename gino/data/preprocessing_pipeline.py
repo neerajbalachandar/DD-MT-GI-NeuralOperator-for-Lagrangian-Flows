@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 import json
+import gc
+import hashlib
 import os
 import re
 import xml.etree.ElementTree as ET
@@ -12,6 +14,37 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import h5py
 import numpy as np
+
+PREPROC_MAX_RSS_GB = float(os.environ.get("PREPROC_MAX_RSS_GB", "0"))
+ROLLOUT_MEMORY_CAP_GB = float(os.environ.get("ROLLOUT_MEMORY_CAP_GB", "2.0"))
+
+
+def _to_s32(values) -> np.ndarray:
+    """Encode particle identities into fixed-width UTF-8 byte IDs."""
+    arr = np.asarray(values).reshape(-1)
+    if arr.dtype.kind in ("O", "U"):
+        return np.char.encode(arr.astype(str), "utf-8").astype("S32")
+    if arr.dtype.kind == "S":
+        return arr.astype("S32")
+    return arr.astype("S32")
+
+
+def _rss_gb() -> float:
+    """Return this process's resident memory use in GB."""
+    try:
+        import psutil
+
+        return psutil.Process(os.getpid()).memory_info().rss / 1e9
+    except ImportError:
+        import resource
+
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6
+
+
+def _check_rss_limit(case: str) -> None:
+    if PREPROC_MAX_RSS_GB > 0 and _rss_gb() > PREPROC_MAX_RSS_GB:
+        raise MemoryError(f"Preprocessing RSS exceeded PREPROC_MAX_RSS_GB after case={case}")
+
 
 try:
     from scipy.spatial import cKDTree
@@ -45,8 +78,8 @@ AUTO_ASSIGN_SPLITS_FROM_CASE_NAMES = True
 
 TASK1_CASE_RE = re.compile(r"^(?P<aoa>\d+(?:\.\d+)?)deg_static_airfoil_(?P<speed>\d+(?:\.\d+)?)u_(?P<particles>\d+)p$")
 
-TRAIN_AOA_DEGREES = list(range(10, 31, 2))
-VAL_AOA_DEGREES = []
+VAL_AOA_DEGREES = [18, 24]
+TRAIN_AOA_DEGREES = [aoa for aoa in range(10, 31, 2) if aoa not in VAL_AOA_DEGREES]
 TEST_AOA_DEGREES = [11, 15, 21, 25, 27, 32]
 IGNORE_AOA_DEGREES = [19]
 TEST_NORMAL_AOA_DEGREES = [27]
@@ -161,7 +194,7 @@ GEOM_MIN_NONZERO_FRAC = 1e-4
 GEOM_MIN_NEAR_FRAC = 1e-5
 
 # This optional protocol is intended to reserve some frames from each training case for an internal validation set. It is separate from the case-level validation split defined above.
-USE_DUAL_SPLIT_PROTOCOL = True
+USE_DUAL_SPLIT_PROTOCOL = False
 VAL_ID_FRACTION_FROM_TRAIN_CASES = 0.2
 VAL_ID_MIN_FRAMES_PER_TRAIN_CASE = 8
 VAL_ID_FRAME_STRIDE = 5
@@ -298,8 +331,8 @@ def _read_particle_ids(path: Path, count: int, source: str) -> np.ndarray:
                     found = value
         handle.visititems(visit)
     if found is None:
-        return np.asarray([f"{source}:row:{i}" for i in range(count)], dtype=object)
-    return np.asarray([f"{source}:id:{value}" for value in found], dtype=object)
+        return _to_s32([f"{source}:row:{i}" for i in range(count)])
+    return _to_s32([f"{source}:id:{value}" for value in found])
 
 
 def match_particle_identities(ids_t: np.ndarray, ids_tp1: np.ndarray):
@@ -308,9 +341,11 @@ def match_particle_identities(ids_t: np.ndarray, ids_tp1: np.ndarray):
     ids_tp1 = np.asarray(ids_tp1).reshape(-1)
     if len(np.unique(ids_t)) != len(ids_t) or len(np.unique(ids_tp1)) != len(ids_tp1):
         raise ValueError("Particle identity arrays must be unique within each frame")
-    next_lookup = {str(identity): j for j, identity in enumerate(ids_tp1)}
-    indices_t = np.asarray([j for j, identity in enumerate(ids_t) if str(identity) in next_lookup], dtype=np.int64)
-    indices_tp1 = np.asarray([next_lookup[str(ids_t[j])] for j in indices_t], dtype=np.int64)
+    ids_t_text = np.char.decode(ids_t, "utf-8") if ids_t.dtype.kind == "S" else ids_t
+    ids_tp1_text = np.char.decode(ids_tp1, "utf-8") if ids_tp1.dtype.kind == "S" else ids_tp1
+    next_lookup = {identity: j for j, identity in enumerate(ids_tp1_text)}
+    indices_t = np.asarray([j for j, identity in enumerate(ids_t_text) if identity in next_lookup], dtype=np.int64)
+    indices_tp1 = np.asarray([next_lookup[ids_t_text[j]] for j in indices_t], dtype=np.int64)
     identities = ids_t[indices_t]
     return indices_t, indices_tp1, identities
 
@@ -334,42 +369,40 @@ def _assign_advected_position_tracks(frames: List[Dict[str, object]], case: str)
 
     next_track_id = 0
     for frame in frames:
-        ids = np.asarray(frame["particle_ids"], dtype=object).copy()
+        ids = _to_s32(frame["particle_ids"]).copy()
         static_mask = np.asarray(frame["static_mask"], dtype=bool)
         xyz = np.stack([frame["state"][name] for name in ("x", "y", "z")], axis=1)
-        native_ids = np.asarray([":id:" in str(value) for value in ids], dtype=bool)
+        decoded_ids = np.char.decode(ids, "utf-8")
+        native_ids = np.char.find(decoded_ids, ":id:") >= 0
         fallback_static = static_mask & ~native_ids
         static_row_indices = np.flatnonzero(static_mask)
         for index in np.flatnonzero(fallback_static):
             if stable_static_rows:
                 static_row = int(np.searchsorted(static_row_indices, index))
-                ids[index] = f"{case}:static:row:{static_row}"
+                ids[index] = f"s:{static_row}"
             else:
                 x, y, z = np.round(xyz[index], decimals=9)
-                ids[index] = f"{case}:static:xyz:{x:.9f}:{y:.9f}:{z:.9f}"
+                digest = hashlib.blake2b(np.asarray([x, y, z], dtype="<f8").tobytes(), digest_size=12).hexdigest()
+                ids[index] = f"sx:{digest}"
         # Dynamic particles without native IDs are marked for the position-based tracking pass that follows.
         fallback_dynamic = ~static_mask & ~native_ids
         frame["particle_ids"] = ids
         frame["advected_tracking_mask"] = fallback_dynamic
         frame["advected_match_fraction"] = 1.0 if not fallback_dynamic.any() else 0.0
         for index in np.flatnonzero(fallback_dynamic):
-            ids[index] = f"{case}:dynamic:track:{next_track_id}"
+            ids[index] = f"d:{next_track_id}"
             next_track_id += 1
 
-    # Without SciPy there is no KD-tree based fallback matching, so the temporary track identities cannot be refined by position.
-    if not SCIPY_AVAILABLE:
-        return
-
-    for previous, current in zip(frames, frames[1:]):
-        previous_ids = np.asarray(previous["particle_ids"], dtype=object)
-        current_ids = np.asarray(current["particle_ids"], dtype=object).copy()
+    for frame_index, (previous, current) in enumerate(zip(frames, frames[1:]), start=1):
+        previous_ids = _to_s32(previous["particle_ids"])
+        current_ids = _to_s32(current["particle_ids"]).copy()
         previous_indices = np.flatnonzero(previous["advected_tracking_mask"])
         current_indices = np.flatnonzero(current["advected_tracking_mask"])
         previous_xyz = np.stack([previous["state"][name] for name in ("x", "y", "z")], axis=1)
         current_xyz = np.stack([current["state"][name] for name in ("x", "y", "z")], axis=1)
         matched = np.zeros(len(current_indices), dtype=bool)
 
-        if len(previous_indices) and len(current_indices):
+        if len(previous_indices) and len(current_indices) and SCIPY_AVAILABLE:
             step_dt = float(current.get("physical_time", 0.0)) - float(previous.get("physical_time", 0.0))
             if not np.isfinite(step_dt) or step_dt <= 0.0:
                 raise ValueError(
@@ -384,25 +417,59 @@ def _assign_advected_position_tracks(frames: List[Dict[str, object]], case: str)
             forward_distance, forward_index = target_tree.query(source_xyz + source_velocity * step_dt, k=1)
             _, backward_index = cKDTree(source_xyz).query(target_xyz - target_velocity * step_dt, k=1)
 
-            # Estimate the allowed matching distance from the local spacing of the current target cloud so the tolerance follows the particle resolution.
+            # Estimate a displacement-aware residual tolerance from target spacing.
             if len(target_xyz) > 1:
                 spacing = cKDTree(target_xyz).query(target_xyz, k=2)[0][:, 1]
                 spacing = spacing[np.isfinite(spacing) & (spacing > 0)]
-                max_distance = max(0.01, 1.5 * float(np.median(spacing))) if spacing.size else 0.01
+                base_tol = max(0.02, 3.0 * float(np.median(spacing))) if spacing.size else 0.02
             else:
-                max_distance = 0.01
+                base_tol = 0.02
             source_local = np.arange(len(source_xyz))
-            valid = (backward_index[forward_index] == source_local) & (forward_distance <= max_distance)
+            forward_residual = np.linalg.norm(
+                target_xyz[forward_index] - (source_xyz + source_velocity * step_dt), axis=1)
+            residual_limit = np.maximum(base_tol, 0.5 * np.linalg.norm(source_velocity, axis=1) * step_dt)
+            valid = ((backward_index[forward_index] == source_local)
+                     & (forward_distance <= base_tol)
+                     & (forward_residual <= residual_limit))
             matched[forward_index[valid]] = True
             for src_local, dst_local in zip(source_local[valid], forward_index[valid]):
                 current_ids[current_indices[dst_local]] = previous_ids[previous_indices[src_local]]
 
-        # A dynamic particle that fails the bidirectional nearest-neighbour test starts a new track in the current frame.
-        current["advected_match_fraction"] = float(matched.mean()) if len(matched) else 1.0
-        for index in current_indices[~matched]:
-            current_ids[index] = f"{case}:dynamic:track:{next_track_id}"
-            next_track_id += 1
-        current["particle_ids"] = current_ids
+            # Globally resolve ambiguous leftovers using predicted position and velocity agreement.
+            unmatched_sources = source_local[~np.isin(source_local, source_local[valid])]
+            unmatched_targets = np.flatnonzero(~matched)
+            if len(unmatched_sources) and len(unmatched_targets):
+                from scipy.optimize import linear_sum_assignment
+
+                predicted = source_xyz[unmatched_sources] + source_velocity[unmatched_sources] * step_dt
+                position_cost = np.linalg.norm(predicted[:, None, :] - target_xyz[unmatched_targets][None, :, :], axis=2)
+                velocity_cost = step_dt * np.linalg.norm(
+                    source_velocity[unmatched_sources, None, :] - target_velocity[unmatched_targets][None, :, :], axis=2)
+                cost = position_cost + velocity_cost
+                source_assignment, target_assignment = linear_sum_assignment(cost)
+                max_new_residual = max(2.0 * base_tol, 1.0)
+                for src_offset, dst_offset in zip(source_assignment, target_assignment):
+                    src_local = unmatched_sources[src_offset]
+                    dst_local = unmatched_targets[dst_offset]
+                    if cost[src_offset, dst_offset] > max_new_residual:
+                        continue
+                    matched[dst_local] = True
+                    current_ids[current_indices[dst_local]] = previous_ids[previous_indices[src_local]]
+
+        matched_count = int(matched.sum())
+        new_count = int(len(current_indices) - matched_count)
+        if not SCIPY_AVAILABLE:
+            current["advected_match_fraction"] = 0.0 if len(current_indices) else 1.0
+        else:
+            current["advected_match_fraction"] = float(matched.mean()) if len(matched) else 1.0
+
+        print(f"[track] case={case} frame={current.get('frame_id', frame_index)} "
+              f"matched={matched_count}/{len(current_indices)} new={new_count}")
+        current["particle_ids"] = _to_s32(current_ids)
+
+    first_indices = np.flatnonzero(np.asarray(frames[0]["advected_tracking_mask"], dtype=bool))
+    print(f"[track] case={case} frame={frames[0].get('frame_id', 0)} "
+          f"matched=0/{len(first_indices)} new={len(first_indices)}")
 
 
 # Task 2 provides an Eulerian field on a structured grid. Its default query domain is inferred from training-case meshes; FIELD_QUERY_BOUNDS can explicitly override it.
@@ -464,7 +531,25 @@ def read_field_grid_h5(path: Path) -> Tuple[np.ndarray, np.ndarray]:
         raise ValueError(f"{path}: node/velocity shapes disagree: {coords.shape} vs {vel.shape}")
 
     from .hdf5 import physical_field_values
-    combined = physical_field_values(coords, vel)
+    invalid_velocity = ~np.isfinite(vel).all(axis=1)
+    derivative_velocity = vel
+    if invalid_velocity.any():
+        axes = tuple(np.unique(coords[:, axis]) for axis in range(3))
+        indices = tuple(np.searchsorted(axes[axis], coords[:, axis]) for axis in range(3))
+        velocity_grid = np.full(tuple(len(axis) for axis in axes) + (3,), np.nan, dtype=np.float32)
+        velocity_grid[indices] = vel
+        invalid_grid = ~np.isfinite(velocity_grid).all(axis=-1)
+        try:
+            from scipy.ndimage import distance_transform_edt
+
+            nearest = distance_transform_edt(invalid_grid, return_distances=False, return_indices=True)
+            velocity_grid[invalid_grid] = velocity_grid[tuple(nearest[:, invalid_grid])]
+        except ImportError:
+            velocity_grid[invalid_grid] = 0.0
+        derivative_velocity = velocity_grid[indices]
+    combined = physical_field_values(coords, derivative_velocity)
+    if invalid_velocity.any():
+        combined[invalid_velocity] = np.nan
 
     return _filter_field_queries(coords, combined, path)
 
@@ -1403,15 +1488,15 @@ def merge_frames() -> List[Path]:
         out_dir = ensure_dir(MERGED_ROOT / ds)
         for fr in common:
             pin = dynamic_map[fr]
-            pstatic = static_map.get(fr, None)
+            pstatic = static_map.get(fr)
             dynamic_payload = read_h5_selected(pin, INPUT_KEYS)
             static_payload = read_h5_selected(pstatic, INPUT_KEYS) if pstatic is not None else None
             dynamic_ids = _read_particle_ids(pin, len(as_xyz(dynamic_payload["particle_xyz"])), "dynamic")
             static_ids = (_read_particle_ids(pstatic, len(as_xyz(static_payload["particle_xyz"])), "static")
-                          if pstatic is not None and static_payload is not None else np.zeros(0, dtype=object))
+                          if pstatic is not None and static_payload is not None else np.zeros(0, dtype="S32"))
             payload = _merge_particle_payloads(dynamic_payload, static_payload)
-            payload["particle_ids"] = np.concatenate((dynamic_ids, static_ids)) if len(static_ids) else dynamic_ids
-
+            payload["particle_ids"] = _to_s32(
+                np.concatenate((dynamic_ids, static_ids)) if len(static_ids) else dynamic_ids)
             payload["source_dataset"] = np.asarray(ds, dtype=object)
             payload["frame_id"] = np.asarray(fr, dtype=object)
             xmf_path = particle_xmf.get(fr)
@@ -1427,11 +1512,11 @@ def merge_frames() -> List[Path]:
             payload["source_static_h5_path"] = np.asarray("" if pstatic is None else str(pstatic), dtype=object)
             payload["source_output_h5_path"] = np.asarray("", dtype=object)
 
-            op = out_dir / f"{ds}__frame_{fr}.npz"
-            np.savez_compressed(op, **payload)
-            merged.append(op)
+            output_path = out_dir / f"{ds}__frame_{fr}.npz"
+            np.savez_compressed(output_path, **payload)
+            merged.append(output_path)
 
-    merged = sorted(merged)
+    merged = sorted(merged, key=lambda p: (p.parent.name, p.stem))
     print("[merge] total merged:", len(merged))
     if len(merged) == 0:
         msg = (
@@ -1448,6 +1533,8 @@ def merge_frames() -> List[Path]:
 
 # The merged frame contains many source quantities, but only seven are propagated as the particle state. This function extracts those seven quantities with one scalar array per state component.
 def _state_from_frame(data: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    if "particle_ids" in data:
+        data["particle_ids"] = _to_s32(data["particle_ids"])
     xyz = as_xyz(data["particle_xyz"])
     gamma = as_xyz(data["Gamma_vec"])
     n = xyz.shape[0]
@@ -1525,17 +1612,19 @@ def _aligned_rollout_truth(frames: List[Dict[str, object]]) -> Tuple[np.ndarray,
     """Return rollout states aligned to identities present in every frame."""
     if not frames:
         return np.zeros((0, 0, len(STATE_NAMES)), dtype=np.float32), np.zeros(0, dtype=object)
-    shared_ids = [str(identity) for identity in frames[0]["particle_ids"]]
+    first_ids = _to_s32(frames[0]["particle_ids"])
+    shared_ids = np.char.decode(first_ids, "utf-8").tolist()
     for frame in frames[1:]:
-        available = {str(identity) for identity in frame["particle_ids"]}
+        available = set(np.char.decode(_to_s32(frame["particle_ids"]), "utf-8").tolist())
         shared_ids = [identity for identity in shared_ids if identity in available]
     aligned = []
     for frame in frames:
-        lookup = {str(identity): index for index, identity in enumerate(frame["particle_ids"])}
+        frame_ids = np.char.decode(_to_s32(frame["particle_ids"]), "utf-8")
+        lookup = {identity: index for index, identity in enumerate(frame_ids)}
         indices = np.asarray([lookup[identity] for identity in shared_ids], dtype=np.int64)
         state = {name: np.asarray(values)[indices] for name, values in frame["state"].items()}
         aligned.append(_state_matrix(state, len(shared_ids)))
-    return np.stack(aligned, axis=0).astype(np.float32), np.asarray(shared_ids, dtype=object)
+    return np.stack(aligned, axis=0).astype(np.float32), np.asarray(shared_ids, dtype=str)
 
 def _normalize_channels_rows(x: np.ndarray, train_rows: np.ndarray):
     mean = np.mean(x[train_rows], axis=0, keepdims=True)
@@ -1554,8 +1643,220 @@ def _case_split_label(case: str) -> str:
     raise ValueError(f"Case {case} is not assigned in TRAIN_CASES/VAL_CASES/TEST_CASES")
 
 
+def _load_and_track_case(case: str, plist: List[Path], meta: Dict[str, Any]):
+    """Load one case's merged frames and attach persistent S32 identities."""
+    frames = []
+    for path in plist:
+        with np.load(path, allow_pickle=True) as archive:
+            data = {key: archive[key] for key in archive.files}
+        state = _state_from_frame(data)
+        velocity = as_xyz(data["velocity"])
+        ids = _to_s32(data.get("particle_ids", [f"row:{j}" for j in range(len(state["x"]))]))
+        if len(ids) != len(state["x"]):
+            raise ValueError(f"Particle ID count does not match state rows in {path}")
+        if "xmf_time" not in data:
+            raise ValueError(f"Merged frame {path} has no XMF time metadata; rerun scripts/preprocess.py")
+        xmf_time = float(np.asarray(data["xmf_time"]).reshape(-1)[0])
+        frames.append({
+            "frame_id": str(np.asarray(data["frame_id"]).reshape(-1)[0]),
+            "xmf_time": xmf_time,
+            "physical_time": xmf_time * float(meta["dt"]),
+            "state": state,
+            "particle_ids": ids,
+            "static_mask": _require_scalar(data["static"], len(state["x"]), "static") > 0.5,
+            "velocity": velocity,
+            "velocity_gradient_x": as_xyz(data["velocity_gradient_x"]),
+            "velocity_gradient_y": as_xyz(data["velocity_gradient_y"]),
+            "velocity_gradient_z": as_xyz(data["velocity_gradient_z"]),
+            "path": str(path),
+            "vtk_path": str(np.asarray(data.get("source_vtk_path", "")).reshape(-1)[0]),
+        })
+        del data
+    if len(frames) < 2:
+        return frames
+    times = np.asarray([float(frame["xmf_time"]) for frame in frames], dtype=np.float64)
+    if not np.all(np.isfinite(times)) or np.any(np.diff(times) <= 0.0):
+        raise ValueError(f"XMF times for case {case} must be finite and strictly increasing; got {times.tolist()}")
+    span = float(times[-1] - times[0])
+    for frame in frames:
+        frame["phase"] = 0.0 if span <= 0 else (float(frame["xmf_time"]) - float(times[0])) / span
+    _assign_advected_position_tracks(frames, case)
+    return frames
+
+
+def _scan_pairs(by_case, meta_by_case, field_files_by_case=None):
+    """Count tracked transitions one case at a time, releasing frames after each case."""
+    pair_ranges = []
+    field_available = []
+    chain_lengths = {}
+    start = 0
+    print(f"[mem] scan start: RSS={_rss_gb():.2f} GB", flush=True)
+    for case in sorted(by_case):
+        frames = _load_and_track_case(case, by_case[case], meta_by_case[case])
+        try:
+            longest_chain = 0
+            current_chain = 0
+            for current, following in zip(frames, frames[1:]):
+                _, _, common_ids = match_particle_identities(
+                    current["particle_ids"], following["particle_ids"])
+                count = len(common_ids)
+                if count:
+                    end = start + count
+                    pair_ranges.append((case, current["frame_id"], following["frame_id"], start, end, count))
+                    entries = [] if field_files_by_case is None else field_files_by_case.get(case, [])
+                    matched_field = match_task2_xmf_time(entries, float(current["xmf_time"]))
+                    field_available.append(matched_field is not None)
+                    start = end
+                    current_chain += 1
+                else:
+                    longest_chain = max(longest_chain, current_chain)
+                    current_chain = 0
+            longest_chain = max(longest_chain, current_chain)
+            chain_lengths[case] = longest_chain
+        finally:
+            del frames
+            gc.collect()
+        print(f"[mem] after case={case}: RSS={_rss_gb():.2f} GB", flush=True)
+        _check_rss_limit(case)
+    return pair_ranges, np.asarray(field_available, dtype=bool), chain_lengths
+
+
+def _fill_one_case(case, case_plist, case_meta, case_pairs, field_entries,
+                   out_arrays, field_query_coords, targets_velocity_field,
+                   field_query_mask, ids_concat, pair_contexts, field_bounds):
+    """Build one case and write each transition directly into its global slices."""
+    frames = _load_and_track_case(case, case_plist, case_meta)
+    try:
+        frame_index = {str(frame["frame_id"]): index for index, frame in enumerate(frames)}
+        if len(frames) >= 2:
+            aligned_states, rollout_ids = _aligned_rollout_truth(frames)
+            rollout_ids = _to_s32(rollout_ids)
+            rollout_phases = np.asarray([frame["phase"] for frame in frames], dtype=np.float32)
+            rollout = (aligned_states, rollout_ids, rollout_phases,
+                       np.asarray(float(case_meta["dt"]), dtype=np.float32))
+        else:
+            rollout = None
+
+        for pair_id, global_start, global_end, expected_n, has_field, current_frame_id in case_pairs:
+            current_index = frame_index[str(current_frame_id)]
+            current, following = frames[current_index], frames[current_index + 1]
+            idx0, idx1, common_ids = match_particle_identities(
+                current["particle_ids"], following["particle_ids"])
+            n = len(common_ids)
+            if n != expected_n:
+                raise RuntimeError(f"Pair-count scan/fill mismatch in {case} pair {pair_id}: {expected_n} != {n}")
+            common_ids = _to_s32(common_ids)
+            ids0, ids1 = current["particle_ids"], following["particle_ids"]
+            s0 = {key: np.asarray(value)[idx0] if np.asarray(value).ndim > 0 and len(np.asarray(value)) == len(ids0) else value
+                  for key, value in current["state"].items()}
+            s1 = {key: np.asarray(value)[idx1] if np.asarray(value).ndim > 0 and len(np.asarray(value)) == len(ids1) else value
+                  for key, value in following["state"].items()}
+            curr = {key: (np.asarray(value)[idx0] if isinstance(value, np.ndarray) and value.ndim > 0
+                          and len(value) == len(ids0) else value) for key, value in current.items()}
+            nxt = {key: (np.asarray(value)[idx1] if isinstance(value, np.ndarray) and value.ndim > 0
+                         and len(value) == len(ids1) else value) for key, value in following.items()}
+            curr_xyz = np.stack([s0["x"], s0["y"], s0["z"]], axis=1)
+            geometry = _particle_geometry_features(curr_xyz, str(curr.get("vtk_path", "")), n)
+            gradient = np.concatenate([
+                np.asarray(curr.get("velocity_gradient_x", np.zeros((n, 3))), dtype=np.float32),
+                np.asarray(curr.get("velocity_gradient_y", np.zeros((n, 3))), dtype=np.float32),
+                np.asarray(curr.get("velocity_gradient_z", np.zeros((n, 3))), dtype=np.float32),
+            ], axis=1)
+            velocity_current = np.asarray(curr["velocity"], dtype=np.float32)
+            x_feat = _feature_matrix_from_state(
+                s0, velocity_current, gradient, n, float(curr["phase"]),
+                float(case_meta["aoa_deg"]), np.asarray(case_meta["freestream"], dtype=np.float64), geometry)
+            state0, state1 = _state_matrix(s0, n), _state_matrix(s1, n)
+            delta = state1 - state0
+            delta_u = np.asarray(nxt["velocity"], dtype=np.float32) - velocity_current
+            dt = float(following["physical_time"]) - float(current["physical_time"])
+            if not np.isfinite(dt) or dt <= 0:
+                raise ValueError(f"Non-increasing XMF time for case={case}, frames {current['frame_id']}->{following['frame_id']}")
+            physics_dx = (dt * velocity_current).astype(np.float32)
+            physics_dgamma = (dt * np.einsum(
+                "nij,nj->ni", gradient.reshape(n, 3, 3), state0[:, 3:6])).astype(np.float32)
+            residual = np.concatenate([
+                delta[:, :3] - physics_dx, delta[:, 3:6] - physics_dgamma,
+                delta[:, 6:7], delta_u,
+            ], axis=1).astype(np.float32)
+            target = np.concatenate([delta, delta_u], axis=1).astype(np.float32)
+            out_arrays["X"][global_start:global_end] = x_feat
+            out_arrays["Y_delta"][global_start:global_end] = target
+            out_arrays["Y_residual"][global_start:global_end] = residual
+            out_arrays["Y_next"][global_start:global_end] = state1
+            ids_concat[global_start:global_end] = common_ids
+
+            decoded_common = np.char.decode(common_ids, "utf-8")
+            if np.all(np.char.find(decoded_common, ":id:") >= 0):
+                correspondence = "matched_source_particle_ids"
+            elif np.all((np.char.find(decoded_common, "d:") >= 0)
+                        | (np.char.find(decoded_common, "s:") >= 0)
+                        | (np.char.find(decoded_common, "sx:") >= 0)
+                        | (np.char.find(decoded_common, ":id:") >= 0)):
+                correspondence = "inferred_advected_position_tracking"
+            else:
+                correspondence = "tagged_source_row_index_fallback"
+
+            field_match = match_task2_xmf_time(field_entries, float(current["xmf_time"])) if has_field else None
+            field_time, field_path = field_match if field_match is not None else (None, None)
+            if field_path is not None:
+                coords, values = read_field_grid_h5(field_path)
+                n_query = min(len(coords), int(MAX_FIELD_QUERY_POINTS))
+                selected = (np.linspace(0, len(coords) - 1, n_query, dtype=np.int64)
+                            if len(coords) > n_query else np.arange(n_query, dtype=np.int64))
+                if n_query:
+                    field_query_coords[pair_id, :n_query] = coords[selected].astype(np.float32)
+                    targets_velocity_field[pair_id, :n_query] = values[selected].astype(np.float32)
+                    field_query_mask[pair_id, :n_query] = True
+                    field_bounds[pair_id, 0] = np.min(coords, axis=0)
+                    field_bounds[pair_id, 1] = np.max(coords, axis=0)
+            pair_contexts[pair_id] = {
+                "case": case, "frame_t": current["frame_id"], "frame_tp1": following["frame_id"],
+                "xmf_time_t": float(current["xmf_time"]), "xmf_time_tp1": float(following["xmf_time"]),
+                "physical_time_t": float(current["physical_time"]), "physical_time_tp1": float(following["physical_time"]),
+                "task2_xmf_time": None if field_time is None else float(field_time),
+                "task2_physical_time": None if field_time is None else float(field_time) * float(case_meta["dt"]),
+                "task2_frame_id": "" if field_path is None else frame_id(field_path),
+                "task2_field_path": "" if field_path is None else str(field_path),
+                "start": int(global_start), "end": int(global_end), "n_particles": n,
+                "phase_t": float(current["phase"]), "phase_tp1": float(following["phase"]),
+                "aoa_deg": float(case_meta["aoa_deg"]),
+                "freestream": [float(v) for v in np.asarray(case_meta["freestream"]).reshape(-1)],
+                "dt": dt, "vtk_path": str(current.get("vtk_path", "")),
+                "vtk_path_tp1": str(following.get("vtk_path", "")),
+                "phase_delta": float(following["phase"] - current["phase"]),
+                "correspondence_source": correspondence,
+                "advected_track_match_fraction": float(following.get("advected_match_fraction", 1.0)),
+            }
+        return rollout
+    finally:
+        del frames
+
+
+def _fill_pairs(by_case, pair_ranges, field_available, out_arrays, field_query_coords,
+                targets_velocity_field, field_query_mask, ids_concat, meta_by_case,
+                field_files_by_case, pair_contexts, field_bounds):
+    """Fill preallocated arrays serially, releasing each case before continuing."""
+    pairs_by_case = defaultdict(list)
+    for pair_id, row in enumerate(pair_ranges):
+        pairs_by_case[str(row[0])].append((pair_id, int(row[3]), int(row[4]), int(row[5]),
+                                           bool(field_available[pair_id]), str(row[1])))
+    rollout_by_case = {}
+    for case in sorted(by_case):
+        rollout = _fill_one_case(
+            case, by_case[case], meta_by_case[case], pairs_by_case[case],
+            field_files_by_case.get(case, []), out_arrays, field_query_coords,
+            targets_velocity_field, field_query_mask, ids_concat, pair_contexts, field_bounds)
+        if rollout is not None:
+            rollout_by_case[case] = rollout
+        gc.collect()
+        print(f"[mem] after case={case}: RSS={_rss_gb():.2f} GB", flush=True)
+        _check_rss_limit(case)
+    return rollout_by_case
+
+
 # This is the main dataset assembly routine. It groups merged frames by case, links each current particle frame to the matching Task 2 field, forms consecutive particle transitions, constructs both raw and physics-residual targets, and finally saves all representations together.
-def build_particle_evolution_dataset(merged: List[Path]) -> Path:
+def _build_particle_evolution_dataset_legacy(merged: List[Path]) -> Path:
     global ACTIVE_FIELD_QUERY_BOUNDS
     by_case: Dict[str, List[Path]] = {}
     for p in merged:
@@ -1633,7 +1934,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
                 raise ValueError(f"Merged frame {p} has no XMF time metadata; rerun scripts/preprocess.py")
             xmf_time = float(np.asarray(data["xmf_time"]).reshape(-1)[0])
             vtk_path = str(np.asarray(data.get("source_vtk_path", "")).reshape(-1)[0])
-            particle_ids = np.asarray(data.get("particle_ids", [f"row:{j}" for j in range(len(state["x"]))])).reshape(-1)
+            particle_ids = _to_s32(data.get("particle_ids", [f"row:{j}" for j in range(len(state["x"]))]))
             if len(particle_ids) != len(state["x"]):
                 raise ValueError(f"Particle ID count does not match state rows in {p}")
             static_mask = _require_scalar(data["static"], len(state["x"]), "static") > 0.5
@@ -1701,7 +2002,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
 
         rollout_cases.append(case)
         rollout_true_states.append(aligned_states)
-        rollout_true_particle_ids.append(np.asarray(shared_ids, dtype=object))
+        rollout_true_particle_ids.append(_to_s32(shared_ids))
         rollout_phases.append(np.asarray(phase_seq, dtype=np.float32))
         rollout_dts.append(float(meta["dt"]))
 
@@ -1791,8 +2092,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
             pair_ranges.append((case, curr["frame_id"], nxt["frame_id"], start, end, n))
             if all(":id:" in str(identity) for identity in common_ids):
                 correspondence_source = "matched_source_particle_ids"
-            elif all((":dynamic:track:" in str(identity) or ":static:row:" in str(identity)
-                      or ":static:xyz:" in str(identity)
+            elif all(("d:" in str(identity) or "s:" in str(identity) or "sx:" in str(identity)
                       or ":id:" in str(identity)) for identity in common_ids):
                 correspondence_source = "inferred_advected_position_tracking"
             else:
@@ -1830,7 +2130,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
             rows_delta.append(target)
             rows_residual.append(residual)
             rows_next.append(st1.astype(np.float32))
-            rows_particle_ids.append(np.asarray(common_ids, dtype=object))
+            rows_particle_ids.append(_to_s32(common_ids))
             if field_grid is None:
                 grid_coords = np.zeros((0, 3), dtype=np.float32)
                 grid_velocity = np.zeros((0, 12), dtype=np.float32)
@@ -1945,8 +2245,8 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     np.savez_compressed(
         out_path,
         inputs_t=X,
-        particle_ids_t=np.concatenate(rows_particle_ids) if rows_particle_ids else np.zeros(0, dtype=object),
-        particle_ids_tp1=np.concatenate(rows_particle_ids) if rows_particle_ids else np.zeros(0, dtype=object),
+        particle_ids_t=np.concatenate(rows_particle_ids) if rows_particle_ids else np.zeros(0, dtype="S32"),
+        particle_ids_tp1=np.concatenate(rows_particle_ids) if rows_particle_ids else np.zeros(0, dtype="S32"),
         targets_delta=Y_delta,
         targets_residual=Y_residual,
         query_coords=field_query_coords,
@@ -2038,6 +2338,173 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     print("  train/val/test cases      :", TRAIN_CASES, VAL_CASES, TEST_CASES)
     _print_geometry_channel_stats(X, PARTICLE_INPUT_FEATURES, "task1-delta")
 
+    return out_path
+
+
+def build_particle_evolution_dataset(merged: List[Path]) -> Path:
+    """Build the final dataset with a count pass and bounded per-case fill pass."""
+    global ACTIVE_FIELD_QUERY_BOUNDS
+    if os.environ.get("PREPROC_STREAMING", "1") == "0":
+        return _build_particle_evolution_dataset_legacy(merged)
+
+    by_case: Dict[str, List[Path]] = defaultdict(list)
+    for path in merged:
+        by_case[path.parent.name].append(path)
+    for case in by_case:
+        by_case[case].sort(key=frame_id)
+    all_cases = sorted(by_case)
+    _validate_case_split(all_cases)
+    meta_by_case = {case: _case_meta(case) for case in all_cases}
+
+    field_root = _resolve_field_root()
+    field_files_by_case: Dict[str, List[Tuple[float, Path]]] = {}
+    for case in all_cases:
+        entries = []
+        for path in sorted((field_root / case).glob(FIELD_H5_PATTERN)):
+            xmf_path = path.with_suffix(".xmf")
+            if not xmf_path.is_file():
+                raise FileNotFoundError(f"Task-2 field {path} has no companion XMF: {xmf_path}")
+            validate_task2_xmf_layout(xmf_path, path)
+            entries.append((read_xmf_time(xmf_path), path))
+        entries.sort(key=lambda item: item[0])
+        for previous, current in zip(entries, entries[1:]):
+            if np.isclose(previous[0], current[0], rtol=0.0, atol=XMF_TIME_MATCH_TOLERANCE):
+                raise ValueError(f"Task-2 case {case} has duplicate XMF time {current[0]}")
+        field_files_by_case[case] = entries
+        print(f"[field] {case}: fdom frames={len(entries)}; XMF times={[t for t, _ in entries][:8]}")
+    if not os.environ.get("FIELD_QUERY_BOUNDS", "").strip():
+        ACTIVE_FIELD_QUERY_BOUNDS = _infer_training_field_bounds(field_files_by_case)
+
+    pair_ranges, field_available, chain_lengths = _scan_pairs(by_case, meta_by_case, field_files_by_case)
+    if not pair_ranges:
+        raise RuntimeError("No Task-1 pairs were built. Check frame availability and metadata.")
+    n_pairs = len(pair_ranges)
+    total_rows = sum(row[5] for row in pair_ranges)
+    X = np.empty((total_rows, len(PARTICLE_INPUT_FEATURES)), dtype=np.float32)
+    Y_delta = np.empty((total_rows, len(TARGET_DELTA_NAMES)), dtype=np.float32)
+    Y_residual = np.empty_like(Y_delta)
+    Y_next = np.empty((total_rows, 7), dtype=np.float32)
+    ids_concat = np.empty(total_rows, dtype="S32")
+    field_query_coords = np.zeros((n_pairs, MAX_FIELD_QUERY_POINTS, 3), dtype=np.float32)
+    targets_velocity_field = np.zeros((n_pairs, MAX_FIELD_QUERY_POINTS, 12), dtype=np.float32)
+    field_query_mask = np.zeros((n_pairs, MAX_FIELD_QUERY_POINTS), dtype=bool)
+    field_bounds = np.full((n_pairs, 2, 3), np.nan, dtype=np.float32)
+    pair_contexts: List[Dict[str, object]] = [None] * n_pairs
+    out_arrays = {"X": X, "Y_delta": Y_delta, "Y_residual": Y_residual, "Y_next": Y_next}
+    rollout_by_case = _fill_pairs(
+        by_case, pair_ranges, field_available, out_arrays, field_query_coords,
+        targets_velocity_field, field_query_mask, ids_concat, meta_by_case,
+        field_files_by_case, pair_contexts, field_bounds)
+
+    rollout_cases = sorted(rollout_by_case)
+    rollout_true_states, rollout_true_particle_ids, rollout_phases, rollout_dts = [], [], [], []
+    rollout_bytes = 0
+    for case in rollout_cases:
+        states, ids, phases, dt = rollout_by_case[case]
+        rollout_true_states.append(states)
+        rollout_true_particle_ids.append(_to_s32(ids))
+        rollout_phases.append(phases)
+        rollout_dts.append(float(np.asarray(dt)))
+        rollout_bytes += states.nbytes + ids.nbytes + phases.nbytes
+    if rollout_bytes > ROLLOUT_MEMORY_CAP_GB * 1e9:
+        print(f"[mem] rollout arrays={rollout_bytes / 1e9:.3f} GB exceed cap="
+              f"{ROLLOUT_MEMORY_CAP_GB:.3f} GB; retaining per-case arrays until archive write")
+    else:
+        print(f"[mem] rollout arrays={rollout_bytes / 1e9:.3f} GB; cap="
+              f"{ROLLOUT_MEMORY_CAP_GB:.3f} GB")
+
+    pair_split_train_case = np.asarray([i for i, row in enumerate(pair_ranges)
+                                        if _case_split_label(row[0]) == "train"], dtype=np.int64)
+    pair_split_val = np.asarray([i for i, row in enumerate(pair_ranges)
+                                 if _case_split_label(row[0]) == "val"], dtype=np.int64)
+    pair_split_test = np.asarray([i for i, row in enumerate(pair_ranges)
+                                  if _case_split_label(row[0]) == "test"], dtype=np.int64)
+    pair_split_train, pair_split_train_id_val = _train_id_val_id_split_by_case(pair_ranges, pair_split_train_case)
+    field_train_candidates = [int(pid) for pid in pair_split_train if field_query_mask[int(pid)].any()]
+    field_candidates_by_case: Dict[str, List[int]] = defaultdict(list)
+    for pid in field_train_candidates:
+        field_candidates_by_case[str(pair_ranges[pid][0])].append(pid)
+    stride = max(int(FIELD_SUPERRESOLUTION_STRIDE), 2)
+    offset = min(max(int(FIELD_SUPERRESOLUTION_OFFSET), 0), stride - 1)
+    field_superres_pair_ids = []
+    for case, pair_ids in sorted(field_candidates_by_case.items()):
+        pair_ids.sort(key=lambda pid: float(pair_contexts[pid]["xmf_time_t"]))
+        if len(pair_ids) > 1:
+            field_superres_pair_ids.extend(pair_ids[offset::stride])
+    field_superres_pair_ids = np.asarray(sorted(field_superres_pair_ids), dtype=np.int64)
+    field_stats_pair_ids = np.setdiff1d(pair_split_train, field_superres_pair_ids)
+    train_rows = _rows_from_pair_ids(pair_ranges, pair_split_train)
+    val_rows = _rows_from_pair_ids(pair_ranges, pair_split_val)
+    test_rows = _rows_from_pair_ids(pair_ranges, pair_split_test)
+    in_mean, in_std, Xn = _normalize_channels_rows(X, train_rows)
+    raw_delta_mean, raw_delta_std, Yn_delta_raw = _normalize_channels_rows(Y_delta, train_rows)
+    residual_mean, residual_std, Yn_residual = _normalize_channels_rows(Y_residual, train_rows)
+    train_field_values = targets_velocity_field[field_stats_pair_ids][field_query_mask[field_stats_pair_ids]]
+    if not train_field_values.size:
+        raise RuntimeError("No field-reconstruction query points were available in the training split.")
+    train_field_values = train_field_values[np.isfinite(train_field_values).all(axis=1)]
+    if not train_field_values.size:
+        raise RuntimeError("No finite field-reconstruction targets were available in the training split.")
+    field_mean = np.mean(train_field_values, axis=0, keepdims=True).astype(np.float32)
+    field_std = np.maximum(np.std(train_field_values, axis=0, keepdims=True), FIELD_STD_FLOOR).astype(np.float32)
+    targets_velocity_field_norm = ((targets_velocity_field - field_mean.reshape(1, 1, 12)) /
+                                   field_std.reshape(1, 1, 12)).astype(np.float32)
+    next_mean = np.mean(Y_next[train_rows], axis=0, keepdims=True)
+    next_std = np.maximum(np.std(Y_next[train_rows], axis=0, keepdims=True), 1e-8)
+    Yn_next = ((Y_next - next_mean) / next_std).astype(np.float32)
+
+    coord_cols = [PARTICLE_INPUT_FEATURES.index(key) for key in ("x", "y", "z")]
+    particle_coords = X[train_rows][:, coord_cols]
+    valid_field_pair_ids = [int(pid) for pid in field_stats_pair_ids if np.isfinite(field_bounds[pid]).all()]
+    if valid_field_pair_ids:
+        field_coord_min = np.min(field_bounds[valid_field_pair_ids, 0], axis=0)
+        field_coord_max = np.max(field_bounds[valid_field_pair_ids, 1], axis=0)
+        coord_source = np.concatenate([particle_coords, field_coord_min[None], field_coord_max[None]], axis=0)
+    else:
+        field_coord_min = np.full(3, np.nan, dtype=np.float32)
+        field_coord_max = np.full(3, np.nan, dtype=np.float32)
+        coord_source = particle_coords
+    coord_min = np.min(coord_source, axis=0).astype(np.float32)
+    coord_span = np.maximum(np.ptp(coord_source, axis=0), 1e-8).astype(np.float32)
+    coord_max = (coord_min + coord_span).astype(np.float32)
+    particle_coord_min = np.min(particle_coords, axis=0).astype(np.float32)
+    particle_coord_max = np.max(particle_coords, axis=0).astype(np.float32)
+    field_coord_min = field_coord_min.astype(np.float32)
+    field_coord_max = field_coord_max.astype(np.float32)
+
+    out_path = OUT_ROOT / "particle_evolution_dataset.npz"
+    np.savez_compressed(
+        out_path, inputs_t=X, particle_ids_t=ids_concat, particle_ids_tp1=ids_concat,
+        targets_delta=Y_delta, targets_residual=Y_residual, query_coords=field_query_coords,
+        targets_velocity_field=targets_velocity_field, field_query_mask=field_query_mask,
+        field_query_source=np.asarray("task2_static_airfoil_fdom_grid_filtered", dtype=object),
+        field_query_bounds=np.asarray(_field_query_bounds() if _field_query_bounds() is not None else (), dtype=np.float32),
+        field_std_floor=np.asarray(FIELD_STD_FLOOR, dtype=np.float32), field_root=np.asarray(str(field_root), dtype=object),
+        targets_next_state=Y_next, inputs_t_norm=Xn, targets_delta_norm=Yn_delta_raw,
+        targets_residual_norm=Yn_residual, targets_velocity_field_norm=targets_velocity_field_norm,
+        targets_next_state_norm=Yn_next, feature_names=np.asarray(PARTICLE_INPUT_FEATURES, dtype=object),
+        state_names=np.asarray(STATE_NAMES, dtype=object), target_names=np.asarray(TARGET_DELTA_NAMES, dtype=object),
+        field_target_names=np.asarray(FIELD_TARGET_NAMES, dtype=object), pair_ranges=np.asarray(pair_ranges, dtype=object),
+        pair_contexts=np.asarray(pair_contexts, dtype=object), train_pair_ids=pair_split_train,
+        val_pair_ids=pair_split_val, test_pair_ids=pair_split_test, train_rows=train_rows,
+        val_rows=val_rows, test_rows=test_rows, rollout_cases=np.asarray(rollout_cases, dtype=object),
+        rollout_true_states=np.asarray(rollout_true_states, dtype=object),
+        rollout_true_particle_ids=np.asarray(rollout_true_particle_ids, dtype=object),
+        rollout_phases=np.asarray(rollout_phases, dtype=object), rollout_dts=np.asarray(rollout_dts, dtype=np.float32),
+        train_id_val_pair_ids=pair_split_train_id_val, field_superres_pair_ids=field_superres_pair_ids,
+        field_superres_stride=np.asarray(stride, dtype=np.int64), field_superres_offset=np.asarray(offset, dtype=np.int64),
+        train_cases=np.asarray(TRAIN_CASES, dtype=object), val_cases=np.asarray(VAL_CASES, dtype=object),
+        test_cases=np.asarray(TEST_CASES, dtype=object), case_metadata=np.asarray(CASE_METADATA, dtype=object),
+        use_geometry_channels=np.asarray(USE_GEOMETRY_CHANNELS),
+        geometry_channel_names=np.asarray(GEOMETRY_CHANNEL_NAMES, dtype=object), in_mean=in_mean,
+        in_std=in_std, out_mean=residual_mean, out_std=residual_std, residual_mean=residual_mean,
+        residual_std=residual_std, raw_delta_mean=raw_delta_mean, raw_delta_std=raw_delta_std,
+        field_mean=field_mean, field_std=field_std, next_mean=next_mean, next_std=next_std,
+        coord_min=coord_min, coord_span=coord_span, coord_max=coord_max,
+        particle_coord_min=particle_coord_min, particle_coord_max=particle_coord_max,
+        field_coord_min=field_coord_min, field_coord_max=field_coord_max,
+        max_field_query_points=np.asarray(MAX_FIELD_QUERY_POINTS, dtype=np.int64))
+    print(f"[task1] streaming dataset built: rows={total_rows}, pairs={n_pairs}, rollouts={len(rollout_cases)}")
     return out_path
 
 

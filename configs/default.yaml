@@ -3,14 +3,19 @@ device: auto
 data:
   dataset: processed_data/particle_evolution_dataset.npz
   native_task2_root: ""
+  allow_missing_native_task2: false
   # We should be using a different notations for quantities evaluated at particle locations alone.
   input_features: [u_x, u_y, u_z, sigma, geom_dist, Gamma_x, Gamma_y, Gamma_z, gradU_xx, gradU_xy, gradU_xz, gradU_yx, gradU_yy, gradU_yz, gradU_zx, gradU_zy, gradU_zz]
   global_condition_channels: [angle_of_attack, freestream_magnitude, phase]
   max_particles: 2048
-  max_queries: 2048
+  max_queries: 1024
+
+preprocessing:
+  max_rss_gb: 0
+  rollout_memory_cap_gb: 2.0
   
 model:
-  latent_res: 24
+  latent_res: 16
   hidden_channels: 128
   fno_layers: 6
   fno_modes: 6
@@ -29,6 +34,8 @@ training:
   epochs: 80
   batch_size: 1
   gradient_accumulation_steps: 4
+  dataloader_num_workers: 8
+  validation_every_n_epochs: 1
   learning_rate: 0.0003
   weight_decay: 0.00003
   scheduler: plateau
@@ -38,17 +45,17 @@ training:
   use_state_loss: true
   use_field_loss: true
   use_rollout_loss: true
-  rollout_weight: 0.5
-  rollout_horizon_max: 8
-  rollout_horizon_schedule: [2, 4, 8]
-  pushforward_weight: 0.5
+  rollout_weight: 0.05
+  rollout_horizon_max: 16
+  rollout_horizon_schedule: [2, 2, 2, 4, 4, 8, 8, 16, 16, 16]
+  pushforward_weight: 0.0
   use_scheduled_sampling: true
   scheduled_sampling_max_probability: 0.3
   scheduled_sampling_ramp_epochs: 10
   use_gns_noise: true
   gns_initial_std: 0.01
   gns_walk_std: 0.005
-  use_pushforward: true
+  use_pushforward: false
   use_homoscedastic_weighting: true
   state_loss_weight: 1.0
   field_loss_weight: 1.0
@@ -58,9 +65,11 @@ evaluation:
   split: test
   rollout_horizons: [1, 2, 4, 8, 16]
   max_batches: 0
+  allow_missing_native_task2: true
   save_plots: true
   field_visual_phase: 0.5
-  field_plane_mode: mid
+  field_plane_mode: highest_energy
+  save_parity_plots: true
   field_y_plane: 0.0
   reference_chord: null
   reference_leading_edge_x: null

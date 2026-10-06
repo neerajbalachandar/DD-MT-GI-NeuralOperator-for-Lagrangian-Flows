@@ -84,13 +84,38 @@ class EvolutionDataset(Dataset):
         start, end = int(row[3]), int(row[4])
         key = f"particle_ids_{kind}"
         if key in self.data:
-            ids = np.asarray([str(value) for value in np.asarray(self.data[key][start:end]).reshape(-1)])
+            raw = np.asarray(self.data[key][start:end]).reshape(-1)
+            ids = (np.char.decode(raw, "utf-8") if raw.dtype.kind == "S"
+                   else np.asarray([str(value) for value in raw]))
         else:
             # Legacy archives can only rely on the original canonical row order.
             ids = np.asarray([f"legacy-row:{i}" for i in range(end - start)])
         if len(np.unique(ids)) != len(ids):
             raise ValueError(f"Pair {pair_id} has duplicate particle identities in {key}")
         return ids
+
+    def chain_length(self, pair_id: int) -> int:
+        """Return reachable consecutive rollout steps, including the starting pair."""
+        pair_id = int(pair_id)
+        if pair_id not in self.allowed_pair_ids:
+            return 0
+        row = self.data["pair_ranges"][pair_id]
+        shared_ids = set(self._pair_particle_ids(pair_id, "t").tolist())
+        length = 1
+        expected_frame = str(row[2])
+        next_id = self.next_pair.get(pair_id)
+        while (next_id is not None and next_id in self.allowed_pair_ids
+               and length < self.rollout_horizon):
+            next_row = self.data["pair_ranges"][next_id]
+            if str(next_row[0]) != str(row[0]) or str(next_row[1]) != expected_frame:
+                break
+            shared_ids.intersection_update(self._pair_particle_ids(next_id, "t").tolist())
+            if not shared_ids:
+                break
+            length += 1
+            expected_frame = str(next_row[2])
+            next_id = self.next_pair.get(next_id)
+        return length
 
     def __getitem__(self, index):
         pid = int(self.pair_ids[index])
@@ -130,15 +155,13 @@ class EvolutionDataset(Dataset):
         if not np.array_equal(current_ids, next_ids):
             raise ValueError(f"Pair {pid} preprocessing did not align current/next particle identities")
         future_id_sets = [set(ids.tolist()) for ids in future_id_sets]
-        while True:
-            common_ids = [identity for identity in current_ids
-                          if all(identity in available for available in future_id_sets)]
-            if common_ids or not future_id_sets:
-                break
-            # End the rollout before correspondence disappears for every particle.
-            future_id_sets.pop()
-            future_pair_ids.pop()
-            rollout_time_indices.pop()
+        if self.rollout_horizon > 1 and len(future_pair_ids) == 0:
+            raise RuntimeError(
+                f"Pair {pid} has no chainable future pairs. "
+                "Re-run scripts/preprocess.py after identity-tracking fix."
+            )
+        common_ids = [identity for identity in current_ids
+                      if all(identity in available for available in future_id_sets)]
         if len(common_ids) > self.max_particles:
             rng = np.random.default_rng(pid)
             selected = np.sort(rng.choice(len(common_ids), size=self.max_particles, replace=False))

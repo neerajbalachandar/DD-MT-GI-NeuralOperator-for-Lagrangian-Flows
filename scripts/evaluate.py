@@ -21,8 +21,11 @@ from gino.dynamics.rollout import inference_rollout
 from gino.dynamics.state_transition import predict_next_state
 from gino.model.gino import GINOSharedLatent, build_latent_grid
 from gino.utils import load_config, write_json
-from visualization.fields import plot_native_ux_comparison, plot_normalized_ux_profiles
-from visualization.temporal import plot_temporal_errors, plot_rollout_snapshots
+from visualization.fields import (plot_native_ux_comparison, plot_normalized_ux_profiles,
+                                  plot_velocity_magnitude_summary)
+from visualization.temporal import (plot_temporal_errors, plot_rollout_snapshots,
+                                    plot_rmse_vs_phase_grid)
+from visualization.evaluation import plot_state_parity, plot_field_error_maps
 
 
 def main():
@@ -91,12 +94,12 @@ def main():
     pair_ids = np.asarray(data[split_key], dtype=np.int64)
     if pair_ids.size == 0:
         raise ValueError(f"Evaluation split {split!r} is empty in {data_path}.")
-    horizons = [int(h) for h in cfg["evaluation"].get("rollout_horizons", [1])]
-    if not horizons or any(h < 1 for h in horizons):
+    requested_horizons = [int(h) for h in cfg["evaluation"].get("rollout_horizons", [1])]
+    if not requested_horizons or any(h < 1 for h in requested_horizons):
         raise ValueError("evaluation.rollout_horizons must be a non-empty list of positive integers.")
-    rollout_horizon = max(horizons)
+    rollout_horizon = max(requested_horizons)
     residual_channels = len(target_names)
-    ds = EvolutionDataset(data, pair_ids, features, global_names, cfg["data"]["max_particles"], cfg["data"]["max_queries"], rollout_horizon, stats, residual_channels)
+    ds = EvolutionDataset(data, pair_ids, features, global_names, cfg["data"]["max_particles"], cfg["data"]["max_queries"], 1, stats, residual_channels)
     loader = DataLoader(ds, batch_size=1, shuffle=False, collate_fn=collate_one)
     max_batches = int(cfg["evaluation"].get("max_batches", 0))
     if max_batches < 0:
@@ -105,7 +108,8 @@ def main():
         from itertools import islice
         loader = list(islice(loader, max_batches))
     latent = build_latent_grid(model_cfg["latent_res"], device)
-    records = evaluate_one_step(model, loader, latent, stats, device)
+    one_step_visuals = {}
+    records = evaluate_one_step(model, loader, latent, stats, device, visual_samples=one_step_visuals)
     cases = sorted({record.get("case", "unknown") for record in records})
     for case in cases:
         case_records = [record for record in records if record.get("case", "unknown") == case]
@@ -117,19 +121,52 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
     rollout_records = []
-    max_horizon = max(horizons)
     rollout_visuals = {}
-    rollout_ds = EvolutionDataset(data, pair_ids, features, global_names,
+    chain_diagnostic_ds = EvolutionDataset(data, pair_ids, features, global_names,
+                                          cfg["data"]["max_particles"], cfg["data"]["max_queries"],
+                                          rollout_horizon, stats, residual_channels)
+    chain_lengths = {int(pair_id): chain_diagnostic_ds.chain_length(int(pair_id)) for pair_id in pair_ids}
+    available_steps = max(chain_lengths.values(), default=0)
+    if available_steps < 1:
+        raise RuntimeError("Evaluation data has no available rollout steps.")
+    horizons = sorted({min(h, available_steps) for h in requested_horizons})
+    if horizons != sorted(set(requested_horizons)):
+        print(f"[rollout] available chain supports {available_steps} steps; capping requested horizons "
+              f"{sorted(set(requested_horizons))} to {horizons}")
+    max_horizon = max(horizons)
+    rollout_horizon = max_horizon
+    for horizon in horizons:
+        unavailable_pairs = sum(length < horizon for length in chain_lengths.values())
+        if unavailable_pairs:
+            print(f"[rollout] H={horizon} unavailable for {unavailable_pairs} split pairs: "
+                  "their chain is shorter than the requested horizon")
+    rollout_pair_ids = (np.asarray([pair_id for pair_id in pair_ids
+                                    if chain_lengths[int(pair_id)] >= 2], dtype=np.int64)
+                        if max_horizon > 1 else pair_ids)
+    if max_horizon > 1 and not len(rollout_pair_ids):
+        raise RuntimeError("No evaluation pair has a chainable future; inspect chain_length and "
+                           "re-run scripts/preprocess.py after the identity-tracking fix.")
+    rollout_ds = EvolutionDataset(data, rollout_pair_ids, features, global_names,
                                  cfg["data"]["max_particles"], cfg["data"]["max_queries"], rollout_horizon,
                                  stats, residual_channels, require_verified_correspondence=max_horizon > 1)
+    # Starts are filtered for chainability, but their futures may pass through
+    # terminal pairs that are not themselves valid rollout starts.
+    rollout_ds.allowed_pair_ids = set(pair_ids.tolist())
     rollout_loader = DataLoader(rollout_ds, batch_size=1, shuffle=False, collate_fn=collate_one)
+    rollout_total = min(len(rollout_ds), max_batches) if max_batches else len(rollout_ds)
     if max_batches:
         from itertools import islice
         rollout_loader = islice(rollout_loader, max_batches)
     model.eval()
+    skipped_horizons = {horizon: 0 for horizon in horizons}
     with torch.inference_mode():
-        for batch in rollout_loader:
+        for batch_index, batch in enumerate(rollout_loader, start=1):
             targets = batch["rollout_state_targets"]
+            avail = targets.shape[1]
+            if avail < min(horizons):
+                pair_id = int(batch["pair_id"][0])
+                raise RuntimeError(f"Pair {pair_id} provides {avail} rollout steps, fewer than the minimum "
+                                   f"requested horizon {min(horizons)}. Inspect EvolutionDataset.chain_length.")
             steps = min(max_horizon, int(targets.shape[1]))
             if steps <= 0:
                 continue
@@ -181,22 +218,33 @@ def main():
                                        "field_relative_l2": relative_l2(field_prediction[..., :3], field_target[..., :3]),
                                        "field_all_channel_mse": mse(field_prediction, field_target)})
                     rollout_records.append(record)
+                else:
+                    skipped_horizons[h] += 1
             del pred_states, pred_fields, batch, targets
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-    for case in sorted({record.get("case", "unknown") for record in rollout_records}):
+            if batch_index % 50 == 0 or batch_index == rollout_total:
+                print(f"[rollout] processed {batch_index}/{rollout_total} pairs", flush=True)
+    for horizon, count in skipped_horizons.items():
+        if count:
+            print(f"[rollout] skipped H={horizon} for {count} evaluated pairs: "
+                  "the batch contains fewer rollout targets than this horizon")
+    rollout_cases = sorted({str(record.get("case", "unknown")) for record in records})
+    for case in rollout_cases:
         case_records = [record for record in rollout_records if record.get("case", "unknown") == case]
-        for horizon in sorted({int(record["horizon"]) for record in case_records}):
+        for horizon in horizons:
             rows = [record for record in case_records if int(record["horizon"]) == horizon]
-            summary = (f"rollout {case} H={horizon}: {len(rows)} pairs | "
-                       f"position RMSE={np.mean([row['position_rmse'] for row in rows]):.6g} | "
-                       f"circulation RMSE={np.mean([row['circulation_rmse'] for row in rows]):.6g} | "
-                       f"sigma RMSE={np.mean([row['sigma_rmse'] for row in rows]):.6g}")
+            if not rows:
+                print(f"rollout coverage {case} H={horizon}: n_pairs=0 | position_relative_l2=n/a | field_relative_l2=n/a")
+                continue
+            summary = (f"rollout coverage {case} H={horizon}: n_pairs={len(rows)} | "
+                       f"position_relative_l2={np.mean([row['position_relative_l2'] for row in rows]):.6g}")
             field_rows = [row for row in rows if "field_mse" in row]
             if field_rows:
-                summary += (f" | field MSE={np.mean([row['field_mse'] for row in field_rows]):.6g}"
-                            f" | field relL2={np.mean([row['field_relative_l2'] for row in field_rows]):.6g}")
+                summary += f" | field_relative_l2={np.mean([row['field_relative_l2'] for row in field_rows]):.6g}"
+            else:
+                summary += " | field_relative_l2=n/a"
             print(summary)
+        if not case_records:
+            continue
         final_horizon = max(int(row["horizon"]) for row in case_records)
         final_rows = [row for row in case_records if int(row["horizon"]) == final_horizon]
         time_average = float(np.mean([row["position_rmse"] for row in case_records]))
@@ -208,17 +256,29 @@ def main():
     native_visual_candidates = {}
     native_root_value = str(cfg["data"].get("native_task2_root", "")).strip()
     native_root = str((HERE / native_root_value).resolve()) if native_root_value and not Path(native_root_value).is_absolute() else native_root_value
+    allow_missing_native = cfg["evaluation"].get(
+        "allow_missing_native_task2", cfg["data"].get("allow_missing_native_task2", False))
     stored_contexts = data.get("pair_contexts", [])
-    has_stored_native_paths = any(
-        bool((item.item() if isinstance(item, np.ndarray) else item).get("task2_field_path", ""))
-        for item in stored_contexts
-    )
-    if native_root or has_stored_native_paths:
-        field_superres_ids = np.asarray(data.get("field_superres_pair_ids", []), dtype=np.int64)
-        native_pair_ids = np.unique(np.concatenate((pair_ids, field_superres_ids)))
-        field_superres_set = set(field_superres_ids.tolist())
+    field_superres_ids = np.asarray(data.get("field_superres_pair_ids", []), dtype=np.int64)
+    native_candidates = np.unique(np.concatenate((pair_ids, field_superres_ids)))
+    field_superres_set = set(field_superres_ids.tolist())
+    native_paths = {}
+    for pair_id in native_candidates:
+        raw_context = stored_contexts[int(pair_id)] if len(stored_contexts) else {}
+        if isinstance(raw_context, np.ndarray):
+            raw_context = raw_context.item()
+        matched_path = str(raw_context.get("task2_field_path", ""))
+        path = Path(matched_path) if matched_path else None
+        if path is not None and not path.is_file() and native_root:
+            path = Path(native_root) / str(raw_context.get("case", "")) / path.name
+        if path is not None and path.is_file():
+            native_paths[int(pair_id)] = path
+    if native_paths:
+        native_pair_ids = np.asarray(sorted(native_paths), dtype=np.int64)
+        print(f"[native Task-2] evaluating {len(native_pair_ids)} readable frames; "
+              f"skipping {len(native_candidates) - len(native_pair_ids)} missing paths")
         native_ds = EvolutionDataset(data, native_pair_ids, features, global_names,
-                                     cfg["data"]["max_particles"], cfg["data"]["max_queries"], rollout_horizon, stats, residual_channels)
+                                     cfg["data"]["max_particles"], cfg["data"]["max_queries"], 1, stats, residual_channels)
         native_loader = DataLoader(native_ds, batch_size=1, shuffle=False, collate_fn=collate_one)
         if max_batches:
             from itertools import islice
@@ -229,12 +289,7 @@ def main():
             raw_context = data.get("pair_contexts", [])[pair_id]
             if isinstance(raw_context, np.ndarray):
                 raw_context = raw_context.item()
-            matched_path = str(raw_context.get("task2_field_path", ""))
-            path = Path(matched_path) if matched_path else None
-            if path is not None and not path.is_file() and native_root:
-                path = Path(native_root) / str(context.get("case", "")) / path.name
-            if path is None or not path.is_file():
-                continue
+            path = native_paths[pair_id]
             # Native Task-2 U is the evaluation truth. Gradient channels elsewhere in
             # the pipeline are finite-difference derivatives, not stored measurements.
             native_xyz, native_truth = read_task2_velocity(path)
@@ -298,8 +353,6 @@ def main():
                 "x": x_axis, "z": z_axis,
                 "true_velocity": true_velocity_slice, "predicted_velocity": predicted_velocity_slice})
             del native_batch, plane_batch, result, plane_result
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
         for case, role in sorted({(record.get("case", "unknown"), record["evaluation_role"])
                                   for record in native_records}):
             rows = [record for record in native_records
@@ -307,6 +360,12 @@ def main():
             print(f"native Task-2 {case} ({role}): {len(rows)} frames | "
                   f"velocity MSE={np.mean([row['field_mse'] for row in rows]):.6g} | "
                   f"field relL2={np.mean([row['field_relative_l2'] for row in rows]):.6g}")
+    if not native_records and not allow_missing_native:
+        raise RuntimeError("Native Task-2 evaluation produced no records. Check stored task2_field_path "
+                           "values or set evaluation.allow_missing_native_task2=true to allow this.")
+    if not native_records:
+        print("[native Task-2] skipped: no readable source field files were found; "
+              "one-step and rollout evaluation results will still be saved.")
     out_dir = checkpoint_path.parent / "evaluation"
     out_dir.mkdir(parents=True, exist_ok=True)
     write_json(out_dir / "one_step.json", {"checkpoint": str(checkpoint_path), "dataset": str(data_path),
@@ -347,6 +406,46 @@ def main():
                 freestream_speed=sample["freestream_magnitude"], chord=chord,
                 leading_edge_x=leading_edge,
                 x_stations_over_c=cfg["evaluation"].get("profile_x_over_c", [0.2, 0.4, 0.6]))
+        roles_by_case = {}
+        for case_name, role in native_visual_candidates:
+            roles_by_case.setdefault(case_name, set()).add(role)
+        requested_phases = (0.3, 0.5, 0.7)
+        for case_name, roles in sorted(roles_by_case.items()):
+            for role in ("field_superresolution", "test", "validation"):
+                if role not in roles:
+                    continue
+                candidates = native_visual_candidates[(case_name, role)]
+                samples = [min(candidates, key=lambda item: abs(item["phase"] - phase))
+                           for phase in requested_phases]
+                x_axis, z_axis = samples[0]["x"], samples[0]["z"]
+                true_slices = np.stack([sample["true_velocity"] for sample in samples])
+                predicted_slices = np.stack([sample["predicted_velocity"] for sample in samples])
+                speeds = [sample["freestream_magnitude"] if sample["freestream_magnitude"] > 0 else 1.0
+                          for sample in samples]
+                safe_case = case_name.replace("/", "_")
+                role_suffix = "" if role == "test" else f"_{role}"
+                plot_velocity_magnitude_summary(
+                    x_axis, z_axis, true_slices, predicted_slices, speeds,
+                    out_dir / f"velocity_magnitude_summary_{safe_case}{role_suffix}.png",
+                    phases=requested_phases,
+                    x_stations=cfg["evaluation"].get("profile_x_over_c", [0.2, 0.4, 0.6]),
+                    y_plane=float(samples[0]["y_plane"]))
+    if cfg["evaluation"].get("save_parity_plots", True):
+        test_cases = sorted({str(record.get("case", "unknown")) for record in records})
+        for case_name in test_cases:
+            sample = one_step_visuals.get(case_name)
+            if sample is None:
+                continue
+            safe_case = case_name.replace("/", "_")
+            plot_state_parity(sample["truth"], sample["prediction"],
+                              out_dir / f"one_step_state_parity_{safe_case}.png",
+                              title=f"{case_name}: one-step particle state")
+            if "field_truth" in sample:
+                plot_field_error_maps(sample["coords"], sample["field_truth"], sample["field_prediction"],
+                                      out_dir / f"field_error_maps_{safe_case}.png",
+                                      title=f"{case_name}: one-step field prediction error")
+    if cfg["evaluation"].get("save_plots", True):
+        plot_rmse_vs_phase_grid(records, out_dir)
     if records:
         with open(out_dir / "one_step.csv", "w", newline="", encoding="utf-8") as stream:
             columns = list(dict.fromkeys(key for record in records for key in record))

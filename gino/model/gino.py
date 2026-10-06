@@ -33,7 +33,9 @@ class GINOSharedLatent(nn.Module):
 
         self.lift = nn.Sequential(nn.Linear(in_channels, hidden), nn.GELU(), nn.Linear(hidden, hidden))
         self.global_condition_mlp = nn.Sequential(nn.Linear(global_channels, hidden), nn.GELU(), nn.Linear(hidden, hidden))
-        self.encoder = build_gno_block(hidden, hidden, cfg["gno_radius"])
+        self.encoder = build_gno_block(
+            hidden, hidden, cfg["gno_radius"], cfg["query_pos_encoding_frequencies"]
+        )
         self.fno = build_fno(hidden, cfg["fno_modes"], cfg["fno_layers"], self.latent_res)
 
         query_dim = 3 + 6 * self.query_pe_freqs

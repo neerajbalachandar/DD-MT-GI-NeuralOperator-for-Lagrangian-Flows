@@ -89,6 +89,8 @@ def main():
         validation_source = "case-level plus train-case temporal holdout"
     if split["train_pair_ids"].size == 0:
         raise ValueError("Training split is empty; check the processed dataset's case assignments.")
+    names = [str(x) for x in data["feature_names"].tolist()]
+    in_names = cfg["data"]["input_features"]
     if split["val_pair_ids"].size == 0:
         raise ValueError(
             "Validation split is empty and cannot be created: the dataset needs at least two non-test cases."
@@ -96,6 +98,7 @@ def main():
     if np.intersect1d(split["train_pair_ids"], split["val_pair_ids"]).size:
         raise ValueError("Training and validation pair IDs overlap; provide a leakage-free split.")
     print(f"[split] validation source: {validation_source}")
+    max_h = int(cfg["training"].get("rollout_horizon_max", 16))
     sequence_training = bool(cfg["training"].get("use_rollout_loss") or cfg["training"].get("use_pushforward"))
     if sequence_training:
         contexts = data.get("pair_contexts", [])
@@ -116,7 +119,12 @@ def main():
                 "`python3 scripts/preprocess.py` before training."
             )
         requested_horizon = min(int(training_cfg.get("rollout_horizon_max", max(schedule))), max(schedule))
-        available_horizon = maximum_available_horizon(data, split["train_pair_ids"], requested_horizon)
+        chain_diagnostics = EvolutionDataset(
+            data, split["train_pair_ids"], in_names,
+            cfg["data"]["global_condition_channels"], rollout_horizon=requested_horizon)
+        train_chain_lengths = {int(pair_id): chain_diagnostics.chain_length(int(pair_id))
+                               for pair_id in split["train_pair_ids"]}
+        available_horizon = max(train_chain_lengths.values(), default=0)
         if available_horizon < 2:
             raise ValueError(
                 "The processed training split contains no multi-step chains with shared tracked particles, "
@@ -126,24 +134,56 @@ def main():
         print(f"[rollout] longest available training chain: {available_horizon} steps "
               f"(configured maximum: {requested_horizon})")
 
-    names = [str(x) for x in data["feature_names"].tolist()]
-    in_names = cfg["data"]["input_features"]
     indices = [names.index(n) for n in in_names]
     field_holdout_ids = np.asarray(data.get("field_superres_pair_ids", []), dtype=np.int64)
     field_train_ids = np.setdiff1d(split["train_pair_ids"], field_holdout_ids)
     stats = NormalizationStats.fit_train_sequences(data, split["train_pair_ids"], indices,
                                                    field_pair_ids=field_train_ids)
     max_p, max_q = cfg["data"]["max_particles"], cfg["data"]["max_queries"]
-    max_h = int(cfg["training"].get("rollout_horizon_max", 16))
     delta_channels = 10 if cfg["model"].get("predict_delta_u", True) else 7
-    make_ds = lambda ids, teacher=False, excluded_fields=None: EvolutionDataset(
+    make_ds = lambda ids, horizon, teacher=False, excluded_fields=None: EvolutionDataset(
         data, ids, in_names, cfg["data"]["global_condition_channels"], max_p, max_q,
-        max_h, stats, delta_channels, include_teacher_inputs=teacher,
+        horizon, stats, delta_channels, include_teacher_inputs=teacher,
         require_verified_correspondence=sequence_training,
         field_target_exclude_ids=excluded_fields)
-    train_ds = make_ds(split["train_pair_ids"], cfg["training"].get("use_scheduled_sampling", False),
-                       field_holdout_ids)
-    val_ds = make_ds(split["val_pair_ids"])
+    training_pair_ids = split["train_pair_ids"]
+    validation_pair_ids = split["val_pair_ids"]
+    if sequence_training:
+        diagnostic_ds = EvolutionDataset(data, training_pair_ids, in_names,
+                                         cfg["data"]["global_condition_channels"], rollout_horizon=max_h)
+
+        def has_rollout_overlap(pair_id):
+            row = data["pair_ranges"][int(pair_id)]
+            shared_ids = set(diagnostic_ds._pair_particle_ids(int(pair_id), "t").tolist())
+            expected_frame = str(row[2])
+            next_id = diagnostic_ds.next_pair.get(int(pair_id))
+            future_count = 0
+            while (next_id is not None and next_id in diagnostic_ds.allowed_pair_ids
+                   and future_count < max_h - 1):
+                next_row = data["pair_ranges"][next_id]
+                if str(next_row[0]) != str(row[0]) or str(next_row[1]) != expected_frame:
+                    return False
+                shared_ids.intersection_update(diagnostic_ds._pair_particle_ids(next_id, "t").tolist())
+                if not shared_ids:
+                    return False
+                future_count += 1
+                expected_frame = str(next_row[2])
+                next_id = diagnostic_ds.next_pair.get(next_id)
+            return future_count > 0
+
+        training_pair_ids = np.asarray([
+            pid for pid in training_pair_ids
+            if diagnostic_ds.chain_length(int(pid)) >= 2 and has_rollout_overlap(int(pid))
+        ], dtype=np.int64)
+        if not training_pair_ids.size:
+            raise ValueError("Rollout training requires chainable training pairs; "
+                             "re-run scripts/preprocess.py after identity-tracking fix.")
+    train_ds = make_ds(training_pair_ids, max_h,
+                       cfg["training"].get("use_scheduled_sampling", False), field_holdout_ids)
+    # Keep all in-split transitions available as rollout context, including a
+    # terminal pair that is not itself a valid multi-step training start.
+    train_ds.allowed_pair_ids = set(split["train_pair_ids"].tolist())
+    val_ds = make_ds(validation_pair_ids, 1)
     model = GINOSharedLatent(len(in_names), delta_channels, len(data["field_target_names"]),
                              len(cfg["data"]["global_condition_channels"]), cfg["model"]).to(device)
     latent = build_latent_grid(cfg["model"]["latent_res"], device)
