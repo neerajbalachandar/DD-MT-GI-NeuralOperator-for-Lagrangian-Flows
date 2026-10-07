@@ -2,7 +2,7 @@ seed: 42
 device: auto
 data:
   dataset: processed_data/particle_evolution_dataset.npz
-  native_task2_root: ""
+  native_task2_root: "/media/neerajc/New Volume/Neeraj/NeuralOp_Data/task2"
   allow_missing_native_task2: false
   # We should be using a different notations for quantities evaluated at particle locations alone.
   input_features: [u_x, u_y, u_z, sigma, geom_dist, Gamma_x, Gamma_y, Gamma_z, gradU_xx, gradU_xy, gradU_xz, gradU_yx, gradU_yy, gradU_yz, gradU_zx, gradU_zy, gradU_zz]
