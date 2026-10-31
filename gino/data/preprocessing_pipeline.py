@@ -194,11 +194,9 @@ GEOM_MIN_NONZERO_FRAC = 1e-4
 GEOM_MIN_NEAR_FRAC = 1e-5
 
 # This optional protocol is intended to reserve some frames from each training case for an internal validation set. It is separate from the case-level validation split defined above.
-USE_DUAL_SPLIT_PROTOCOL = False
+USE_DUAL_SPLIT_PROTOCOL = True
 VAL_ID_FRACTION_FROM_TRAIN_CASES = 0.2
 VAL_ID_MIN_FRAMES_PER_TRAIN_CASE = 8
-VAL_ID_FRAME_STRIDE = 5
-VAL_ID_FRAME_OFFSET = 2
 
 CONDITIONING_ALLOWED_CONSTANT_CHANNELS: set = set()
 
@@ -1298,7 +1296,8 @@ def _validate_geometry_report(entries: List[Dict[str, Any]]) -> None:
 #     return True, "ok"
 
 
-# This routine optionally removes a regularly spaced subset of frames from the training cases for an internal validation check, while leaving the cases themselves in the training group.
+# Reserve one contiguous block of transitions per training case. Regularly
+# spaced holdouts destroy the adjacent-pair chains needed for rollout loss.
 def _train_id_val_id_split_by_case(frame_ranges: List[Tuple], train_frame_ids: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     if not USE_DUAL_SPLIT_PROTOCOL or train_frame_ids.size == 0:
         return train_frame_ids, np.zeros((0,), dtype=np.int64)
@@ -1317,22 +1316,13 @@ def _train_id_val_id_split_by_case(frame_ranges: List[Tuple], train_frame_ids: n
             train_out.extend(ids_sorted)
             continue
 
-        stride = max(int(VAL_ID_FRAME_STRIDE), 2)
-        offset = min(max(int(VAL_ID_FRAME_OFFSET), 0), stride - 1)
-        val_ids = ids_sorted[offset::stride]
-
-        min_val = min(max(int(VAL_ID_MIN_FRAMES_PER_TRAIN_CASE), 1), max(n - 1, 1))
-        if len(val_ids) < min_val:
-            needed = min_val - len(val_ids)
-            existing = set(val_ids)
-            supplement = [j for j in ids_sorted if j not in existing][:needed]
-            val_ids.extend(supplement)
-
+        fraction = min(max(float(VAL_ID_FRACTION_FROM_TRAIN_CASES), 0.0), 0.8)
+        min_val = max(int(VAL_ID_MIN_FRAMES_PER_TRAIN_CASE), 1)
+        val_count = min(max(int(np.ceil(n * fraction)), min_val), n - 1)
+        offset = (n - val_count) // 2
+        val_ids = ids_sorted[offset:offset + val_count]
         val_set = set(val_ids)
         train_ids = [j for j in ids_sorted if j not in val_set]
-        if not train_ids:
-            train_ids = ids_sorted[:-1]
-            val_ids = ids_sorted[-1:]
 
         val_id_out.extend(val_ids)
         train_out.extend(train_ids)

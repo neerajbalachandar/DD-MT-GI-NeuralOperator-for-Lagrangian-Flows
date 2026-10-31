@@ -1,5 +1,6 @@
 from pathlib import Path
 from functools import lru_cache
+import os
 
 import numpy as np
 
@@ -10,12 +11,27 @@ def _load_vtk_geom_cached(vtk_path: str):
     return _load_vtk_geom(vtk_path)
 
 
-def particle_geometry_features(xyz, vtk_path):
+def _resolve_vtk_path(vtk_path, case=None):
+    source = Path(str(vtk_path or "")).expanduser()
+    if source.is_file():
+        return source
+    roots = [Path(value).expanduser() for key in ("TASK1_GEOMETRY_ROOT", "TASK1_ROOT")
+             if (value := os.environ.get(key, "").strip())]
+    for root in roots:
+        candidates = ([root / str(case) / source.name, root / source.name]
+                      if case else [root / source.name])
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+    raise FileNotFoundError(
+        f"Rollout needs the source VTK geometry {source}. Set TASK1_GEOMETRY_ROOT "
+        "to the Task-1 root if the source files were moved."
+    )
+
+
+def particle_geometry_features(xyz, vtk_path, case=None):
     """Use the canonical VTK nearest-point rule to refresh rollout features."""
-    if not vtk_path or not Path(vtk_path).is_file():
-        raise FileNotFoundError(
-            "Rollout needs the frame's source VTK geometry; rerun scripts/preprocess.py while the Task-1 VTK mount is available"
-        )
+    vtk_path = _resolve_vtk_path(vtk_path, case)
     from .preprocessing_pipeline import GEOMETRY_NEAR_THRESHOLD, USE_GEOMETRY_CHANNELS
 
     q = np.asarray(xyz, dtype=np.float64).reshape(-1, 3)
@@ -25,8 +41,7 @@ def particle_geometry_features(xyz, vtk_path):
                 "geom_nz": zeros.copy(), "geom_body_near": zeros.copy()}
     points, normals, tree = _load_vtk_geom_cached(str(vtk_path))
     if points is None or normals is None or len(points) == 0:
-        return {"geom_dist": zeros, "geom_nx": zeros.copy(), "geom_ny": zeros.copy(),
-                "geom_nz": zeros.copy(), "geom_body_near": zeros.copy()}
+        raise ValueError(f"Could not load usable surface points and normals from VTK geometry {vtk_path}")
     if tree is not None:
         distances, indices = tree.query(q, k=1)
     else:

@@ -227,7 +227,7 @@ def main():
         if count:
             print(f"[rollout] skipped H={horizon} for {count} evaluated pairs: "
                   "the batch contains fewer rollout targets than this horizon")
-    rollout_cases = sorted({str(record.get("case", "unknown")) for record in records})
+    rollout_cases = sorted({str(record.get("case", "unknown")) for record in rollout_records})
     for case in rollout_cases:
         case_records = [record for record in rollout_records if record.get("case", "unknown") == case]
         for horizon in horizons:
@@ -290,13 +290,27 @@ def main():
             if isinstance(raw_context, np.ndarray):
                 raw_context = raw_context.item()
             path = native_paths[pair_id]
+            if not bool(batch.get("field_available", True)):
+                print(f"[native Task-2] skipping pair {pair_id}: preprocessing has no query samples "
+                      "to compare against one-step evaluation")
+                continue
             # Native Task-2 U is the evaluation truth. Gradient channels elsewhere in
             # the pipeline are finite-difference derivatives, not stored measurements.
             native_xyz, native_truth = read_task2_velocity(path)
-            take = np.arange(len(native_xyz))
-            if len(take) > int(cfg["data"]["max_queries"]):
-                take = take[np.linspace(0, len(take) - 1, int(cfg["data"]["max_queries"]), dtype=np.int64)]
-            xyz, truth = native_xyz[take], native_truth[take]
+            valid = np.isfinite(native_xyz).all(axis=1) & np.isfinite(native_truth).all(axis=1)
+            native_xyz, native_truth = native_xyz[valid], native_truth[valid]
+            # Reuse precisely the preprocessed query coordinates used by the
+            # one-step evaluator, then retrieve native U at those same nodes.
+            # This makes both scores a controlled comparison of identical
+            # spatial samples and excludes invalid native values.
+            xyz = batch["query_xyz_phys"][0].cpu().numpy()
+            native_lookup = {tuple(point.tolist()): i for i, point in enumerate(native_xyz)}
+            matched = [(j, native_lookup.get(tuple(point.tolist()))) for j, point in enumerate(xyz)]
+            matched = [(j, i) for j, i in matched if i is not None]
+            if not matched:
+                raise ValueError(f"No preprocessed query coordinates match finite native nodes in {path}")
+            query_indices, native_indices = map(np.asarray, zip(*matched))
+            xyz, truth = xyz[query_indices], native_truth[native_indices]
             normalized_native_xyz = (native_xyz - stats.coord_min) / np.maximum(stats.coord_span, 1e-8)
             outside_fraction = float(np.mean(np.any((normalized_native_xyz < 0.0) |
                                                      (normalized_native_xyz > 1.0), axis=1)))

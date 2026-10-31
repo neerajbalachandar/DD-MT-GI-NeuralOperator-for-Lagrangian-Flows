@@ -49,6 +49,39 @@ def maximum_available_horizon(data, pair_ids, limit):
     return maximum
 
 
+def report_identity_retention(dataset, pair_ids, horizon, split_name):
+    """Report rho_k: fraction of each start's particles still shared at step k."""
+    counts = {}
+    for pair_id in pair_ids:
+        pair_id = int(pair_id)
+        row = dataset.data["pair_ranges"][pair_id]
+        case = str(row[0])
+        initial = set(dataset._pair_particle_ids(pair_id, "t").tolist())
+        shared = set(initial)
+        expected_frame = str(row[2])
+        next_id = dataset.next_pair.get(pair_id)
+        for step in range(1, int(horizon)):
+            if next_id is None or next_id not in dataset.allowed_pair_ids:
+                break
+            next_row = dataset.data["pair_ranges"][next_id]
+            if str(next_row[0]) != case or str(next_row[1]) != expected_frame:
+                break
+            shared.intersection_update(dataset._pair_particle_ids(next_id, "t").tolist())
+            entry = counts.setdefault((case, step + 1), [0, 0])
+            entry[0] += len(shared)
+            entry[1] += len(initial)
+            if not shared:
+                break
+            expected_frame = str(next_row[2])
+            next_id = dataset.next_pair.get(next_id)
+    for case in sorted({key[0] for key in counts}):
+        values = [f"rho_{step}={numerator / denominator:.3f}"
+                  for (item_case, step), (numerator, denominator) in sorted(counts.items())
+                  if item_case == case]
+        if values:
+            print(f"[identity] {split_name} {case}: " + ", ".join(values))
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train the shared latent VPM GINO.")
     parser.add_argument("--config", default=str(HERE / "configs/default.yaml"))
@@ -133,6 +166,12 @@ def main():
             )
         print(f"[rollout] longest available training chain: {available_horizon} steps "
               f"(configured maximum: {requested_horizon})")
+        # Do not spend epochs requesting rollout lengths the processed data
+        # cannot supply. Keep the curriculum intact while capping its tail.
+        max_h = min(max_h, available_horizon)
+        schedule = [min(int(h), max_h) for h in schedule]
+        training_cfg["rollout_horizon_max"] = max_h
+        training_cfg["rollout_horizon_schedule"] = schedule
 
     indices = [names.index(n) for n in in_names]
     field_holdout_ids = np.asarray(data.get("field_superres_pair_ids", []), dtype=np.int64)
@@ -183,7 +222,37 @@ def main():
     # Keep all in-split transitions available as rollout context, including a
     # terminal pair that is not itself a valid multi-step training start.
     train_ds.allowed_pair_ids = set(split["train_pair_ids"].tolist())
-    val_ds = make_ds(validation_pair_ids, 1)
+    validation_diagnostics = EvolutionDataset(
+        data, validation_pair_ids, in_names, cfg["data"]["global_condition_channels"],
+        rollout_horizon=max_h)
+    validation_chain_lengths = {
+        int(pair_id): validation_diagnostics.chain_length(int(pair_id))
+        for pair_id in validation_pair_ids
+    }
+    validation_horizon = min(max_h, max(validation_chain_lengths.values(), default=1))
+    if sequence_training and validation_horizon < 2:
+        raise ValueError(
+            "The validation split has no multi-step particle chain. Reprocess with the contiguous "
+            "train-case validation holdout enabled; a one-step validation score cannot select "
+            "checkpoints for rollout training."
+        )
+    validation_starts = (np.asarray([pid for pid in validation_pair_ids
+                                     if validation_chain_lengths[int(pid)] >= 2], dtype=np.int64)
+                         if sequence_training else validation_pair_ids)
+    if sequence_training and not validation_starts.size:
+        raise ValueError("The validation split contains no chainable rollout starts.")
+    val_ds = make_ds(validation_starts, validation_horizon)
+    # Future pairs remain available as context, including terminal transitions
+    # that are not themselves used as validation starts.
+    val_ds.allowed_pair_ids = set(validation_pair_ids.tolist())
+    print(f"[validation] longest consecutive chain: {validation_horizon} steps; "
+          f"rollout starts: {len(validation_starts)}/{len(validation_pair_ids)}")
+    retention_train = EvolutionDataset(
+        data, split["train_pair_ids"], in_names,
+        cfg["data"]["global_condition_channels"], rollout_horizon=max_h)
+    report_identity_retention(retention_train, split["train_pair_ids"], max_h, "train")
+    report_identity_retention(validation_diagnostics, validation_pair_ids,
+                              validation_horizon, "validation")
     model = GINOSharedLatent(len(in_names), delta_channels, len(data["field_target_names"]),
                              len(cfg["data"]["global_condition_channels"]), cfg["model"]).to(device)
     latent = build_latent_grid(cfg["model"]["latent_res"], device)
@@ -193,6 +262,7 @@ def main():
                         for k in ("train_pair_ids", "val_pair_ids", "test_pair_ids")}
     checkpoint_split["field_superres_pair_ids"] = field_holdout_ids.tolist()
     checkpoint_split["validation_source"] = validation_source
+    checkpoint_split["validation_rollout_horizon"] = validation_horizon
     trainer = Trainer(model, latent, train_ds, val_ds, stats, training_cfg, run_dir, device)
     trainer.fit(cfg, {"dataset_path": str(dataset_path), "split": checkpoint_split, "normalization": norm_meta,
                       "feature_names": in_names, "target_names": [str(x) for x in data["target_names"][:delta_channels]],

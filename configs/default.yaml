@@ -31,30 +31,33 @@ model:
 
 training:
   run_dir: runs/
-  epochs: 80
+  epochs: 120
   batch_size: 1
   gradient_accumulation_steps: 4
   dataloader_num_workers: 8
   validation_every_n_epochs: 1
-  learning_rate: 0.0003
+  # Stability-first defaults: full precision avoids the complex-gradient autocast issue
+  # noted in the project review, while the lower LR reduces rollout drift.
+  learning_rate: 0.0001
   weight_decay: 0.00003
   scheduler: plateau
-  grad_clip_norm: 1.0
-  early_stopping_patience: 20
-  mixed_precision: true
+  grad_clip_norm: 0.5
+  early_stopping_patience: 30
+  mixed_precision: false
   use_state_loss: true
   use_field_loss: true
   use_rollout_loss: true
-  rollout_weight: 0.05
-  rollout_horizon_max: 16
-  rollout_horizon_schedule: [2, 2, 2, 4, 4, 8, 8, 16, 16, 16]
+  rollout_weight: 0.1
+  # The current tracked sequences support at most four consecutive steps.
+  rollout_horizon_max: 4
+  rollout_horizon_schedule: [2, 2, 3, 3, 4, 4, 4, 4, 4, 4]
   pushforward_weight: 0.0
   use_scheduled_sampling: true
-  scheduled_sampling_max_probability: 0.3
-  scheduled_sampling_ramp_epochs: 10
+  scheduled_sampling_max_probability: 0.2
+  scheduled_sampling_ramp_epochs: 12
   use_gns_noise: true
-  gns_initial_std: 0.01
-  gns_walk_std: 0.005
+  gns_initial_std: 0.005
+  gns_walk_std: 0.0025
   use_pushforward: false
   use_homoscedastic_weighting: true
   state_loss_weight: 1.0
@@ -63,7 +66,7 @@ training:
 evaluation:
   checkpoint: ""
   split: test
-  rollout_horizons: [1, 2, 4, 8, 16]
+  rollout_horizons: [1, 2, 4]
   max_batches: 0
   allow_missing_native_task2: true
   save_plots: true

@@ -1,16 +1,10 @@
-from pathlib import Path
-
 import torch
 
 from .geometry import particle_geometry_features
 from .context import RolloutContext
 
-_VTK_WARNING_PRINTED = False
-
-
 def rebuild_next_batch(batch, state_phys, particle_field_phys, normalization, differentiable=False):
     """Rebuild every model input channel from a predicted physical state and field."""
-    global _VTK_WARNING_PRINTED
     out = dict(batch)
     full = batch["particle_features_phys"].clone()
     names = batch["all_feature_names"]
@@ -34,17 +28,16 @@ def rebuild_next_batch(batch, state_phys, particle_field_phys, normalization, di
     vtk_path = context.get("vtk_path", "")
     geometry_names = {"geom_dist", "geom_nx", "geom_ny", "geom_nz", "geom_body_near"}
     if any(name in active for name in geometry_names):
-        if not vtk_path or not Path(vtk_path).is_file():
-            if not _VTK_WARNING_PRINTED:
-                print("[geometry] VTK path unavailable during rollout; retaining stored geometry features.")
-                _VTK_WARNING_PRINTED = True
-        else:
-            xyz = state_phys[..., :3].detach().cpu().numpy()
-            geom_features = particle_geometry_features(xyz.reshape(-1, 3), vtk_path)
-            for name, values in geom_features.items():
-                if name in idx:
-                    tensor = torch.as_tensor(values, dtype=full.dtype, device=full.device).reshape(*state_phys.shape[:-1])
-                    full[..., idx[name]] = tensor
+        # Geometry-conditioned rollouts must never reuse values tied to the
+        # previous particle positions. particle_geometry_features raises a
+        # clear error if the source VTK cannot be loaded.
+        xyz = state_phys[..., :3].detach().cpu().numpy()
+        geom_features = particle_geometry_features(
+            xyz.reshape(-1, 3), vtk_path, case=context.get("case"))
+        for name, values in geom_features.items():
+            if name in idx:
+                tensor = torch.as_tensor(values, dtype=full.dtype, device=full.device).reshape(*state_phys.shape[:-1])
+                full[..., idx[name]] = tensor
 
     phase = float(context.phase_t)
     phase_delta = float(context.phase_delta)
