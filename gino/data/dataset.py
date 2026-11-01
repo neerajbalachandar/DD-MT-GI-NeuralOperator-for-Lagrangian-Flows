@@ -8,6 +8,7 @@ from .context import RolloutContext
 SUPPORTED_ROLLOUT_CORRESPONDENCE = frozenset({
     "matched_source_particle_ids",
     "inferred_advected_position_tracking",
+    "fixed_particle_row_order",
 })
 
 

@@ -72,16 +72,16 @@ function run_vortexring_grid_simulation(pfield::vpm.ParticleField,
         # Modify smoothing radii to pre-condition conservation of mass in rVPM scheme
         if precondition_sigma
             for P in vpm.iterator(pfield; start_i=vpm.get_np(pfield)-Nphi+1)
-
-                x = (P.X[1]-Os[ri][1])*Oaxiss[ri][1, 1] + (P.X[2]-Os[ri][2])*Oaxiss[ri][2, 1] + (P.X[3]-Os[ri][3])*Oaxiss[ri][3, 1]
-                y = (P.X[1]-Os[ri][1])*Oaxiss[ri][1, 2] + (P.X[2]-Os[ri][2])*Oaxiss[ri][2, 2] + (P.X[3]-Os[ri][3])*Oaxiss[ri][3, 2]
+                X = vpm.get_X(P)
+                x = (X[1]-Os[ri][1])*Oaxiss[ri][1, 1] + (X[2]-Os[ri][2])*Oaxiss[ri][2, 1] + (X[3]-Os[ri][3])*Oaxiss[ri][3, 1]
+                y = (X[1]-Os[ri][1])*Oaxiss[ri][1, 2] + (X[2]-Os[ri][2])*Oaxiss[ri][2, 2] + (X[3]-Os[ri][3])*Oaxiss[ri][3, 2]
                 x /= sqrt(ARs[ri])
                 y *= sqrt(ARs[ri])
 
                 rho = sqrt(x^2 + y^2)               # Radius from centroid
 
-                P.sigma .*= sqrt(Rs[ri]/rho)
-                P.vol .*= Rs[ri]/rho
+                vpm.get_sigma(P) .*= sqrt(Rs[ri]/rho)
+                vpm.get_vol(P) .*= Rs[ri]/rho
             end
         end
 
@@ -97,11 +97,10 @@ function run_vortexring_grid_simulation(pfield::vpm.ParticleField,
 
             # Resize particle cores and store target vorticity under P.M[7:9]
             for P in vpm.iterate(pfield)
-
-                P.sigma[1] = restart_sigma
+                vpm.get_sigma(P)[1] = restart_sigma
 
                 for i in 1:3
-                    P.M[i+6] = get_J(P)[i]
+                    vpm.get_M(P)[i+6] = vpm.get_J(P)[i]
                 end
             end
 
@@ -120,9 +119,9 @@ function run_vortexring_grid_simulation(pfield::vpm.ParticleField,
         # Use analytic vorticity as target vorticity (stored under P.M[7:9])
         for P in vpm.iterator(pfield)
             W .= 0
-            W_fun!(W, P.X)
+            W_fun!(W, vpm.get_X(P))
             for i in 1:3
-                P.M[i+6] = W[i]
+                vpm.get_M(P)[i+6] = W[i]
             end
         end
         # RBF interpolation of the analytic distribution

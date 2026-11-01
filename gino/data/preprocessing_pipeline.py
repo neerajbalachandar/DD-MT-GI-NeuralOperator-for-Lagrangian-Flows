@@ -130,7 +130,10 @@ TARGET_DELTA_NAMES = [
     "delta_u_z",
 ]
 
-MAX_FIELD_QUERY_POINTS = 4096
+FIELD_GRID_POINTS = int(os.environ.get("FIELD_GRID_POINTS", "32"))
+MAX_FIELD_QUERY_POINTS = int(os.environ.get("MAX_FIELD_QUERY_POINTS", str(FIELD_GRID_POINTS ** 3)))
+if FIELD_GRID_POINTS < 2 or MAX_FIELD_QUERY_POINTS < 1:
+    raise ValueError("FIELD_GRID_POINTS must be >=2 and MAX_FIELD_QUERY_POINTS must be positive")
 FIELD_TARGET_NAMES = [
     "u_x", "u_y", "u_z",
     "dUx_dx", "dUx_dy", "dUx_dz",
@@ -143,17 +146,12 @@ FIELD_STD_FLOOR = float(os.environ.get("FIELD_STD_FLOOR", "1e-6"))
 FIELD_SUPERRESOLUTION_STRIDE = int(os.environ.get("FIELD_SUPERRESOLUTION_STRIDE", "5"))
 FIELD_SUPERRESOLUTION_OFFSET = int(os.environ.get("FIELD_SUPERRESOLUTION_OFFSET", "4"))
 XMF_TIME_MATCH_TOLERANCE = 1e-8
+FIXED_PARTICLE_ROW_ORDER = os.environ.get("FIXED_PARTICLE_ROW_ORDER", "1").strip().lower() not in {"0", "false", "no"}
 
 # These channels describe where a particle is relative to the body geometry. They are calculated from the VTK surface and are appended to the particle features when geometry conditioning is enabled.
-USE_GEOMETRY_CHANNELS = True
+USE_GEOMETRY_CHANNELS = False
 GEOMETRY_NEAR_THRESHOLD = 0.02
-GEOMETRY_CHANNEL_NAMES = [
-    "geom_dist",
-    "geom_nx",
-    "geom_ny",
-    "geom_nz",
-    "geom_body_near",
-]
+GEOMETRY_CHANNEL_NAMES: List[str] = []
 
 # These channels describe the global operating condition and the particle frame within the stored sequence. Their values are repeated for every particle in the same frame.
 USE_EXPLICIT_CONDITIONING = True
@@ -189,7 +187,7 @@ if USE_EXPLICIT_CONDITIONING:
 # MIN_PARTICLES_PER_FRAME = 64
 EXPORT_FILTERED_FRAME_MANIFEST = True
 
-STRICT_GEOMETRY_QA = True
+STRICT_GEOMETRY_QA = False
 GEOM_MIN_NONZERO_FRAC = 1e-4
 GEOM_MIN_NEAR_FRAC = 1e-5
 
@@ -233,7 +231,7 @@ def read_xmf_time(path: Path) -> float:
 
 
 def validate_task2_xmf_layout(xmf_path: Path, h5_path: Path) -> None:
-    """Check that XDMF declares node coordinates and nodal U on the same 65^3 mesh."""
+    """Check that XDMF declares coordinates and velocity on the configured mesh."""
     try:
         root = ET.parse(xmf_path).getroot()
     except (ET.ParseError, OSError) as exc:
@@ -260,7 +258,7 @@ def validate_task2_xmf_layout(xmf_path: Path, h5_path: Path) -> None:
 
     node_file, node_key, node_dims = reference(nodes_item)
     u_file, u_key, u_dims = reference(u_item)
-    expected = 65 ** 3
+    expected = FIELD_GRID_POINTS ** 3
     node_count = int(np.prod(node_dims[:-1])) if len(node_dims) == 2 and node_dims[-1] == 3 else (
         int(np.prod(node_dims[1:])) if len(node_dims) == 2 and node_dims[0] == 3 else -1
     )
@@ -519,7 +517,7 @@ def read_field_grid_h5(path: Path) -> Tuple[np.ndarray, np.ndarray]:
             _validate_structured_node_order(coords, raw_velocity.shape[1:], path)
         vel = as_vec_field(raw_velocity)
 
-    expected = 65 ** 3
+    expected = FIELD_GRID_POINTS ** 3
     if len(coords) != expected or len(vel) != expected:
         raise ValueError(
             f"{path}: expected exactly {expected} Task-2 nodes and velocity rows, "
@@ -1670,7 +1668,24 @@ def _load_and_track_case(case: str, plist: List[Path], meta: Dict[str, Any]):
     span = float(times[-1] - times[0])
     for frame in frames:
         frame["phase"] = 0.0 if span <= 0 else (float(frame["xmf_time"]) - float(times[0])) / span
-    _assign_advected_position_tracks(frames, case)
+    particle_counts = [len(frame["particle_ids"]) for frame in frames]
+    has_native_ids = any(
+        np.any(np.char.find(np.char.decode(_to_s32(frame["particle_ids"]), "utf-8"), ":id:") >= 0)
+        for frame in frames
+    )
+    if FIXED_PARTICLE_ROW_ORDER and not has_native_ids and len(set(particle_counts)) == 1:
+        # The selected vortex-ring data keeps the same particles in the same
+        # stored row order at every frame. Use that identity directly instead
+        # of nearest-neighbor tracking, which can swap close particles.
+        count = particle_counts[0]
+        row_ids = _to_s32([f"fixed-row:{index}" for index in range(count)])
+        for frame in frames:
+            frame["particle_ids"] = row_ids.copy()
+            frame["advected_tracking_mask"] = np.zeros(count, dtype=bool)
+            frame["advected_match_fraction"] = 1.0
+        print(f"[track] case={case} using fixed row correspondence for {count} particles across {len(frames)} frames")
+    else:
+        _assign_advected_position_tracks(frames, case)
     return frames
 
 
@@ -1777,7 +1792,9 @@ def _fill_one_case(case, case_plist, case_meta, case_pairs, field_entries,
             ids_concat[global_start:global_end] = common_ids
 
             decoded_common = np.char.decode(common_ids, "utf-8")
-            if np.all(np.char.find(decoded_common, ":id:") >= 0):
+            if np.all(np.char.find(decoded_common, "fixed-row:") >= 0):
+                correspondence = "fixed_particle_row_order"
+            elif np.all(np.char.find(decoded_common, ":id:") >= 0):
                 correspondence = "matched_source_particle_ids"
             elif np.all((np.char.find(decoded_common, "d:") >= 0)
                         | (np.char.find(decoded_common, "s:") >= 0)
@@ -2080,7 +2097,9 @@ def _build_particle_evolution_dataset_legacy(merged: List[Path]) -> Path:
 
             end = start + n
             pair_ranges.append((case, curr["frame_id"], nxt["frame_id"], start, end, n))
-            if all(":id:" in str(identity) for identity in common_ids):
+            if all("fixed-row:" in str(identity) for identity in common_ids):
+                correspondence_source = "fixed_particle_row_order"
+            elif all(":id:" in str(identity) for identity in common_ids):
                 correspondence_source = "matched_source_particle_ids"
             elif all(("d:" in str(identity) or "s:" in str(identity) or "sx:" in str(identity)
                       or ":id:" in str(identity)) for identity in common_ids):

@@ -135,11 +135,10 @@ function run_vortexring_simulation(
 
             # Resize particle cores and store target vorticity under P.M[7:9]
             for P in vpm.iterate(pfield)
-
-                P.sigma[1] = restart_sigma
+                vpm.get_sigma(P)[1] = restart_sigma
 
                 for i in 1:3
-                    P.M[i+6] = get_J(P)[i]
+                    vpm.get_M(P)[i+6] = vpm.get_J(P)[i]
                 end
             end
 
@@ -164,7 +163,7 @@ function run_vortexring_simulation(
                 P = vpm.get_particle(pfield, Pi)
 
                 W .= 0
-                W_fun!(W, P.X)
+                W_fun!(W, vpm.get_X(P))
                 magW = norm(W)
 
                 if magW/peakW <= minWfraction
@@ -180,9 +179,9 @@ function run_vortexring_simulation(
         # Use analytic vorticity as target vorticity (stored under P.M[7:9])
         for P in vpm.iterator(pfield)
             W .= 0
-            W_fun!(W, P.X)
+            W_fun!(W, vpm.get_X(P))
             for i in 1:3
-                P.M[i+6] = W[i]
+                vpm.get_M(P)[i+6] = W[i]
             end
         end
 

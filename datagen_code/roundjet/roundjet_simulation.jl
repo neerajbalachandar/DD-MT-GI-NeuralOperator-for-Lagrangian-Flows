@@ -8,6 +8,44 @@
   * Copyright : Eduardo J. Alvarez. All rights reserved.
 =###############################################################################
 
+# FLOWVPM's installed zeta_fmm calls FastMultipole.Tree without the explicit
+# source/target flag required by the FastMultipole version in the FLOWUnsteady
+# environment. Keep the same direct-list accumulation while supplying it.
+function zeta_fmm_compat(pfield)
+    vpm.get_np(pfield) == 0 && return nothing
+    options = pfield.fmm
+    # FastMultipole 1.x expects a one-system static vector here; the installed
+    # FLOWVPM zeta_fmm passes its scalar ncrit and fails during tree subdivision.
+    leaf_size = vpm.FastMultipole.default_leaf_size((pfield,))
+    tree = vpm.FastMultipole.Tree((pfield,), false; leaf_size,
+        shrink_recenter=options.shrink_recenter)
+    _, direct_list = vpm.FastMultipole.build_interaction_lists(
+        tree.branches, tree.branches, leaf_size, options.theta, false, true, true)
+    sort_index = tree.sort_index_list[1]
+    zeta = pfield.kernel.zeta
+    for (i_target, i_source) in direct_list
+        target_branch = tree.branches[i_target]
+        source_branch = tree.branches[i_source]
+        for i_source_particle in source_branch.bodies_index[1]
+            Pi = vpm.get_particle(pfield, sort_index[i_source_particle])
+            for i_target_particle in target_branch.bodies_index[1]
+                Pj = vpm.get_particle(pfield, sort_index[i_target_particle])
+                X_i = vpm.get_X(Pi)
+                X_j = vpm.get_X(Pj)
+                r = sqrt(sum((X_i[k] - X_j[k])^2 for k in 1:3))
+                sigma = vpm.get_sigma(Pj)[]
+                zeta_sigma = zeta(r / sigma) / sigma^3
+                Gamma = vpm.get_Gamma(Pj)
+                J = vpm.get_J(Pi)
+                for k in 1:3
+                    J[k] += Gamma[k] * zeta_sigma
+                end
+            end
+        end
+    end
+    return nothing
+end
+
 
 function run_roundjet_simulation(pfield::vpm.ParticleField,
                                         # ------- SIMULATION PARAMETERS --------
@@ -153,38 +191,41 @@ function run_roundjet_simulation(pfield::vpm.ParticleField,
 
         # Use analytic vorticity as target vorticity (stored under P.M[7:9])
         for P in vpm.iterate(pfield; include_static=true)
+            X = vpm.get_X(P)
+            Gamma = vpm.get_Gamma(P)
+            M = vpm.get_M(P)
 
             # Radial position of this particle
-            aux = dot(P.X, Cline)
+            aux = dot(X, Cline)
             r = 0
-            for i in 1:3; r += ( P.X[i] - aux*Cline[i] )^2; end;
+            for i in 1:3; r += (X[i] - aux*Cline[i])^2; end
             r = sqrt(r)
 
             # Vorticity at this particle
-            Wp .= P.Gamma
-            Wp .*= W(r) / norm(P.Gamma)
+            Wp .= Gamma
+            Wp .*= W(r) / norm(Gamma)
 
             for i in 1:3
-                P.M[i+6] = Wp[i]
+                M[i+6] = Wp[i]
 
                 # NOTE: If I don't take only half of the target vorticity
                 #       the simulation ends up having double the velocity
                 #       and vorticity once the jet is fully developed
-                P.M[i+6] *= rbf_Wf
+                M[i+6] *= rbf_Wf
 
             end
         end
 
         # Switch static particles to non-static so they are included in the RBF
-        for P in vpm.iterate(pfield; include_static=true); P.static .= false; end;
+        for P in vpm.iterate(pfield; include_static=true); vpm.set_static(P, false); end
 
         # RBF interpolation of the analytic distribution
-        rbf_scheme = vpm.CoreSpreading(-1, -1, vpm.zeta_fmm; v_lvl=v_lvl+1, rbf_optargs...)
+        rbf_scheme = vpm.CoreSpreading(-1, -1, zeta_fmm_compat; v_lvl=v_lvl+1, rbf_optargs...)
         vpm.rbf_conjugategradient(pfield, rbf_scheme)
 
         # Switch them back to static
-        for P in vpm.iterate(pfield; include_static=true); P.static .= true; end;
-        for pi in BCi; vpm.get_particle(pfield, pi).static .= false; end;
+        for P in vpm.iterate(pfield; include_static=true); vpm.set_static(P, true); end
+        for pi in BCi; vpm.set_static(pfield, pi, false); end
     end
 
     # Save a copy of boundary-condition particles
@@ -204,13 +245,13 @@ function run_roundjet_simulation(pfield::vpm.ParticleField,
 
             for pi in vpm.get_np(pfield):-1:1
                 P = vpm.get_particle(pfield, pi)
-                auxX .= P.X
+                auxX .= vpm.get_X(P)
                 auxX .-= O
                 if dot(auxX, Cline) > 0
 
                     if keep_rbffullcylinder # Case of keeping the full cylinder
                         # Make particle non-static
-                        P.static .= false
+                        vpm.set_static(P, false)
                     else # Case of removing half of the cylinder
                         vpm.remove_particle(pfield, pi)
                     end
@@ -225,8 +266,19 @@ function run_roundjet_simulation(pfield::vpm.ParticleField,
         end
     end
 
-    # Runtime function that adds particles imposing the boundary condition
+    # Runtime function that adds particles imposing the boundary condition.
+    # The jet emits new particles at every step, so grow the backing storage as
+    # needed instead of relying on a large fixed maximum chosen in advance.
     function boundary_condition(pfield, t, dt; optargs...)
+
+        required = pfield.np + length(BC)
+        if required > pfield.maxparticles
+            new_capacity = max(required, max(1024, 2 * pfield.maxparticles))
+            particles = zeros(eltype(pfield.particles), size(pfield.particles, 1), new_capacity)
+            copyto!(view(particles, :, 1:pfield.np), view(pfield.particles, :, 1:pfield.np))
+            pfield.particles = particles
+            pfield.maxparticles = new_capacity
+        end
 
         for P in BC
             vpm.add_particle(pfield, P)
@@ -239,11 +291,6 @@ function run_roundjet_simulation(pfield::vpm.ParticleField,
         println("\t"^v_lvl*"Final boundary-condition particles:\t$(length(BC))")
     end
 
-    if pfield.maxparticles<length(BC)*nsteps
-        @warn("$(pfield.maxparticles) particles is probably insufficient"*
-        " (simulation is expected to grow up to $(length(BC)*nsteps) particles)")
-    end
-
     # Simulation restart
     if restart_file != nothing
         # Read restart file, overwritting the particle field
@@ -252,20 +299,19 @@ function run_roundjet_simulation(pfield::vpm.ParticleField,
         if restart_sigma != nothing
 
             # Evaluate current vorticity field (gets stored under get_J(P)[1:3])
-            vpm.zeta_fmm(pfield)
+            zeta_fmm_compat(pfield)
 
             # Resize particle cores and store target vorticity under P.M[7:9]
             for P in vpm.iterate(pfield)
-
-                P.sigma[1] = restart_sigma
+                vpm.get_sigma(P)[1] = restart_sigma
 
                 for i in 1:3
-                    P.M[i+6] = get_J(P)[i]
+                    vpm.get_M(P)[i+6] = vpm.get_J(P)[i]
                 end
             end
 
             # Calculate the new vortex strenghts through RBF
-            rbf_scheme = vpm.CoreSpreading(-1, -1, vpm.zeta_fmm; v_lvl=v_lvl+1, rbf_optargs...)
+            rbf_scheme = vpm.CoreSpreading(-1, -1, zeta_fmm_compat; v_lvl=v_lvl+1, rbf_optargs...)
             vpm.rbf_conjugategradient(pfield, rbf_scheme)
 
         end
@@ -307,7 +353,7 @@ function run_roundjet_simulation(d::Real, U1::Real,
                                         U2angle=[0,0,0],    # (deg) Coflow angle from centerline
                                         Oaxis=Float64[i==j for i in 1:3, j in 1:3],
                                         maxparticles::Int=Int(3e6), pfieldargs=(),
-                                        optargs...) where {R<:Real}
+                                        optargs...)
 
     # Define freestream (coflow) velocity
     Vfreestream = U2 * gt.rotation_matrix2(U2angle...) * Oaxis[:, 3]

@@ -27,7 +27,7 @@ def _as_vec(value):
     raise ValueError(f"Expected vector field, got {arr.shape}")
 
 
-def physical_field_values(coords, velocity, shape=(65, 65, 65)):
+def physical_field_values(coords, velocity, shape=None):
     """Attach xyz derivatives, independent of the native HDF5 node row order."""
     coords, velocity = np.asarray(coords), np.asarray(velocity)
     if coords.ndim != 2 or coords.shape[1] != 3 or velocity.shape != coords.shape:
@@ -69,10 +69,12 @@ def read_task2_velocity(path):
     with h5py.File(path, "r") as handle:
         coords = _as_xyz(handle["nodes"])
         velocity = _as_vec(handle["U"])
-    expected = 65 ** 3
+    count = len(coords)
+    resolution = round(count ** (1.0 / 3.0))
+    expected = resolution ** 3
     if len(coords) != expected or len(velocity) != expected:
         raise ValueError(
-            f"{path}: expected N_nodes=N_U={expected}, got {len(coords)} and {len(velocity)}"
+            f"{path}: expected a cubic node count and matching velocity rows, got {len(coords)} and {len(velocity)}"
         )
     return coords, velocity
 

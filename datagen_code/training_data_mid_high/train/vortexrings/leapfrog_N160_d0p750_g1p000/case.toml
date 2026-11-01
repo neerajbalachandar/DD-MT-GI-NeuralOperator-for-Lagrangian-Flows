@@ -1,0 +1,17 @@
+family = "leapfrogging"
+field_components = ["U", "W"]
+final_particle_count = 1440
+total_particles = 160
+circulation_ratio = [1.0, 1.0]
+field_bounds_min = [-2.5, -2.5, -2.5]
+spacing_over_radius = 0.75
+radius = 1.0
+field_bounds_max = [2.5, 2.5, 13.25]
+split = "train"
+fidelity_profile = "mid_high"
+save_every_steps = 1
+split_rule = "Complete-config SHA-256 buckets; perturbation family held out for test"
+completed_steps = 1000
+grid_points = [64, 64, 64]
+case_id = "leapfrog_N160_d0p750_g1p000"
+simulation = "vortexrings"

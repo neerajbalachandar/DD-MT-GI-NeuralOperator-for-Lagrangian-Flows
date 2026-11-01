@@ -225,8 +225,9 @@ function generate_probelines(lines; nprobes=100,
         meansigma = 0
         Gammatot = 0
         for P in vpm.iterate(pfield)
-            meansigma += P.sigma[1]*norm(P.Gamma)
-            Gammatot += norm(P.Gamma)
+            Gamma = vpm.get_Gamma(P)
+            meansigma += vpm.get_sigma(P)[1] * norm(Gamma)
+            Gammatot += norm(Gamma)
         end
         meansigma /= Gammatot
 

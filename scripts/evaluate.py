@@ -411,7 +411,11 @@ def main():
             configured_chord = cfg["evaluation"].get("reference_chord", None)
             configured_leading_edge = cfg["evaluation"].get("reference_leading_edge_x", None)
             if configured_chord is None or configured_leading_edge is None:
-                derived_leading_edge, derived_chord = estimate_chordwise_bounds(sample["vtk_path"])
+                vtk_path = str(sample.get("vtk_path", ""))
+                if not vtk_path or not Path(vtk_path).is_file():
+                    print(f"[profiles] skipped {case_name}: no reference chord or solid geometry is available")
+                    continue
+                derived_leading_edge, derived_chord = estimate_chordwise_bounds(vtk_path)
             chord = float(configured_chord if configured_chord is not None else derived_chord)
             leading_edge = float(configured_leading_edge if configured_leading_edge is not None else derived_leading_edge)
             plot_normalized_ux_profiles(x_axis, z_axis, sample["true_velocity"],

@@ -10,11 +10,14 @@
 
 - Native Task-2 velocity is the stored HDF5 `U` at the XMF-declared nodal coordinates. The velocity evaluation now scores those three stored components directly, with no spatial interpolation or reconstruction of the truth. The twelve-channel model also predicts nine velocity-gradient channels; preprocessing derives these with physical-spacing finite differences. `field_all_channel_mse` is therefore an auxiliary score, not the primary direct-velocity result.
 - The data uses Task-2 snapshots only at their actual times. Native evaluation additionally evaluates `field_superres_pair_ids`, where Task-2 targets were excluded from field training. These records have `evaluation_role=field_superresolution` in `native_task2_field.csv/json`; they test temporal interpolation only if those snapshots lie between training field times. They do not claim spatial super-resolution because queries use the native mesh.
+- The selected vortex-ring data uses a fixed particle population and stable file row ordering. Preprocessing uses canonical row identities when every frame in a case has the same particle count; variable-count cases keep the existing identity/track matching path.
+- Vortex-ring generation defaults to a 32×32×32 Eulerian grid and writes particle and field XMF/HDF5 snapshots every four simulation steps. Preprocessing and the training config retain all 32,768 field nodes per snapshot. The temporal holdout can reserve field labels between training field times for later temporal super-resolution evaluation.
+- Solid-body geometry conditioning is disabled for the selected free-flow data. Particle distance, surface-normal, and near-body channels are excluded from the active feature list; evaluation skips chord-normalized profiles when no reference chord or solid geometry exists.
 - The evaluation report now produces one-step loss versus normalized simulation phase, rollout error versus step with cross-case mean/std, a native mid-slice `u_x` truth/prediction/error figure, `u_x/U_inf` versus `z/c` profiles, and true/predicted particle rollout snapshots.
 - One-step particle and field errors are plotted against target physical time where available. Rollout plots show error at each generated target time and a separate mean-error-versus-horizon view. The configured training curriculum now reaches H=8. Validation includes autoregressive rollout loss when the validation sequences contain chains; a stride-held-out internal validation split may not contain adjacent transitions, so inspect `effective_horizon` before treating its rollout validation as meaningful.
 - Train-only coordinate bounds are scientifically appropriate for leakage control. The model's latent-grid sampler clamps normalized query coordinates to [0,1], however. Evaluation records `outside_train_domain_fraction` for native meshes; nonzero values mean some test queries are clipped to the edge of the training domain and are extrapolation failures/limitations, not ordinary interpolation error.
 - Particle rollout scores are only meaningful for verified persistent identities. The current loader rejects unverified correspondence for multistep rollouts; legacy row-index data must be regenerated or evaluated one-step-only.
-- `training.use_pushforward` adds a separate detached-input objective. It is not equivalent to full differentiable BPTT. Geometry features recomputed through VTK/NumPy also form a stopped-gradient boundary. Avoid describing the complete geometry-conditioned trajectory as fully differentiable.
+- `training.use_pushforward` adds a separate detached-input objective. It is not equivalent to full differentiable BPTT.
 - The trainer currently uses autocast without gradient scaling, because GradScaler's CUDA unscale path failed on complex FNO gradients. With `mixed_precision: true`, monitor for non-finite or stalled losses; full precision is the conservative choice until a complex-gradient-safe scaling strategy is implemented.
 - The architecture has an explicit `predict_delta_u` switch, but review the preprocessing target contract before changing it: the saved residual target has ten channels (seven state changes plus three velocity increments) when enabled. Do not treat those velocity increments as additional propagated state variables.
 - The presentation plots now use direct native Task-2 `u_x` for the mid-slice comparison and downstream profiles. Profiles use `z/c`; if no chord is set explicitly, chord and leading-edge x are estimated from the VTK surface x bounds.
@@ -48,10 +51,10 @@
 | `gino/data/preprocess_commented_uncommented.py` | Historical commented/alternate pipeline copy; not imported by the normal CLI. Treat the active `preprocessing_pipeline.py` as canonical. |
 | `gino/data/hdf5.py` | Native Task-2 HDF5 readers, strict shape checks, physical-coordinate gradient calculation, and structured-plane extraction. |
 | `gino/data/dataset.py` | Archive loading, sequence split utilities, particle/query subsampling, normalization, and rollout-chain construction. |
-| `gino/data/context.py` | Immutable metadata carried between rollout transitions (frames, phase, time, geometry, and operating condition). |
+| `gino/data/context.py` | Immutable metadata carried between rollout transitions (frames, phase, time, and operating condition). |
 | `gino/data/normalization.py` | Train-only input/target statistics and position normalization/denormalization. |
-| `gino/data/geometry.py` | Particle geometry feature calculation used when rebuilding model inputs. |
-| `gino/data/reconstruction.py` | Reconstructs the next particle input from predicted state/field, including geometry-conditioned features. |
+| `gino/data/geometry.py` | Legacy solid-geometry helpers; not used for the active vortex-ring input channels. |
+| `gino/data/reconstruction.py` | Reconstructs the next particle input from predicted state and field. |
 | `gino/data/__init__.py` | Package marker and data API namespace. |
 
 ### `gino/model`

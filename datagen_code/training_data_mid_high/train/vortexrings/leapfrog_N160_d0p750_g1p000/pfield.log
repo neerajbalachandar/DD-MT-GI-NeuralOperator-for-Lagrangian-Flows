@@ -1,0 +1,43 @@
+-------------------------------------------------------------------------
+
+	SOLVER SETTINGS
+		  maxparticles----> 267680
+		   formulation----> formulation_cVPM
+		       viscous----> (Symbol("*userfunction"), "FLOWVPM.Inviscid{Float64}(0.0)")
+		        kernel----> winckelmans
+		            UJ----> UJ_fmm
+		          Uinf----> nofreestream
+		           SFS----> SFS_none
+		   integration----> rungekutta3
+		    transposed----> true
+		    relaxation----> correctedpedrizzetti
+		           fmm----> FLOWVPM.FMM(6, 60, 0.3, true, 0.001, 0.001, true, true, true, 1.0, 3)
+		        useGPU----> 0
+
+	SIMULATION SETTINGS
+		dt:			0.003237064501855186
+		Runtime function:	Yes
+		Static particles:	Nothing
+		nsteps_save:		1
+
+-------------------------------------------------------------------------
+*************************************************************************
+START /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/datagen_code/training_data_mid_high/train/vortexrings/leapfrog_N160_d0p750_g1p000/pfield
+	2026-11-01T17:57:37.301
+*************************************************************************
+	Time step 0 out of 1000	Particles: 1440
+	Time step 100 out of 1000	Particles: 1440
+	Time step 200 out of 1000	Particles: 1440
+	Time step 300 out of 1000	Particles: 1440
+	Time step 400 out of 1000	Particles: 1440
+	Time step 500 out of 1000	Particles: 1440
+	Time step 600 out of 1000	Particles: 1440
+	Time step 700 out of 1000	Particles: 1440
+	Time step 800 out of 1000	Particles: 1440
+	Time step 900 out of 1000	Particles: 1440
+	Time step 1000 out of 1000	Particles: 1440
+*************************************************************************
+END /home/dysco/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/datagen_code/training_data_mid_high/train/vortexrings/leapfrog_N160_d0p750_g1p000/pfield
+	2026-11-01T17:59:58.100
+*************************************************************************
+ELAPSED TIME: 0 hours 2 minutes 20 seconds
