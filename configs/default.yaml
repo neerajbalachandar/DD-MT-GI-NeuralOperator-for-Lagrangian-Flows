@@ -1,12 +1,12 @@
 seed: 42
 device: auto
 data:
-  dataset: processed_data/particle_evolution_dataset.npz
-  native_task2_root: "/media/neerajc/New Volume/Neeraj/NeuralOp_Data/task2"
+  dataset: processed_data_vpm/particle_evolution_dataset.npz
+  native_task2_root: "/media/dysco/New Volume/Neeraj/NeuralOp_FLOWVPM_Data"
   allow_missing_native_task2: false
   # Vortex-only data has no solid-body distance, normal, or near-body features.
-  input_features: [u_x, u_y, u_z, sigma, Gamma_x, Gamma_y, Gamma_z, gradU_xx, gradU_xy, gradU_xz, gradU_yx, gradU_yy, gradU_yz, gradU_zx, gradU_zy, gradU_zz]
-  global_condition_channels: [angle_of_attack, freestream_magnitude, phase]
+  input_features: [u_x, u_y, u_z, sigma, Gamma_x, Gamma_y, Gamma_z, gradU_xx, gradU_xy, gradU_xz, gradU_yx, gradU_yy, gradU_yz, gradU_zx, gradU_zy, gradU_zz, delta_t]
+  global_condition_channels: [freestream_magnitude, phase]
   max_particles: 2048
   max_queries: 32768
 
@@ -71,6 +71,7 @@ evaluation:
   allow_missing_native_task2: true
   save_plots: true
   field_visual_phase: 0.5
+  field_visual_phases: [0.1, 0.3, 0.5, 0.7, 0.9]
   field_plane_mode: highest_energy
   save_parity_plots: true
   field_y_plane: 0.0

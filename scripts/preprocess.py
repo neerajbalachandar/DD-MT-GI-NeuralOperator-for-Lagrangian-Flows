@@ -7,7 +7,7 @@ sys.path.insert(0, str(HERE))
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build the canonical Task-1/Task-2 pair dataset.")
+    parser = argparse.ArgumentParser(description="Build the processed dataset from generated VPM cases or legacy Task-1/Task-2 sources.")
     parser.add_argument("--source-root", type=Path, default=None)
     parser.add_argument("--field-root", type=Path, default=None)
     parser.add_argument("--output-dir", type=Path, default=None)

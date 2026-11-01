@@ -110,6 +110,32 @@ def native_field_plane(coords, values, y_plane=0.0, component=0):
     return x_axis.astype(np.float32), z_axis.astype(np.float32), field, plane_xyz[order].astype(np.float32), plane_values[order]
 
 
+def native_coordinate_plane(coords, values, normal_axis, location):
+    """Return a structured native-grid plane normal to one coordinate axis."""
+    coords, values = np.asarray(coords), np.asarray(values)
+    normal_axis = int(normal_axis)
+    if coords.ndim != 2 or coords.shape[1] != 3 or values.shape[0] != len(coords):
+        raise ValueError("Expected coordinates [N,3] and values [N,...]")
+    if normal_axis not in (0, 1, 2):
+        raise ValueError("normal_axis must be 0, 1, or 2")
+    axes = [np.unique(coords[:, axis]) for axis in range(3)]
+    plane_value = float(axes[normal_axis][np.argmin(np.abs(axes[normal_axis] - float(location)))])
+    keep = np.isclose(coords[:, normal_axis], plane_value)
+    remaining = [axis for axis in range(3) if axis != normal_axis]
+    first, second = remaining
+    first_axis, second_axis = axes[first], axes[second]
+    plane_coords, plane_values = coords[keep], values[keep]
+    i = np.searchsorted(first_axis, plane_coords[:, first])
+    j = np.searchsorted(second_axis, plane_coords[:, second])
+    shape = (len(second_axis), len(first_axis))
+    grid = np.full((*shape, *values.shape[1:]), np.nan, dtype=np.result_type(values.dtype, np.float32))
+    grid[j, i] = plane_values
+    order = np.lexsort((plane_coords[:, first], plane_coords[:, second]))
+    plane_xyz = plane_coords[order].astype(np.float32)
+    return (first_axis.astype(np.float32), second_axis.astype(np.float32), grid,
+            plane_xyz, plane_value, first, second)
+
+
 def highest_energy_y_plane(coords, velocity):
     """Choose a native y slice with the greatest mean kinetic-energy density."""
     coords, velocity = np.asarray(coords), np.asarray(velocity)

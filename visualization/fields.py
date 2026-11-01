@@ -57,6 +57,50 @@ def plot_velocity_magnitude_summary(x, z, true_velocity, predicted_velocity, fre
     plt.close(fig)
 
 
+def plot_plane_snapshot_comparison(first_axis, second_axis, true_velocity, predicted_velocity,
+                                  phases, output_path, plane_label, first_label, second_label,
+                                  physical_times=None, plane_labels=None):
+    """Compare velocity magnitude on an energy-selected plane across times."""
+    first_axis, second_axis = np.asarray(first_axis), np.asarray(second_axis)
+    true_velocity, predicted_velocity = np.asarray(true_velocity), np.asarray(predicted_velocity)
+    phases = np.asarray(phases, dtype=float)
+    expected = (len(phases), len(second_axis), len(first_axis), 3)
+    if true_velocity.shape != expected or predicted_velocity.shape != expected:
+        raise ValueError(f"Velocity snapshots must have shape {expected}")
+    truth_mag = np.linalg.norm(true_velocity, axis=-1)
+    pred_mag = np.linalg.norm(predicted_velocity, axis=-1)
+    vmax = max(float(np.nanmax(truth_mag)), float(np.nanmax(pred_mag)), 1e-12)
+    error = np.abs(pred_mag - truth_mag)
+    error_max = max(float(np.nanmax(error)), 1e-12)
+    extent = [float(first_axis.min()), float(first_axis.max()),
+              float(second_axis.min()), float(second_axis.max())]
+    fig, axes = plt.subplots(len(phases), 3, figsize=(13, 3.6 * len(phases)), squeeze=False,
+                             constrained_layout=True)
+    for row, phase in enumerate(phases):
+        when = f"phase={phase:.3f}"
+        if physical_times is not None and physical_times[row] is not None:
+            when += f", t={float(physical_times[row]):.5g} s"
+        if plane_labels is not None:
+            when += f", {plane_labels[row]}"
+        axes[row, 0].imshow(truth_mag[row], origin="lower", extent=extent, aspect="auto",
+                            vmin=0.0, vmax=vmax, cmap="viridis")
+        axes[row, 1].imshow(pred_mag[row], origin="lower", extent=extent, aspect="auto",
+                            vmin=0.0, vmax=vmax, cmap="viridis")
+        axes[row, 2].imshow(error[row], origin="lower", extent=extent, aspect="auto",
+                            vmin=0.0, vmax=error_max, cmap="magma")
+        axes[row, 0].set_title(f"Simulation |u| ({when})")
+        axes[row, 1].set_title(f"Prediction |u| ({when})")
+        axes[row, 2].set_title("Absolute magnitude error")
+        for axis in axes[row]:
+            axis.set_xlabel(first_label)
+            axis.set_ylabel(second_label)
+    fig.suptitle(f"{plane_label}: velocity magnitude reconstruction")
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=160, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_native_ux_comparison(x, z, true_ux, predicted_ux, output_path, phase=None, physical_time=None):
     """Show direct native truth, prediction, and absolute error for u_x."""
     x, z = np.asarray(x), np.asarray(z)

@@ -30,6 +30,7 @@ def evaluate_one_step(model, loader, latent_grid, normalization, device, visual_
                                "field_prediction": result["field_phys"][0].cpu().numpy(),
                                "field_phase": float(batch.get("phase_next", 0.0))})
         record = {"pair_id": int(batch["pair_id"][0]), "case": case,
+                  "evaluation_categories": [str(value) for value in context.get("evaluation_categories", [])],
                   "phase": float(batch.get("phase_next", 0.0)),
                   "field_phase": float(context.get("phase_t", 0.0)),
                   "physical_time": context.get("physical_time_tp1"),

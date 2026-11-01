@@ -8,6 +8,10 @@ import hashlib
 import os
 import re
 import xml.etree.ElementTree as ET
+try:
+    import tomllib
+except ImportError:  # Python 3.10 environments
+    import tomli as tomllib
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,6 +72,7 @@ RAW_ROOT = Path("/media/neerajc/New Volume/Neeraj/NeuralOp_Data/task1")
 RAW_ROOT_CANDIDATES = [RAW_ROOT]
 FIELD_ROOT = Path("/media/neerajc/New Volume/Neeraj/NeuralOp_Data/task2")
 FIELD_ROOT_CANDIDATES = [FIELD_ROOT]
+VPM_CASE_PATHS: Dict[str, Path] = {}
 
 # These settings determine which Task 1 case directories are discovered and how complete cases are assigned to the train, validation, and test sets.
 # The split is case-based so that all frames and particle transitions from a given operating condition stay together.
@@ -258,19 +263,21 @@ def validate_task2_xmf_layout(xmf_path: Path, h5_path: Path) -> None:
 
     node_file, node_key, node_dims = reference(nodes_item)
     u_file, u_key, u_dims = reference(u_item)
-    expected = FIELD_GRID_POINTS ** 3
     node_count = int(np.prod(node_dims[:-1])) if len(node_dims) == 2 and node_dims[-1] == 3 else (
         int(np.prod(node_dims[1:])) if len(node_dims) == 2 and node_dims[0] == 3 else -1
     )
     u_count = int(np.prod(u_dims[:-1])) if len(u_dims) == 4 and u_dims[-1] == 3 else (
         int(np.prod(u_dims[:-1])) if len(u_dims) == 2 and u_dims[-1] == 3 else -1
     )
+    node_resolution = round(node_count ** (1.0 / 3.0)) if node_count > 0 else -1
+    u_resolution = round(u_count ** (1.0 / 3.0)) if u_count > 0 else -1
     if (node_file != h5_path.name or u_file != h5_path.name or node_key != "nodes" or u_key != "U"
-            or node_count != expected or u_count != expected
+            or node_resolution < FIELD_GRID_POINTS or node_resolution ** 3 != node_count
+            or u_resolution != node_resolution or u_resolution ** 3 != u_count
             or u_attribute.get("Center", "").lower() != "node"):
         raise ValueError(
-            f"{xmf_path}: expected nodes and nodal U to reference {h5_path.name} with "
-            f"{expected} entries; got nodes=({node_file}:{node_key}, {node_dims}), "
+            f"{xmf_path}: expected cubic nodes and nodal U with at least "
+            f"{FIELD_GRID_POINTS ** 3} entries; got nodes=({node_file}:{node_key}, {node_dims}), "
             f"U=({u_file}:{u_key}, {u_dims}, Center={u_attribute.get('Center')!r})"
         )
 
@@ -517,10 +524,10 @@ def read_field_grid_h5(path: Path) -> Tuple[np.ndarray, np.ndarray]:
             _validate_structured_node_order(coords, raw_velocity.shape[1:], path)
         vel = as_vec_field(raw_velocity)
 
-    expected = FIELD_GRID_POINTS ** 3
-    if len(coords) != expected or len(vel) != expected:
+    resolution = round(len(coords) ** (1.0 / 3.0)) if len(coords) else -1
+    if resolution < FIELD_GRID_POINTS or resolution ** 3 != len(coords) or len(vel) != len(coords):
         raise ValueError(
-            f"{path}: expected exactly {expected} Task-2 nodes and velocity rows, "
+            f"{path}: expected a cubic Task-2 grid with at least {FIELD_GRID_POINTS ** 3} nodes, "
             f"got N_nodes={len(coords)}, N_U={len(vel)}"
         )
     if vel.shape != coords.shape:
@@ -546,6 +553,20 @@ def read_field_grid_h5(path: Path) -> Tuple[np.ndarray, np.ndarray]:
     combined = physical_field_values(coords, derivative_velocity)
     if invalid_velocity.any():
         combined[invalid_velocity] = np.nan
+
+    if resolution != FIELD_GRID_POINTS:
+        axes = [np.unique(coords[:, axis]) for axis in range(3)]
+        indices = tuple(np.searchsorted(axes[axis], coords[:, axis]) for axis in range(3))
+        flat_index = np.ravel_multi_index(indices, (resolution, resolution, resolution))
+        row_for_grid_index = np.empty(resolution ** 3, dtype=np.int64)
+        row_for_grid_index[flat_index] = np.arange(len(coords), dtype=np.int64)
+        sample_indices = [np.rint(np.linspace(0, resolution - 1, FIELD_GRID_POINTS)).astype(np.int64)
+                          for _ in range(3)]
+        grid = np.meshgrid(*sample_indices, indexing="ij")
+        chosen_flat = np.ravel_multi_index(tuple(axis.reshape(-1) for axis in grid),
+                                           (resolution, resolution, resolution))
+        chosen_rows = row_for_grid_index[chosen_flat]
+        coords, combined = coords[chosen_rows], combined[chosen_rows]
 
     return _filter_field_queries(coords, combined, path)
 
@@ -1549,6 +1570,7 @@ def _feature_matrix_from_state(
     aoa_deg: float,
     freestream: np.ndarray,
     geom_feat: Dict[str, np.ndarray] = None,
+    delta_t: float = 0.0,
 ) -> np.ndarray:
     feat = {
         "x": state["x"][:n],
@@ -1568,6 +1590,8 @@ def _feature_matrix_from_state(
 
     if "phase" in PARTICLE_INPUT_FEATURES:
         feat["phase"] = np.full(n, phase, dtype=np.float64)
+    if "delta_t" in PARTICLE_INPUT_FEATURES:
+        feat["delta_t"] = np.full(n, float(delta_t), dtype=np.float64)
     if "angle_of_attack" in PARTICLE_INPUT_FEATURES:
         feat["angle_of_attack"] = np.full(n, aoa_deg, dtype=np.float64)
     if "freestream_x" in PARTICLE_INPUT_FEATURES:
@@ -1768,15 +1792,16 @@ def _fill_one_case(case, case_plist, case_meta, case_pairs, field_entries,
                 np.asarray(curr.get("velocity_gradient_z", np.zeros((n, 3))), dtype=np.float32),
             ], axis=1)
             velocity_current = np.asarray(curr["velocity"], dtype=np.float32)
-            x_feat = _feature_matrix_from_state(
-                s0, velocity_current, gradient, n, float(curr["phase"]),
-                float(case_meta["aoa_deg"]), np.asarray(case_meta["freestream"], dtype=np.float64), geometry)
-            state0, state1 = _state_matrix(s0, n), _state_matrix(s1, n)
-            delta = state1 - state0
-            delta_u = np.asarray(nxt["velocity"], dtype=np.float32) - velocity_current
             dt = float(following["physical_time"]) - float(current["physical_time"])
             if not np.isfinite(dt) or dt <= 0:
                 raise ValueError(f"Non-increasing XMF time for case={case}, frames {current['frame_id']}->{following['frame_id']}")
+            x_feat = _feature_matrix_from_state(
+                s0, velocity_current, gradient, n, float(curr["phase"]),
+                float(case_meta["aoa_deg"]), np.asarray(case_meta["freestream"], dtype=np.float64), geometry,
+                delta_t=dt)
+            state0, state1 = _state_matrix(s0, n), _state_matrix(s1, n)
+            delta = state1 - state0
+            delta_u = np.asarray(nxt["velocity"], dtype=np.float32) - velocity_current
             physics_dx = (dt * velocity_current).astype(np.float32)
             physics_dgamma = (dt * np.einsum(
                 "nij,nj->ni", gradient.reshape(n, 3, 3), state0[:, 3:6])).astype(np.float32)
@@ -1827,6 +1852,9 @@ def _fill_one_case(case, case_plist, case_meta, case_pairs, field_entries,
                 "task2_field_path": "" if field_path is None else str(field_path),
                 "start": int(global_start), "end": int(global_end), "n_particles": n,
                 "phase_t": float(current["phase"]), "phase_tp1": float(following["phase"]),
+                "evaluation_categories": list(ACTIVE_CASE_METADATA.get(case, {}).get("evaluation_categories", [])),
+                "family": str(ACTIVE_CASE_METADATA.get(case, {}).get("family", "unknown")),
+                "simulation": str(ACTIVE_CASE_METADATA.get(case, {}).get("simulation", "unknown")),
                 "aoa_deg": float(case_meta["aoa_deg"]),
                 "freestream": [float(v) for v in np.asarray(case_meta["freestream"]).reshape(-1)],
                 "dt": dt, "vtk_path": str(current.get("vtk_path", "")),
@@ -2262,7 +2290,7 @@ def _build_particle_evolution_dataset_legacy(merged: List[Path]) -> Path:
         targets_velocity_field=targets_velocity_field,
         field_query_mask=field_query_mask,
         # Keep the field query policy in the saved dataset so later code can identify which physical region and sampling rule produced these targets.
-        field_query_source=np.asarray("task2_static_airfoil_fdom_grid_filtered", dtype=object),
+        field_query_source=np.asarray("generated_vpm_velocity_vorticity_grid", dtype=object),
         field_query_bounds=np.asarray(_field_query_bounds() if _field_query_bounds() is not None else (), dtype=np.float32),
         field_std_floor=np.asarray(FIELD_STD_FLOOR, dtype=np.float32),
         field_root=np.asarray(str(field_root), dtype=object),
@@ -2369,7 +2397,8 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     field_files_by_case: Dict[str, List[Tuple[float, Path]]] = {}
     for case in all_cases:
         entries = []
-        for path in sorted((field_root / case).glob(FIELD_H5_PATTERN)):
+        case_field_root = VPM_CASE_PATHS.get(case, field_root / case)
+        for path in sorted(case_field_root.glob(FIELD_H5_PATTERN)):
             xmf_path = path.with_suffix(".xmf")
             if not xmf_path.is_file():
                 raise FileNotFoundError(f"Task-2 field {path} has no companion XMF: {xmf_path}")
@@ -2486,7 +2515,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         out_path, inputs_t=X, particle_ids_t=ids_concat, particle_ids_tp1=ids_concat,
         targets_delta=Y_delta, targets_residual=Y_residual, query_coords=field_query_coords,
         targets_velocity_field=targets_velocity_field, field_query_mask=field_query_mask,
-        field_query_source=np.asarray("task2_static_airfoil_fdom_grid_filtered", dtype=object),
+        field_query_source=np.asarray("generated_vpm_velocity_vorticity_grid", dtype=object),
         field_query_bounds=np.asarray(_field_query_bounds() if _field_query_bounds() is not None else (), dtype=np.float32),
         field_std_floor=np.asarray(FIELD_STD_FLOOR, dtype=np.float32), field_root=np.asarray(str(field_root), dtype=object),
         targets_next_state=Y_next, inputs_t_norm=Xn, targets_delta_norm=Yn_delta_raw,
@@ -2515,6 +2544,205 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         max_field_query_points=np.asarray(MAX_FIELD_QUERY_POINTS, dtype=np.int64))
     print(f"[task1] streaming dataset built: rows={total_rows}, pairs={n_pairs}, rollouts={len(rollout_cases)}")
     return out_path
+
+
+def preprocess_generated_vpm_cases(source_root: Path, output_root: Path) -> Path:
+    """Build the same model archive directly from generated VPM train/validate/test cases."""
+    global RAW_ROOT, FIELD_ROOT, FIELD_ROOT_CANDIDATES, OUT_ROOT, MERGED_ROOT
+    global FIELD_H5_PATTERN, TRAIN_CASES, VAL_CASES, TEST_CASES, CASE_METADATA
+    global ACTIVE_CASE_METADATA, ACTIVE_CONDITIONING_CHANNEL_NAMES, CONDITIONING_CHANNEL_NAMES
+    global PARTICLE_INPUT_FEATURES, VPM_CASE_PATHS, ACTIVE_FIELD_QUERY_BOUNDS
+
+    source_root, output_root = Path(source_root).expanduser().resolve(), Path(output_root).expanduser().resolve()
+    if not all((source_root / split).is_dir() for split in ("train", "test", "validate")):
+        raise FileNotFoundError(f"Expected train/test/validate directories under {source_root}")
+    manifest_path = source_root / "case_plan.toml"
+    manifest_cases = {}
+    if manifest_path.is_file():
+        with manifest_path.open("rb") as stream:
+            manifest_cases = {entry["case_id"]: entry for entry in tomllib.load(stream).get("cases", [])}
+    RAW_ROOT = FIELD_ROOT = source_root
+    FIELD_ROOT_CANDIDATES = [source_root]
+    OUT_ROOT, MERGED_ROOT = output_root, output_root / "merged_frames"
+    FIELD_H5_PATTERN = "fields_fdom.*.h5"
+    max_pairs = max(int(os.environ.get("MAX_PAIRS_PER_CASE", "100")), 1)
+    if MERGED_ROOT.exists():
+        import shutil
+        shutil.rmtree(MERGED_ROOT)
+    ensure_dir(MERGED_ROOT)
+
+    TRAIN_CASES, VAL_CASES, TEST_CASES = [], [], []
+    CASE_METADATA, ACTIVE_CASE_METADATA, VPM_CASE_PATHS = {}, {}, {}
+    split_cases = {"train": TRAIN_CASES, "validate": VAL_CASES, "test": TEST_CASES}
+    particle_keys = {
+        "particle_xyz": "X", "Gamma_vec": "Gamma", "velocity": "velocity",
+        "velocity_gradient_x": "velocity_gradient_x", "velocity_gradient_y": "velocity_gradient_y",
+        "velocity_gradient_z": "velocity_gradient_z", "sigma": "sigma", "circulation": "circulation",
+        "vol": "vol", "static": "static",
+    }
+    merged: List[Path] = []
+    skipped = []
+
+    def select_novel_frames(paths, limit):
+        """Farthest-point sample a trajectory using rotation-aware particle/flow summaries."""
+        descriptors = []
+        for path in paths:
+            with h5py.File(path, "r") as handle:
+                xyz = as_xyz(np.asarray(handle["X"]))
+                gamma = as_xyz(np.asarray(handle["Gamma"]))
+                velocity = as_xyz(np.asarray(handle["velocity"]))
+            center = np.mean(xyz, axis=0)
+            centered = xyz - center
+            covariance = centered.T @ centered / max(len(centered), 1)
+            radius = np.linalg.norm(centered, axis=1)
+            gamma_mag = np.linalg.norm(gamma, axis=1)
+            circulation_center = np.sum(xyz * gamma_mag[:, None], axis=0) / max(float(gamma_mag.sum()), 1e-12)
+            descriptors.append(np.concatenate((
+                center, circulation_center, covariance[np.triu_indices(3)],
+                np.mean(velocity, axis=0),
+                [np.sqrt(np.mean(np.sum(velocity * velocity, axis=1))),
+                 float(np.quantile(radius, 0.5)), float(np.quantile(radius, 0.9)),
+                 float(np.mean(gamma_mag)), float(np.std(gamma_mag))],
+            )))
+        values = np.asarray(descriptors, dtype=np.float64)
+        scale = np.maximum(np.std(values, axis=0), 1e-8)
+        values = (values - np.mean(values, axis=0)) / scale
+        target = min(len(paths), int(limit) + 1)
+        selected = [0]
+        if len(paths) > 1:
+            selected.append(len(paths) - 1)
+        min_distance = np.full(len(paths), np.inf, dtype=np.float64)
+        for initial in selected:
+            distance = np.sum((values - values[initial]) ** 2, axis=1)
+            min_distance = np.minimum(min_distance, distance)
+        min_distance[selected] = -1.0
+        while len(selected) < target:
+            next_index = int(np.argmax(min_distance))
+            selected.append(next_index)
+            distance = np.sum((values - values[next_index]) ** 2, axis=1)
+            min_distance = np.minimum(min_distance, distance)
+            min_distance[selected] = -1.0
+        return sorted(set(selected))
+
+    for directory_split in ("train", "validate", "test"):
+        for simulation in ("vortexrings", "roundjet"):
+            family_root = source_root / directory_split / simulation
+            if not family_root.is_dir():
+                continue
+            for case_dir in sorted(path for path in family_root.iterdir() if path.is_dir()):
+                metadata_path = case_dir / "case.toml"
+                if not metadata_path.is_file():
+                    skipped.append(f"{case_dir}: missing case.toml")
+                    continue
+                with metadata_path.open("rb") as stream:
+                    metadata = tomllib.load(stream)
+                case_id = str(metadata.get("case_id", case_dir.name))
+                if manifest_cases and case_id not in manifest_cases:
+                    continue
+                plan_entry = manifest_cases.get(case_id, {})
+                planned_split = str(plan_entry.get("split", directory_split))
+                if planned_split != directory_split:
+                    raise ValueError(f"Case {case_id} is under {directory_split} but plan assigns {planned_split}")
+                if plan_entry:
+                    metadata["evaluation_categories"] = plan_entry.get("evaluation_categories", [])
+                completed_steps = metadata.get("completed_steps")
+                save_stride = max(int(metadata.get("save_every_steps", 1)), 1)
+                if completed_steps is None:
+                    skipped.append(f"{case_dir}: no completed_steps metadata; treating as incomplete")
+                    continue
+                expected_steps = range(0, int(completed_steps) + 1, save_stride)
+                complete = all(
+                    all((case_dir / f"{prefix}.{step}.{suffix}").is_file()
+                        for prefix, suffix in (("pfield", "h5"), ("pfield", "xmf"),
+                                               ("fields_fdom", "h5"), ("fields_fdom", "xmf")))
+                    for step in expected_steps
+                )
+                if not complete:
+                    skipped.append(f"{case_dir}: one or more expected particle/field snapshots are missing")
+                    continue
+                particle_files = sorted(case_dir.glob("pfield.*.h5"), key=frame_id)
+                field_files = sorted(case_dir.glob(FIELD_H5_PATTERN), key=frame_id)
+                if not particle_files or not field_files:
+                    skipped.append(f"{case_dir}: missing particle or field frames")
+                    continue
+                p_by_id = {frame_id(path): path for path in particle_files}
+                f_by_id = {frame_id(path): path for path in field_files}
+                available = sorted(set(p_by_id) & set(f_by_id))
+                if len(available) < 2:
+                    skipped.append(f"{case_dir}: fewer than two paired particle/field frames")
+                    continue
+                categories = [str(value) for value in metadata.get("evaluation_categories", [])]
+                is_temporal_sr = "temporal_superresolution" in categories
+                if not is_temporal_sr and len(available) - 1 > max_pairs:
+                    choose = select_novel_frames([p_by_id[frame] for frame in available], max_pairs)
+                    available = [available[index] for index in choose]
+                case_key = f"{simulation}__{case_dir.name}"
+                VPM_CASE_PATHS[case_key] = case_dir
+                split = "val" if directory_split == "validate" else directory_split
+                split_cases[directory_split].append(case_key)
+                fs = [0.0, 0.0, float(metadata.get("exit_speed", 0.0)) if simulation == "roundjet" else 0.0]
+                case_meta = dict(metadata)
+                case_meta.update({"aoa_deg": 0.0, "freestream": fs, "dt": 1.0,
+                                  "particles_per_step": int(metadata.get("total_particles", 1)),
+                                  "split": split, "simulation": simulation})
+                CASE_METADATA[case_key] = case_meta
+                ACTIVE_CASE_METADATA[case_key] = case_meta
+                out_case = ensure_dir(MERGED_ROOT / case_key)
+                for frame in available:
+                    source_path = p_by_id[frame]
+                    arrays = read_h5_selected(source_path, particle_keys)
+                    count = len(as_xyz(arrays["particle_xyz"]))
+                    arrays["particle_ids"] = _to_s32([f"fixed-row:{index}" for index in range(count)])
+                    xmf = source_path.with_suffix(".xmf")
+                    if not xmf.is_file():
+                        raise FileNotFoundError(f"Particle frame lacks XMF time metadata: {xmf}")
+                    arrays.update({
+                        "source_dataset": np.asarray(case_key, dtype=object),
+                        "frame_id": np.asarray(frame, dtype=object),
+                        "xmf_time": np.asarray(read_xmf_time(xmf), dtype=np.float64),
+                        "source_xmf_path": np.asarray(str(xmf), dtype=object),
+                        "source_vtk_path": np.asarray("", dtype=object),
+                        "source_input_h5_path": np.asarray(str(source_path), dtype=object),
+                        "source_static_h5_path": np.asarray("", dtype=object),
+                        "source_output_h5_path": np.asarray("", dtype=object),
+                    })
+                    merged_path = out_case / f"{case_key}__frame_{frame}.npz"
+                    np.savez_compressed(merged_path, **arrays)
+                    merged.append(merged_path)
+    if not merged:
+        details = "\n".join(skipped[:20])
+        raise RuntimeError(f"No complete generated VPM cases found under {source_root}. {details}")
+
+    # For this dataset only phase and operating speed provide global conditioning;
+    # there are no body geometry or surface-normal channels.
+    USE_GEOMETRY = False
+    CONDITIONING_CHANNEL_NAMES = ["phase"]
+    ACTIVE_CONDITIONING_CHANNEL_NAMES = ["phase"]
+    PARTICLE_INPUT_FEATURES = [
+        "x", "y", "z", "Gamma_x", "Gamma_y", "Gamma_z", "sigma",
+        "u_x", "u_y", "u_z", "gradU_xx", "gradU_xy", "gradU_xz",
+        "gradU_yx", "gradU_yy", "gradU_yz", "gradU_zx", "gradU_zy", "gradU_zz", "phase", "delta_t",
+    ]
+    ACTIVE_FIELD_QUERY_BOUNDS = None
+    ensure_dir(OUT_ROOT)
+    print(f"[VPM] discovered {len(split_cases['train'])} train, {len(split_cases['validate'])} validate, "
+          f"{len(split_cases['test'])} test cases; max pairs per standard case={max_pairs}")
+    if skipped:
+        print(f"[VPM] skipped {len(skipped)} incomplete/unreadable cases; first: {skipped[:5]}")
+    path = build_particle_evolution_dataset(sorted(merged, key=lambda value: (value.parent.name, value.name)))
+    summary = {
+        "raw_root": str(source_root), "dataset_type": "generated_vpm", "n_merged_frames": len(merged),
+        "train_cases": TRAIN_CASES, "val_cases": VAL_CASES, "test_cases": TEST_CASES,
+        "max_pairs_per_case": max_pairs, "test_categories": {
+            case: CASE_METADATA[case].get("evaluation_categories", []) for case in TEST_CASES
+        },
+        "spatial_resolution_test_cases": [case for case in TEST_CASES
+            if "spatial_superresolution" in CASE_METADATA[case].get("evaluation_categories", [])],
+        "temporal_resolution_test_cases": [case for case in TEST_CASES
+            if "temporal_superresolution" in CASE_METADATA[case].get("evaluation_categories", [])],
+    }
+    (OUT_ROOT / "preprocess_summary.json").write_text(json.dumps(summary, indent=2))
+    return path
 
 
 # The script starts here when executed directly. It resolves the source roots, discovers and splits the cases, validates the metadata, creates the intermediate merged frames, and then builds the final particle-evolution dataset.

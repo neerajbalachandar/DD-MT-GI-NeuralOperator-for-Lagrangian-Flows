@@ -131,6 +131,19 @@ def main():
     if np.intersect1d(split["train_pair_ids"], split["val_pair_ids"]).size:
         raise ValueError("Training and validation pair IDs overlap; provide a leakage-free split.")
     print(f"[split] validation source: {validation_source}")
+    case_categories = {}
+    for pair_id in split["test_pair_ids"]:
+        context = data.get("pair_contexts", [])[int(pair_id)]
+        if isinstance(context, np.ndarray):
+            context = context.item()
+        case_categories[str(context.get("case", "unknown"))] = [
+            str(value) for value in context.get("evaluation_categories", [])
+        ]
+    print(f"[split] pair counts train/val/test: {len(split['train_pair_ids'])}/"
+          f"{len(split['val_pair_ids'])}/{len(split['test_pair_ids'])}")
+    print("[test protocol] held-out cases and categories:")
+    for case, categories in sorted(case_categories.items()):
+        print(f"  {case}: {', '.join(categories) if categories else 'uncategorized'}")
     max_h = int(cfg["training"].get("rollout_horizon_max", 16))
     sequence_training = bool(cfg["training"].get("use_rollout_loss") or cfg["training"].get("use_pushforward"))
     if sequence_training:
@@ -263,6 +276,7 @@ def main():
     checkpoint_split["field_superres_pair_ids"] = field_holdout_ids.tolist()
     checkpoint_split["validation_source"] = validation_source
     checkpoint_split["validation_rollout_horizon"] = validation_horizon
+    checkpoint_split["test_case_categories"] = case_categories
     trainer = Trainer(model, latent, train_ds, val_ds, stats, training_cfg, run_dir, device)
     trainer.fit(cfg, {"dataset_path": str(dataset_path), "split": checkpoint_split, "normalization": norm_meta,
                       "feature_names": in_names, "target_names": [str(x) for x in data["target_names"][:delta_channels]],
