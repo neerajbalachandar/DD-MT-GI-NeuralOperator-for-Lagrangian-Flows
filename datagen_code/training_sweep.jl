@@ -27,6 +27,7 @@ const DATASET = length(ARGS) > 0 ? ARGS[1] : get(ENV, "DATASET", "all")
 const OUTPUT_ROOT = abspath(get(ENV, "OUTPUT_ROOT", joinpath(ROOT, "training_data")))
 const GRID_POINTS = parse(Int, get(ENV, "GRID_POINTS", "32"))
 const SAVE_EVERY = parse(Int, get(ENV, "SAVE_EVERY", "10"))
+const CASE_LIMIT = parse(Int, get(ENV, "CASE_LIMIT", "0"))
 const NGRID = GRID_POINTS^3
 const NDIVS = fill(GRID_POINTS - 1, 3) # GeometricTools counts cells; this produces GRID_POINTS nodes per axis.
 
@@ -107,7 +108,16 @@ function run_vortex_case(case_id, metadata, nrings, circulations, radii, Ntotal,
         UJ=vpm.UJ_fmm,
         fmm=fmm,
     )
-    maxparticles = Ntotal + NGRID
+    # The particle field is later augmented by all grid nodes during
+    # `computefluiddomain`, so reserve capacity for the initialized ring
+    # particles plus the temporary reconstruction particles. Using only
+    # `Ntotal + NGRID` underestimates the true count because the actual ring
+    # discretization is larger than the nominal `Ntotal` parameter.
+    initial_particles = sum(
+        ri -> VortexRingCode.number_particles(Nphis[ri], ncs[ri]; extra_nc=extra_ncs[ri]),
+        1:nrings,
+    )
+    maxparticles = initial_particles + NGRID + 4096
 
     println("\n[$case_id] N=$Ntotal, spacing/R=$spacing, circulations=$circulations")
     pfield = VortexRingCode.run_vortexring_simulation(nrings, circulations, radii, ARs, Rcrosss,
@@ -134,8 +144,15 @@ function run_vortex_case(case_id, metadata, nrings, circulations, radii, Ntotal,
 end
 
 function run_vortexrings_sweep()
+    case_index = 0
+    case_limit = CASE_LIMIT > 0 ? CASE_LIMIT : typemax(Int)
+
     # Image-defined high-priority two-ring leapfrogging sweep.
     for N in (40, 80, 160, 320), dR in (0.75, 1.0, 1.25, 1.5, 2.0), ratio in (1.0, 0.75, 0.5)
+        case_index += 1
+        if case_index > case_limit
+            return
+        end
         case_id = "leapfrog_N$(N)_d$(safe_tag(dR))_g$(safe_tag(ratio))"
         run_vortex_case(case_id,
             Dict("family" => "leapfrogging", "total_particles" => N,
