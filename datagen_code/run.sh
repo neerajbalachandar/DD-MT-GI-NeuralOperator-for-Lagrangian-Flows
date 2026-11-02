@@ -18,7 +18,7 @@ esac
 FLOW_UNSTEADY_ROOT="${FLOW_UNSTEADY_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
 JULIA_PROJECT="${JULIA_PROJECT:-$FLOW_UNSTEADY_ROOT}"
 JULIA="${JULIA:-julia}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/media/dysco/New Volume/Neeraj/NeuralOp_FLOWVPM_Data}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/hpc/home/neerajc/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/datagen_code/training_data}" 
 # Save about 100 transitions per 1000-step standard case. Resume skips complete
 # cases and removes/restarts only incomplete case directories.
 GRID_POINTS="${GRID_POINTS:-32}"
