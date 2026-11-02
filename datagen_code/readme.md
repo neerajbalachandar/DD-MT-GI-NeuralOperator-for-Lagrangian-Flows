@@ -1,7 +1,9 @@
 # VPM dataset generation
 
-Run `./run.sh all` to generate the planned 40 cases: 20 vortex-ring and 20
-roundjet simulations, each split into 9 train, 4 validation, and 7 test cases.
+Run `./run.sh all` to generate the planned 39 cases: 19 vortex-ring and 20
+roundjet simulations. Vortex rings have 8 train, 4 validation, and 7 test cases;
+roundjets have 9, 4, and 7. The opposite-sign colliding-ring case was removed
+because its integration stalls during collision.
 Use `./run.sh vortexrings` or `./run.sh roundjet` to generate one family. The
 output root defaults to `/media/dysco/New Volume/Neeraj/NeuralOp_FLOWVPM_Data`;
 set `OUTPUT_ROOT` to change it.
@@ -14,5 +16,5 @@ pairs per case and uses an uninterrupted beginning-of-trajectory prefix.
 The case selection, exact parameter values, retained folders, removed folders,
 and evaluation categories are listed in [DATASET_PLAN.md](DATASET_PLAN.md).
 The external root receives an updated `case_plan.toml` when `run.sh` starts.
-Completed cases with the planned cadence and duration are skipped. Incomplete
-or wrong-cadence cases are restarted from their initial condition.
+Completed cases with the planned cadence and duration are skipped. Interrupted
+vortex-ring cases resume from the latest valid particle checkpoint.

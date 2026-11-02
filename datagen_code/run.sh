@@ -23,6 +23,9 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/media/dysco/New Volume/Neeraj/NeuralOp_FLOWVPM_Data
 # cases and removes/restarts only incomplete case directories.
 GRID_POINTS="${GRID_POINTS:-32}"
 SAVE_EVERY="${SAVE_EVERY:-4}"
+# FLOWVPM otherwise reports only every 100 steps, which can look like a stall
+# even though particle snapshots continue to be written every SAVE_EVERY steps.
+PROGRESS_EVERY="${PROGRESS_EVERY:-10}"
 CASE_LIMIT="${CASE_LIMIT:-0}"
 RESUME="${RESUME:-1}"
 VORTEX_STEPS="${VORTEX_STEPS:-720}"
@@ -34,7 +37,7 @@ ROUNDJET_RBF_ITMAX="${ROUNDJET_RBF_ITMAX:-200}"
 # Keep parallel execution while leaving headroom for the FMM tree and temporary
 # grid particles. Override JULIA_NUM_THREADS on machines with more memory.
 export JULIA_NUM_THREADS="${JULIA_NUM_THREADS:-4}"
-export OUTPUT_ROOT GRID_POINTS SAVE_EVERY CASE_LIMIT RESUME
+export OUTPUT_ROOT GRID_POINTS SAVE_EVERY PROGRESS_EVERY CASE_LIMIT RESUME
 export VORTEX_STEPS VORTEX_RTOT ROUNDJET_STEPS_PER_D ROUNDJET_TRAVEL_D ROUNDJET_RE ROUNDJET_RBF_ITMAX
 
 [[ -f "$JULIA_PROJECT/Project.toml" ]] || {

@@ -27,6 +27,7 @@ const DATASET = length(ARGS) > 0 ? ARGS[1] : get(ENV, "DATASET", "all")
 const OUTPUT_ROOT = abspath(get(ENV, "OUTPUT_ROOT", joinpath(ROOT, "training_data")))
 const GRID_POINTS = parse(Int, get(ENV, "GRID_POINTS", "32"))
 const SAVE_EVERY = parse(Int, get(ENV, "SAVE_EVERY", "4"))
+const PROGRESS_EVERY = parse(Int, get(ENV, "PROGRESS_EVERY", "10"))
 const CASE_LIMIT = parse(Int, get(ENV, "CASE_LIMIT", "0"))
 const VORTEX_STEPS = parse(Int, get(ENV, "VORTEX_STEPS", "720"))
 const VORTEX_RTOT = parse(Float64, get(ENV, "VORTEX_RTOT", "7.2"))
@@ -41,6 +42,7 @@ const CASE_PLAN = Dict{String,Dict{String,Any}}()
 DATASET in ("all", "vortexrings", "roundjet") || error("Dataset must be all, vortexrings, or roundjet")
 GRID_POINTS >= 2 || error("GRID_POINTS must be at least 2")
 SAVE_EVERY >= 1 || error("SAVE_EVERY must be at least 1")
+PROGRESS_EVERY >= 1 || error("PROGRESS_EVERY must be at least 1")
 VORTEX_STEPS % SAVE_EVERY == 0 || error("VORTEX_STEPS must be divisible by SAVE_EVERY so particle and field snapshots align")
 ceil(Int, ROUNDJET_TRAVEL_D * ROUNDJET_STEPS_PER_D) % SAVE_EVERY == 0 ||
     error("Roundjet step count must be divisible by SAVE_EVERY so particle and field snapshots align")
@@ -88,11 +90,45 @@ function new_case_dir(simulation, case_id, metadata)
             println("[resume] complete case already exists; skipping: $case_id")
             return nothing
         end
+        checkpoint = simulation == "vortexrings" ? latest_vortex_checkpoint(case_dir) : nothing
+        if RESUME && checkpoint !== nothing && isfile(joinpath(case_dir, "pfield_settings.bson"))
+            println("[resume] retaining particle checkpoint at step $(checkpoint.step): $case_id")
+            return case_dir
+        end
         println("[resume] removing incomplete case before regeneration: $case_dir")
         rm(case_dir; recursive=true, force=true)
     end
     mkpath(case_dir)
     return case_dir
+end
+
+function latest_vortex_checkpoint(case_dir)
+    candidates = Tuple{Int,String,Float64}[]
+    for name in readdir(case_dir)
+        m = match(r"^pfield\.(\d+)\.h5$", name)
+        m === nothing && continue
+        step = parse(Int, m.captures[1])
+        xmf = joinpath(case_dir, "pfield.$step.xmf")
+        isfile(xmf) || continue
+        time_match = match(r"<Time Value=\"([^\"]+)\"", read(xmf, String))
+        time_match === nothing && continue
+        push!(candidates, (step, joinpath(case_dir, name), parse(Float64, time_match.captures[1])))
+    end
+    isempty(candidates) && return nothing
+    sort!(candidates; by=first)
+    positive_step = findfirst(candidate -> candidate[1] > 0, candidates)
+    positive_step === nothing && return nothing
+    expected_dt = candidates[positive_step][3] / candidates[positive_step][1]
+    valid = filter(candidates) do candidate
+        step, _, time = candidate
+        abs(time - step * expected_dt) <= 1e-8 * max(1.0, abs(time))
+    end
+    if length(valid) < length(candidates)
+        println("[resume] ignoring $(length(candidates) - length(valid)) checkpoint(s) with inconsistent timestep in $case_dir")
+    end
+    isempty(valid) && return nothing
+    step, path, _ = last(valid)
+    return (step=step, path=path)
 end
 
 function record_case_metadata!(case_dir, metadata)
@@ -123,6 +159,15 @@ function case_save_every(case_id)
 end
 function case_grid_points(case_id)
     return Int(get(get(CASE_PLAN, case_id, Dict{String,Any}()), "grid_points", GRID_POINTS))
+end
+
+function dataset_progress(case_id)
+    return function (pfield, t, dt; optargs...)
+        if pfield.nt > 0 && pfield.nt % PROGRESS_EVERY == 0
+            println("[progress][$case_id] completed global step $(pfield.nt); t=$(pfield.t) s")
+        end
+        return false
+    end
 end
 
 function case_is_complete(case_dir, metadata)
@@ -176,13 +221,26 @@ function run_vortex_case(case_id, metadata, nrings, circulations, radii, Ntotal,
     field_nodes = case_grid_points(case_id)^3
     maxparticles = initial_particles + field_nodes + 4096
 
+    checkpoint = RESUME ? latest_vortex_checkpoint(case_dir) : nothing
+    restart_file = checkpoint === nothing ? nothing : checkpoint.path
+    restart_step = checkpoint === nothing ? 0 : checkpoint.step
+    restart_step <= nsteps || error("Checkpoint at step $restart_step exceeds planned $nsteps steps for $case_id")
+    remaining_steps = nsteps - restart_step
+    if restart_step > 0
+        println("[resume] continuing $case_id from step $restart_step; $remaining_steps steps remain")
+    end
+    # The ring driver computes dt as (Rtot / Uref) / nsteps. On restart,
+    # `nsteps` is only the remaining count, so scale the traveled distance by
+    # the same fraction to preserve the original dt and physical trajectory.
+    run_Rtot = restart_step == 0 ? Rtot : Rtot * remaining_steps / nsteps
+
     println("\n[$case_id] N=$Ntotal, spacing/R=$spacing, circulations=$circulations")
     pfield = VortexRingCode.run_vortexring_simulation(nrings, circulations, radii, ARs, Rcrosss,
         Nphis, ncs, extra_ncs, sigmas, Os, Oaxiss;
         Re=nothing,
         nref=1,
-        nsteps=nsteps,
-        Rtot=Rtot,
+        nsteps=remaining_steps,
+        Rtot=run_Rtot,
         beta=0.5,
         faux=1.0,
         save_path=case_dir,
@@ -190,8 +248,10 @@ function run_vortex_case(case_id, metadata, nrings, circulations, radii, Ntotal,
         prompt=false,
         calc_monitors=false,
         verbose=true,
-        verbose_nsteps=100,
+        verbose_nsteps=PROGRESS_EVERY,
+        runtime_function=dataset_progress(case_id),
         nsteps_save=case_save_every(case_id),
+        restart_file=restart_file,
         maxparticles=maxparticles,
         pfieldargs=solver)
 
@@ -253,7 +313,7 @@ function prepare_case_plan!()
         CASE_PLAN[id] = plan
     end
 
-    # Twenty vortex-ring cases: seven representative existing training cases,
+    # Nineteen vortex-ring cases: seven representative existing training cases,
     # four validation cases (including one N=640 resolution series member),
     # two existing in-range tests, and seven diverse additions.
     for id in (
@@ -272,7 +332,8 @@ function prepare_case_plan!()
         plan_case!(id, "vortexrings", "test", ["in_regime"])
     end
     plan_case!("isolated_N320_g20p000_sigma0p080", "vortexrings", "train", ["in_regime"])
-    plan_case!("signed_N320_d2p000_gm1p000", "vortexrings", "train", ["in_regime"])
+    # The opposite-sign pair case is excluded: the two rings approach and
+    # trigger an extreme-cost integration step during collision.
     plan_case!("leapfrog_N320_d2p500_g0p250", "vortexrings", "test",
         ["outside_training_regime", "unseen_operating_condition"])
     plan_case!("perturbed_N320_amp0p100_mode3", "vortexrings", "test",
@@ -350,7 +411,7 @@ function prepare_case_plan!()
 
     counts = Dict((sim, split) => count(p -> p["simulation"] == sim && p["split"] == split, values(CASE_PLAN))
         for sim in ("vortexrings", "roundjet") for split in ("train", "validate", "test"))
-    counts[("vortexrings", "train")] == 9 && counts[("vortexrings", "validate")] == 4 && counts[("vortexrings", "test")] == 7 || error("Vortex-ring plan must contain 9/4/7 train/validate/test cases")
+    counts[("vortexrings", "train")] == 8 && counts[("vortexrings", "validate")] == 4 && counts[("vortexrings", "test")] == 7 || error("Vortex-ring plan must contain 8/4/7 train/validate/test cases")
     counts[("roundjet", "train")] == 9 && counts[("roundjet", "validate")] == 4 && counts[("roundjet", "test")] == 7 || error("Roundjet plan must contain 9/4/7 train/validate/test cases")
     manifest_cases = [Dict("case_id" => id, "simulation" => plan["simulation"],
         "split" => plan["split"], "evaluation_categories" => plan["categories"],
@@ -478,7 +539,7 @@ function run_toroidal_case(radius, gamma, dxratio)
         nsteps=VORTEX_STEPS, Rtot=VORTEX_RTOT, beta=0.5, faux=1.0,
         maxparticles=500_000 + NGRID, pfieldargs=solver,
         save_path=case_dir, run_name="pfield", prompt=false,
-        calc_monitors=false, verbose=true, verbose_nsteps=100,
+        calc_monitors=false, verbose=true, verbose_nsteps=PROGRESS_EVERY,
         nsteps_save=case_save_every(case_id))
 
     pmin, pmax = vortex_field_bounds([[0.0, 0.0, 0.0]], [radius], [gamma], VORTEX_RTOT)
@@ -502,10 +563,12 @@ function run_perturbed_ring_case(N, amplitudeR, mode)
         relaxation=vpm.correctedpedrizzetti, kernel=vpm.winckelmans,
         viscous=vpm.Inviscid(), transposed=true, integration=vpm.rungekutta3,
         UJ=vpm.UJ_fmm, fmm=fmm)
-    pfield = vpm.ParticleField(N + case_grid_points(case_id)^3; solver...)
     R = 1.0
     Rcross = 0.10
     Nphi = N
+    initial_particles = VortexRingCode.number_particles(Nphi, 1; extra_nc=0)
+    maxparticles = initial_particles + case_grid_points(case_id)^3 + 4096
+    pfield = vpm.ParticleField(maxparticles; solver...)
     VortexRingCode.addvortexring(pfield, 10.0, R, 1.0, Rcross, Nphi, 1, Rcross;
         O=zeros(3), Oaxis=Matrix{Float64}(I, 3, 3), verbose=true)
 
@@ -526,14 +589,14 @@ function run_perturbed_ring_case(N, amplitudeR, mode)
     Uref = VortexRingCode.Uring(10.0, R, Rcross, 0.5)
     nsteps = Int(get(CASE_PLAN[case_id], "steps", VORTEX_STEPS))
     Rtot = VORTEX_RTOT
-    # Use the standard timestep and retain only the initial 120 steps. The
+    # Use the standard timestep and retain only the initial 180 steps. The
     # every-step output then provides true temporal refinement of early flow.
     dt = (Rtot / Uref) / VORTEX_STEPS
     println("\n[$case_id] held-out three-dimensional ring perturbation")
     VortexRingCode.run_vortexring_simulation(pfield, nsteps, dt, 1,
         [Nphi], [1], [0];
         save_path=case_dir, run_name="pfield", prompt=false,
-        calc_monitors=false, verbose=true, verbose_nsteps=100,
+        calc_monitors=false, verbose=true, verbose_nsteps=PROGRESS_EVERY,
         nsteps_save=case_save_every(case_id))
 
     pmin, pmax = vortex_field_bounds([[0.0, 0.0, 0.0]], [R], [10.0], Rtot)
@@ -581,7 +644,7 @@ function run_roundjet_case(case_id, metadata, diameter, exit_speed, dxotheta, ov
         run_name="pfield",
         prompt=false,
         verbose=true,
-        verbose_nsteps=100,
+        verbose_nsteps=PROGRESS_EVERY,
         nsteps_save=case_save_every(case_id))
 
     metadata["final_particle_count"] = vpm.get_np(pfield)
