@@ -27,7 +27,7 @@ def _as_vec(value):
     raise ValueError(f"Expected vector field, got {arr.shape}")
 
 
-def physical_field_values(coords, velocity, shape=None):
+def physical_field_values(coords, velocity, shape=None, device="cpu"):
     """Attach xyz derivatives, independent of the native HDF5 node row order."""
     coords, velocity = np.asarray(coords), np.asarray(velocity)
     if coords.ndim != 2 or coords.shape[1] != 3 or velocity.shape != coords.shape:
@@ -58,8 +58,16 @@ def physical_field_values(coords, velocity, shape=None):
     sampled_grid_xyz = np.column_stack([axes[axis][indices[axis][sample_rows]] for axis in range(3)])
     if not np.array_equal(sampled_grid_xyz, coords[sample_rows]):
         raise ValueError("Native node coordinates failed grid-index round-trip checks")
-    derivatives = np.gradient(velocity_grid, *axes, axis=(0, 1, 2), edge_order=2)
-    gradient_grid = np.concatenate(derivatives, axis=-1)
+    if str(device).startswith("cuda"):
+        import torch
+
+        tensor = torch.as_tensor(velocity_grid, dtype=torch.float32, device=device)
+        spacing = tuple(torch.as_tensor(axis, dtype=torch.float32, device=device) for axis in axes)
+        derivatives = torch.gradient(tensor, spacing=spacing, dim=(0, 1, 2), edge_order=2)
+        gradient_grid = torch.cat(derivatives, dim=-1).cpu().numpy()
+    else:
+        derivatives = np.gradient(velocity_grid, *axes, axis=(0, 1, 2), edge_order=2)
+        gradient_grid = np.concatenate(derivatives, axis=-1)
     gradient_rows = gradient_grid[indices]
     return np.concatenate((velocity, gradient_rows), axis=1).astype(np.float32)
 

@@ -101,6 +101,10 @@ def main():
         raise ValueError("training.epochs must be at least 1.")
     set_deterministic_seed(int(cfg["seed"]))
     device = torch.device("cuda" if cfg["device"] == "auto" and torch.cuda.is_available() else ("cpu" if cfg["device"] == "auto" else cfg["device"]))
+    if device.type == "cuda":
+        print(f"[device] training on {torch.cuda.get_device_name(device)}")
+    else:
+        print(f"[device] training on {device}; CUDA available={torch.cuda.is_available()}")
     dataset_path = (HERE / cfg["data"]["dataset"]).resolve()
     data = load_processed_dataset(dataset_path)
     split = {

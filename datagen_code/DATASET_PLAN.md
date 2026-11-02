@@ -19,7 +19,7 @@ The systematic plan contains 120 cases: 98 vortex-ring cases and 22 roundjet cas
 
 The parameter candidates retain three ring resolutions (160, 320, 640 where supported), multiple circulation/spacing/core-size settings, and roundjet diameters 1 and 2 with exit speeds 0.75, 1.0, and 1.25. The sweep samples these parameter grids evenly and stratifies validation cases across families.
 
-Standard cases save every 10 simulation steps and preprocessing keeps at most 100 transitions per case. It selects frames by farthest-point sampling over particle position, circulation, and velocity summaries, preserving both endpoints and reducing repeated flow states. The temporal superresolution case saves every step and keeps its dense sequence. All standard field grids are 32 cubed; the spatial superresolution case is generated at 64 cubed and compared on its native grid during evaluation.
+Standard cases save every 10 simulation steps. Preprocessing keeps the first 120 consecutive transitions per available case (121 paired frames); it does not skip ahead to later snapshots. The same prefix cap applies to the temporal superresolution case, preserving its dense per-step spacing within that prefix. All standard field grids are 32 cubed; the spatial superresolution case is generated at 64 cubed and compared on its native grid during evaluation.
 
 ## Test protocol
 

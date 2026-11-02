@@ -85,6 +85,10 @@ def main():
     if not checkpoint_path.is_file():
         raise FileNotFoundError(f"Set evaluation.checkpoint to an existing checkpoint: {checkpoint_path}")
     device = torch.device("cuda" if cfg["device"] == "auto" and torch.cuda.is_available() else ("cpu" if cfg["device"] == "auto" else cfg["device"]))
+    if device.type == "cuda":
+        print(f"[device] evaluation on {torch.cuda.get_device_name(device)}")
+    else:
+        print(f"[device] evaluation on {device}; CUDA available={torch.cuda.is_available()}")
     data_path = (HERE / cfg["data"]["dataset"]).resolve()
     data = load_processed_dataset(data_path)
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)

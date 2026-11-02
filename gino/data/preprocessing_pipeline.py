@@ -21,6 +21,7 @@ import numpy as np
 
 PREPROC_MAX_RSS_GB = float(os.environ.get("PREPROC_MAX_RSS_GB", "0"))
 ROLLOUT_MEMORY_CAP_GB = float(os.environ.get("ROLLOUT_MEMORY_CAP_GB", "2.0"))
+PREPROCESS_DEVICE = "cpu"
 
 
 def _to_s32(values) -> np.ndarray:
@@ -63,8 +64,9 @@ except Exception:
     pv = None
     PYVISTA_AVAILABLE = False
 
-# Particle and field arrays are read from HDF5; companion XMF files provide each frame's simulation-step time coordinate.
-# The two roots below point to the Task 1 particle data and the Task 2 Eulerian field data that are combined later.
+# Legacy Task-1/Task-2 file patterns and readers remain below for historical
+# compatibility. The active scripts/preprocess.py path reads the generated
+# FLOWVPM particle and field files from one train/validate/test root.
 
 SCRIPT_DIR = Path(__file__).resolve().parents[2]
 
@@ -514,7 +516,7 @@ def _filter_field_queries(coords: np.ndarray, values: np.ndarray, path: Path) ->
 
 
 # This routine converts the Task 2 HDF5 arrays into a common point-wise representation, derives the requested field quantities, and applies the configured spatial and finite-value filtering.
-def read_field_grid_h5(path: Path) -> Tuple[np.ndarray, np.ndarray]:
+def read_field_grid_h5(path: Path, device="cpu") -> Tuple[np.ndarray, np.ndarray]:
     with h5py.File(path, "r") as f:
         coords = as_xyz(np.asarray(f["nodes"]))
         raw_velocity = np.asarray(f["U"])
@@ -550,7 +552,7 @@ def read_field_grid_h5(path: Path) -> Tuple[np.ndarray, np.ndarray]:
         except ImportError:
             velocity_grid[invalid_grid] = 0.0
         derivative_velocity = velocity_grid[indices]
-    combined = physical_field_values(coords, derivative_velocity)
+    combined = physical_field_values(coords, derivative_velocity, device=device)
     if invalid_velocity.any():
         combined[invalid_velocity] = np.nan
 
@@ -1832,7 +1834,7 @@ def _fill_one_case(case, case_plist, case_meta, case_pairs, field_entries,
             field_match = match_task2_xmf_time(field_entries, float(current["xmf_time"])) if has_field else None
             field_time, field_path = field_match if field_match is not None else (None, None)
             if field_path is not None:
-                coords, values = read_field_grid_h5(field_path)
+                coords, values = read_field_grid_h5(field_path, device=PREPROCESS_DEVICE)
                 n_query = min(len(coords), int(MAX_FIELD_QUERY_POINTS))
                 selected = (np.linspace(0, len(coords) - 1, n_query, dtype=np.int64)
                             if len(coords) > n_query else np.arange(n_query, dtype=np.int64))
@@ -2546,12 +2548,14 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     return out_path
 
 
-def preprocess_generated_vpm_cases(source_root: Path, output_root: Path) -> Path:
+def preprocess_generated_vpm_cases(source_root: Path, output_root: Path, *,
+                                   max_pairs_per_case=120, device="auto") -> Path:
     """Build the same model archive directly from generated VPM train/validate/test cases."""
     global RAW_ROOT, FIELD_ROOT, FIELD_ROOT_CANDIDATES, OUT_ROOT, MERGED_ROOT
     global FIELD_H5_PATTERN, TRAIN_CASES, VAL_CASES, TEST_CASES, CASE_METADATA
     global ACTIVE_CASE_METADATA, ACTIVE_CONDITIONING_CHANNEL_NAMES, CONDITIONING_CHANNEL_NAMES
     global PARTICLE_INPUT_FEATURES, VPM_CASE_PATHS, ACTIVE_FIELD_QUERY_BOUNDS
+    global PREPROCESS_DEVICE
 
     source_root, output_root = Path(source_root).expanduser().resolve(), Path(output_root).expanduser().resolve()
     if not all((source_root / split).is_dir() for split in ("train", "test", "validate")):
@@ -2565,7 +2569,26 @@ def preprocess_generated_vpm_cases(source_root: Path, output_root: Path) -> Path
     FIELD_ROOT_CANDIDATES = [source_root]
     OUT_ROOT, MERGED_ROOT = output_root, output_root / "merged_frames"
     FIELD_H5_PATTERN = "fields_fdom.*.h5"
-    max_pairs = max(int(os.environ.get("MAX_PAIRS_PER_CASE", "100")), 1)
+    max_pairs = int(max_pairs_per_case)
+    if max_pairs < 1:
+        raise ValueError("max_pairs_per_case must be at least 1")
+    requested_device = str(device).lower()
+    if requested_device not in ("auto", "cpu", "cuda"):
+        raise ValueError("device must be auto, cpu, or cuda")
+    try:
+        import torch
+        cuda_available = torch.cuda.is_available()
+    except Exception:
+        torch = None
+        cuda_available = False
+    if requested_device == "cuda" and not cuda_available:
+        raise RuntimeError("CUDA preprocessing was requested, but PyTorch reports no available CUDA device")
+    preprocess_device = "cuda" if requested_device == "cuda" or (requested_device == "auto" and cuda_available) else "cpu"
+    PREPROCESS_DEVICE = preprocess_device
+    if preprocess_device == "cuda":
+        print(f"[device] preprocessing field gradients on {torch.cuda.get_device_name(0)}")
+    else:
+        print(f"[device] preprocessing field gradients on CPU (CUDA available={cuda_available})")
     if MERGED_ROOT.exists():
         import shutil
         shutil.rmtree(MERGED_ROOT)
@@ -2574,6 +2597,7 @@ def preprocess_generated_vpm_cases(source_root: Path, output_root: Path) -> Path
     TRAIN_CASES, VAL_CASES, TEST_CASES = [], [], []
     CASE_METADATA, ACTIVE_CASE_METADATA, VPM_CASE_PATHS = {}, {}, {}
     split_cases = {"train": TRAIN_CASES, "validate": VAL_CASES, "test": TEST_CASES}
+    selected_pairs_by_split = {"train": 0, "validate": 0, "test": 0}
     particle_keys = {
         "particle_xyz": "X", "Gamma_vec": "Gamma", "velocity": "velocity",
         "velocity_gradient_x": "velocity_gradient_x", "velocity_gradient_y": "velocity_gradient_y",
@@ -2582,47 +2606,6 @@ def preprocess_generated_vpm_cases(source_root: Path, output_root: Path) -> Path
     }
     merged: List[Path] = []
     skipped = []
-
-    def select_novel_frames(paths, limit):
-        """Farthest-point sample a trajectory using rotation-aware particle/flow summaries."""
-        descriptors = []
-        for path in paths:
-            with h5py.File(path, "r") as handle:
-                xyz = as_xyz(np.asarray(handle["X"]))
-                gamma = as_xyz(np.asarray(handle["Gamma"]))
-                velocity = as_xyz(np.asarray(handle["velocity"]))
-            center = np.mean(xyz, axis=0)
-            centered = xyz - center
-            covariance = centered.T @ centered / max(len(centered), 1)
-            radius = np.linalg.norm(centered, axis=1)
-            gamma_mag = np.linalg.norm(gamma, axis=1)
-            circulation_center = np.sum(xyz * gamma_mag[:, None], axis=0) / max(float(gamma_mag.sum()), 1e-12)
-            descriptors.append(np.concatenate((
-                center, circulation_center, covariance[np.triu_indices(3)],
-                np.mean(velocity, axis=0),
-                [np.sqrt(np.mean(np.sum(velocity * velocity, axis=1))),
-                 float(np.quantile(radius, 0.5)), float(np.quantile(radius, 0.9)),
-                 float(np.mean(gamma_mag)), float(np.std(gamma_mag))],
-            )))
-        values = np.asarray(descriptors, dtype=np.float64)
-        scale = np.maximum(np.std(values, axis=0), 1e-8)
-        values = (values - np.mean(values, axis=0)) / scale
-        target = min(len(paths), int(limit) + 1)
-        selected = [0]
-        if len(paths) > 1:
-            selected.append(len(paths) - 1)
-        min_distance = np.full(len(paths), np.inf, dtype=np.float64)
-        for initial in selected:
-            distance = np.sum((values - values[initial]) ** 2, axis=1)
-            min_distance = np.minimum(min_distance, distance)
-        min_distance[selected] = -1.0
-        while len(selected) < target:
-            next_index = int(np.argmax(min_distance))
-            selected.append(next_index)
-            distance = np.sum((values - values[next_index]) ** 2, axis=1)
-            min_distance = np.minimum(min_distance, distance)
-            min_distance[selected] = -1.0
-        return sorted(set(selected))
 
     for directory_split in ("train", "validate", "test"):
         for simulation in ("vortexrings", "roundjet"):
@@ -2637,8 +2620,6 @@ def preprocess_generated_vpm_cases(source_root: Path, output_root: Path) -> Path
                 with metadata_path.open("rb") as stream:
                     metadata = tomllib.load(stream)
                 case_id = str(metadata.get("case_id", case_dir.name))
-                if manifest_cases and case_id not in manifest_cases:
-                    continue
                 plan_entry = manifest_cases.get(case_id, {})
                 planned_split = str(plan_entry.get("split", directory_split))
                 if planned_split != directory_split:
@@ -2672,10 +2653,12 @@ def preprocess_generated_vpm_cases(source_root: Path, output_root: Path) -> Path
                     skipped.append(f"{case_dir}: fewer than two paired particle/field frames")
                     continue
                 categories = [str(value) for value in metadata.get("evaluation_categories", [])]
-                is_temporal_sr = "temporal_superresolution" in categories
-                if not is_temporal_sr and len(available) - 1 > max_pairs:
-                    choose = select_novel_frames([p_by_id[frame] for frame in available], max_pairs)
-                    available = [available[index] for index in choose]
+                paired_snapshot_count = len(available)
+                # Keep one uninterrupted prefix: N transitions require N+1
+                # paired frames, preserving the simulation's original order.
+                available = available[:max_pairs + 1]
+                selected_pair_count = len(available) - 1
+                selected_pairs_by_split[directory_split] += selected_pair_count
                 case_key = f"{simulation}__{case_dir.name}"
                 VPM_CASE_PATHS[case_key] = case_dir
                 split = "val" if directory_split == "validate" else directory_split
@@ -2687,6 +2670,9 @@ def preprocess_generated_vpm_cases(source_root: Path, output_root: Path) -> Path
                                   "split": split, "simulation": simulation})
                 CASE_METADATA[case_key] = case_meta
                 ACTIVE_CASE_METADATA[case_key] = case_meta
+                print(f"[VPM case] split={directory_split} case={case_id}: "
+                      f"paired snapshots={paired_snapshot_count}, selected prefix="
+                      f"{len(available)} snapshots/{selected_pair_count} transitions (limit={max_pairs})")
                 out_case = ensure_dir(MERGED_ROOT / case_key)
                 for frame in available:
                     source_path = p_by_id[frame]
@@ -2725,15 +2711,31 @@ def preprocess_generated_vpm_cases(source_root: Path, output_root: Path) -> Path
     ]
     ACTIVE_FIELD_QUERY_BOUNDS = None
     ensure_dir(OUT_ROOT)
-    print(f"[VPM] discovered {len(split_cases['train'])} train, {len(split_cases['validate'])} validate, "
-          f"{len(split_cases['test'])} test cases; max pairs per standard case={max_pairs}")
+    print(f"[VPM] source={source_root}; output={OUT_ROOT}")
+    print(f"[VPM] device={preprocess_device} (CUDA available={cuda_available}); "
+          f"discovered {len(split_cases['train'])} train, {len(split_cases['validate'])} validate, "
+          f"{len(split_cases['test'])} test cases; first {max_pairs} consecutive transitions/case")
+    print(f"[VPM] selected transitions before pair filtering: train={selected_pairs_by_split['train']}, "
+          f"validate={selected_pairs_by_split['validate']}, test={selected_pairs_by_split['test']}, "
+          f"total={sum(selected_pairs_by_split.values())}")
     if skipped:
         print(f"[VPM] skipped {len(skipped)} incomplete/unreadable cases; first: {skipped[:5]}")
     path = build_particle_evolution_dataset(sorted(merged, key=lambda value: (value.parent.name, value.name)))
+    with np.load(path, allow_pickle=True) as archive:
+        pair_counts = {"train": int(len(archive["train_pair_ids"])),
+                       "validate": int(len(archive["val_pair_ids"])),
+                       "test": int(len(archive["test_pair_ids"]))}
+    print(f"[VPM] processed pair counts: train={pair_counts['train']}, "
+          f"validate={pair_counts['validate']}, test={pair_counts['test']}, "
+          f"total={sum(pair_counts.values())}")
     summary = {
         "raw_root": str(source_root), "dataset_type": "generated_vpm", "n_merged_frames": len(merged),
         "train_cases": TRAIN_CASES, "val_cases": VAL_CASES, "test_cases": TEST_CASES,
-        "max_pairs_per_case": max_pairs, "test_categories": {
+        "max_pairs_per_case": max_pairs, "pair_counts": pair_counts,
+        "selected_prefix_transition_counts": selected_pairs_by_split,
+        "preprocessing_device": preprocess_device, "cuda_available": bool(cuda_available),
+        "selection": "first consecutive paired frames; no temporal frame skipping",
+        "test_categories": {
             case: CASE_METADATA[case].get("evaluation_categories", []) for case in TEST_CASES
         },
         "spatial_resolution_test_cases": [case for case in TEST_CASES
