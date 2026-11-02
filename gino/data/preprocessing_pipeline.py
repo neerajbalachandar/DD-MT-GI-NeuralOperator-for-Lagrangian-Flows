@@ -2549,7 +2549,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
 
 
 def preprocess_generated_vpm_cases(source_root: Path, output_root: Path, *,
-                                   max_pairs_per_case=120, device="auto") -> Path:
+                                   max_pairs_per_case=180, device="auto") -> Path:
     """Build the same model archive directly from generated VPM train/validate/test cases."""
     global RAW_ROOT, FIELD_ROOT, FIELD_ROOT_CANDIDATES, OUT_ROOT, MERGED_ROOT
     global FIELD_H5_PATTERN, TRAIN_CASES, VAL_CASES, TEST_CASES, CASE_METADATA

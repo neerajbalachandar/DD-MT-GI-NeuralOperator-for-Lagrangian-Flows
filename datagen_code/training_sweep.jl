@@ -28,13 +28,12 @@ const OUTPUT_ROOT = abspath(get(ENV, "OUTPUT_ROOT", joinpath(ROOT, "training_dat
 const GRID_POINTS = parse(Int, get(ENV, "GRID_POINTS", "32"))
 const SAVE_EVERY = parse(Int, get(ENV, "SAVE_EVERY", "4"))
 const CASE_LIMIT = parse(Int, get(ENV, "CASE_LIMIT", "0"))
-const VORTEX_STEPS = parse(Int, get(ENV, "VORTEX_STEPS", "1000"))
-const VORTEX_RTOT = parse(Float64, get(ENV, "VORTEX_RTOT", "10"))
+const VORTEX_STEPS = parse(Int, get(ENV, "VORTEX_STEPS", "720"))
+const VORTEX_RTOT = parse(Float64, get(ENV, "VORTEX_RTOT", "7.2"))
 const ROUNDJET_STEPS_PER_D = parse(Int, get(ENV, "ROUNDJET_STEPS_PER_D", "100"))
-const ROUNDJET_TRAVEL_D = parse(Float64, get(ENV, "ROUNDJET_TRAVEL_D", "10"))
+const ROUNDJET_TRAVEL_D = parse(Float64, get(ENV, "ROUNDJET_TRAVEL_D", "7.2"))
 const ROUNDJET_RE = parse(Float64, get(ENV, "ROUNDJET_RE", "10000"))
 const ROUNDJET_RBF_ITMAX = parse(Int, get(ENV, "ROUNDJET_RBF_ITMAX", "200"))
-const CASE_BUDGET = parse(Int, get(ENV, "CASE_BUDGET", "120"))
 const RESUME = lowercase(get(ENV, "RESUME", "1")) in ("1", "true", "yes")
 const NGRID = GRID_POINTS^3
 const CASE_PLAN = Dict{String,Dict{String,Any}}()
@@ -46,6 +45,14 @@ VORTEX_STEPS % SAVE_EVERY == 0 || error("VORTEX_STEPS must be divisible by SAVE_
 ceil(Int, ROUNDJET_TRAVEL_D * ROUNDJET_STEPS_PER_D) % SAVE_EVERY == 0 ||
     error("Roundjet step count must be divisible by SAVE_EVERY so particle and field snapshots align")
 
+function generation_fmm()
+    # FLOWVPM's regularization-error root finder can fail when its bracket does
+    # not straddle a root (seen in long runs around step 200). Use the documented
+    # default rho/sigma value and disable only that fragile auto-tuning step.
+    return vpm.FMM(; p=6, ncrit=60, theta=0.3, shrink_recenter=true,
+                   autotune_reg_error=false, default_rho_over_sigma=1.0)
+end
+
 function safe_tag(x)
     return replace(@sprintf("%.3f", x), "." => "p", "-" => "m")
 end
@@ -54,13 +61,17 @@ function new_case_dir(simulation, case_id, metadata)
     plan = get(CASE_PLAN, case_id, Dict{String,Any}())
     split = String(get(plan, "split", "train"))
     metadata["evaluation_categories"] = get(plan, "categories", [split == "test" ? "in_regime" : split])
-    metadata["split_rule"] = "Balanced case-level plan; all frames from a case stay in one split"
+    metadata["split_rule"] = "Existing case split preserved; all frames from a case stay in one split"
     folder_name = case_id
     if split == "test" && !isempty(get(plan, "categories", String[]))
-        category = first(get(plan, "categories", String[]))
-        prefix = category == "outside_training_regime" ? "test_outside_regime__" :
-            category == "unseen_operating_condition" ? "test_unseen_operation__" :
-            category == "unseen_case" ? "test_unseen_initial__" : ""
+        categories = get(plan, "categories", String[])
+        prefix = "temporal_superresolution" in categories ? "test_temporal_sr__" :
+            "spatial_superresolution" in categories ? "test_spatial_sr__" :
+            "outside_training_regime" in categories ? "test_outside_regime__" :
+            "unseen_boundary_condition" in categories ? "test_unseen_boundary__" :
+            ("unseen_operating_condition" in categories || "unseen_Reynolds_number" in categories) ? "test_unseen_operation__" :
+            "unseen_initial_condition" in categories ? "test_unseen_initial__" :
+            "unseen_case" in categories ? "test_unseen_case__" : ""
         isempty(prefix) || (folder_name = prefix * case_id)
     end
     case_dir = joinpath(OUTPUT_ROOT, split, simulation, folder_name)
@@ -69,17 +80,12 @@ function new_case_dir(simulation, case_id, metadata)
     metadata["case_id"] = case_id
     metadata["grid_points"] = [case_grid_points(case_id), case_grid_points(case_id), case_grid_points(case_id)]
     metadata["save_every_steps"] = case_save_every(case_id)
+    metadata["planned_steps"] = Int(get(plan, "steps", VORTEX_STEPS))
     metadata["fidelity_profile"] = "mid_high"
     metadata["field_components"] = ["U", "W"]
     if ispath(case_dir)
         if RESUME && case_is_complete(case_dir, metadata)
             println("[resume] complete case already exists; skipping: $case_id")
-            old_metadata = isfile(joinpath(case_dir, "case.toml")) ?
-                TOML.parsefile(joinpath(case_dir, "case.toml")) : Dict{String,Any}()
-            merge!(metadata, old_metadata)
-            metadata["evaluation_categories"] = get(plan, "categories", [split == "test" ? "in_regime" : split])
-            metadata["split"] = split
-            record_case_metadata!(case_dir, metadata)
             return nothing
         end
         println("[resume] removing incomplete case before regeneration: $case_dir")
@@ -146,7 +152,7 @@ function run_vortex_case(case_id, metadata, nrings, circulations, radii, Ntotal,
     Os = lateral ? [[spacing * (ri - 1), 0.0, 0.0] for ri in 1:nrings] :
                    [[0.0, 0.0, spacing * (ri - 1)] for ri in 1:nrings]
     Oaxiss = [Matrix{Float64}(I, 3, 3) for _ in 1:nrings]
-    fmm = vpm.FMM(; p=6, ncrit=60, theta=0.3, shrink_recenter=true)
+    fmm = generation_fmm()
     solver = (
         formulation=vpm.cVPM,
         SFS=vpm.noSFS,
@@ -167,7 +173,8 @@ function run_vortex_case(case_id, metadata, nrings, circulations, radii, Ntotal,
         ri -> VortexRingCode.number_particles(Nphis[ri], ncs[ri]; extra_nc=extra_ncs[ri]),
         1:nrings,
     )
-    maxparticles = initial_particles + NGRID + 4096
+    field_nodes = case_grid_points(case_id)^3
+    maxparticles = initial_particles + field_nodes + 4096
 
     println("\n[$case_id] N=$Ntotal, spacing/R=$spacing, circulations=$circulations")
     pfield = VortexRingCode.run_vortexring_simulation(nrings, circulations, radii, ARs, Rcrosss,
@@ -235,144 +242,127 @@ end
 
 function prepare_case_plan!()
     empty!(CASE_PLAN)
-    leapfrog = ["leapfrog_N$(N)_d$(safe_tag(dR))_g$(safe_tag(r))"
-                for N in (160, 320, 640), dR in (0.75, 1.0, 1.25, 1.5, 2.0), r in (1.0, 0.75, 0.5)]
-    isolated = ["isolated_N$(N)_g$(safe_tag(gamma))_sigma$(safe_tag(sigmaR))"
-                for N in (160, 320, 640), gamma in (5.0, 10.0, 20.0), sigmaR in (0.02, 0.04, 0.08)]
-    signed = ["signed_N$(N)_d$(safe_tag(dR))_g$(safe_tag(r))"
-              for N in (160, 320), dR in (0.75, 1.0, 1.5, 2.0), r in (-1.0, -0.75, -0.5)]
-    toroidal = ["toroidal_R$(safe_tag(radius))_g$(safe_tag(gamma))_dx$(safe_tag(dxratio))"
-                for radius in (0.75, 1.0, 1.25), gamma in (5.0, 10.0, 20.0), dxratio in (0.5, 0.75, 1.0)]
-    freepair = ["free_pair_N$(N)_sep$(safe_tag(separationR))_g$(safe_tag(r))"
-                for N in (160, 320, 640), separationR in (2.5, 3.0, 4.0), r in (-1.0, -0.75, -0.5)]
-    perturbed = ["perturbed_N$(N)_amp$(safe_tag(amplitudeR))_mode$(mode)"
-                 for N in (160, 320, 640), amplitudeR in (0.02, 0.05, 0.10), mode in (2, 3)]
-    roundjet = ["jet_D$(safe_tag(diameter))_U$(safe_tag(speed))_dx$(safe_tag(dx))_ov$(safe_tag(overlap))"
-                for diameter in (1.0, 2.0), speed in (0.75, 1.0, 1.25), dx in (1/6, 1/8), overlap in (2.0, 2.4, 3.0)]
+    function plan_case!(id, simulation, split, categories; save_every=SAVE_EVERY,
+                        grid_points=GRID_POINTS, steps=VORTEX_STEPS, kwargs...)
+        plan = Dict{String,Any}("simulation" => simulation, "split" => split,
+            "categories" => categories, "save_every" => save_every,
+            "grid_points" => grid_points, "steps" => steps)
+        for (key, value) in kwargs
+            plan[String(key)] = value
+        end
+        CASE_PLAN[id] = plan
+    end
 
-    # Keep every completed case already present on the requested drive and
-    # include the interrupted 24th leapfrog configuration for regeneration.
+    # Twenty vortex-ring cases: seven representative existing training cases,
+    # four validation cases (including one N=640 resolution series member),
+    # two existing in-range tests, and seven diverse additions.
+    for id in (
+        "leapfrog_N160_d0p750_g0p500", "leapfrog_N160_d1p000_g0p750",
+        "leapfrog_N160_d2p000_g1p000", "leapfrog_N320_d0p750_g0p750",
+        "leapfrog_N320_d1p000_g0p500", "leapfrog_N320_d1p000_g1p000",
+        "leapfrog_N320_d1p250_g0p750")
+        plan_case!(id, "vortexrings", "train", ["in_regime"])
+    end
+    for id in (
+        "leapfrog_N160_d0p750_g0p750", "leapfrog_N160_d2p000_g0p500",
+        "leapfrog_N320_d0p750_g1p000", "leapfrog_N640_d0p750_g1p000")
+        plan_case!(id, "vortexrings", "validate", ["validation_in_regime"])
+    end
+    for id in ("leapfrog_N160_d1p500_g1p000", "leapfrog_N320_d1p250_g1p000")
+        plan_case!(id, "vortexrings", "test", ["in_regime"])
+    end
+    plan_case!("isolated_N320_g20p000_sigma0p080", "vortexrings", "train", ["in_regime"])
+    plan_case!("signed_N320_d2p000_gm1p000", "vortexrings", "train", ["in_regime"])
+    plan_case!("leapfrog_N320_d2p500_g0p250", "vortexrings", "test",
+        ["outside_training_regime", "unseen_operating_condition"])
+    plan_case!("perturbed_N320_amp0p100_mode3", "vortexrings", "test",
+        ["unseen_case", "unseen_initial_condition", "temporal_superresolution"]; steps=180, save_every=1)
+    plan_case!("leapfrog_spatial_N320_d1p000_g1p000", "vortexrings", "test",
+        ["spatial_superresolution"]; grid_points=64)
+    plan_case!("toroidal_R1p500_g20p000_dx0p500", "vortexrings", "test",
+        ["unseen_case", "outside_training_regime"])
+    plan_case!("free_pair_N320_sep5p000_gm1p000", "vortexrings", "test",
+        ["unseen_case", "outside_training_regime"])
+
+    # A matching twenty-case roundjet design: same case-level split sizes and
+    # analogous in-range, interpolation, operation, temporal, and spatial tests.
+    train_jets = (
+        (1.0, .75, 1/6, 2.0), (1.0, 1.0, 1/8, 2.4), (1.0, 1.25, 1/6, 3.0),
+        (2.0, .75, 1/8, 2.0), (2.0, 1.0, 1/6, 3.0), (2.0, 1.25, 1/8, 2.4),
+        (1.0, .75, 1/8, 3.0), (2.0, .75, 1/6, 2.4), (1.0, 1.25, 1/8, 2.0))
+    validate_jets = (
+        (1.0, 1.0, 1/6, 3.0), (1.0, 1.25, 1/8, 2.4),
+        (2.0, .75, 1/6, 3.0), (2.0, 1.0, 1/8, 2.0))
+    test_jets = (
+        (1.0, 1.0, 1/6, 2.0), (2.0, 1.25, 1/8, 3.0))
+    jet_id(D, U, dx, overlap) = "jet_D$(safe_tag(D))_U$(safe_tag(U))_dx$(safe_tag(dx))_ov$(safe_tag(overlap))"
+    for (sets, split) in ((train_jets, "train"), (validate_jets, "validate"), (test_jets, "test"))
+        for (D, U, dx, overlap) in sets
+            plan_case!(jet_id(D, U, dx, overlap), "roundjet", split,
+                [split == "test" ? "in_regime" : split])
+        end
+    end
+    for (id, D, U, dx, overlap, Re, thetaod) in (
+        ("jet_D1p000_U0p750_dx0p167_ov2p000_Re15000", 1.0, .75, 1/6, 2.0, 15000.0, 0.025),
+        ("jet_D1p000_U1p000_dx0p167_ov2p400_theta0p040", 1.0, 1.0, 1/6, 2.4, ROUNDJET_RE, 0.040),
+        ("jet_D1p000_U1p500_dx0p167_ov2p400", 1.0, 1.5, 1/6, 2.4, ROUNDJET_RE, 0.025),
+        ("jet_D1p000_U1p000_dx0p167_ov2p400_temporal", 1.0, 1.0, 1/6, 2.4, ROUNDJET_RE, 0.025),
+        ("jet_D2p000_U1p000_dx0p125_ov2p400_spatial", 2.0, 1.0, 1/8, 2.4, ROUNDJET_RE, 0.025))
+        categories = occursin("Re15000", id) ? ["unseen_operating_condition", "unseen_Reynolds_number"] :
+            occursin("theta0p040", id) ? ["unseen_boundary_condition", "unseen_operating_condition"] :
+            occursin("temporal", id) ? ["temporal_superresolution", "unseen_operating_condition"] :
+            occursin("spatial", id) ? ["spatial_superresolution"] :
+            ["outside_training_regime", "unseen_operating_condition"]
+        plan_case!(id, "roundjet", "test", categories;
+            steps=occursin("temporal", id) ? 180 : round(Int, ROUNDJET_TRAVEL_D * ROUNDJET_STEPS_PER_D),
+            save_every=occursin("temporal", id) ? 1 : SAVE_EVERY,
+            grid_points=occursin("spatial", id) ? 64 : GRID_POINTS,
+            Reynolds_number=Re, diameter=D, exit_speed=U,
+            momentum_thickness_over_diameter=thetaod,
+            particle_spacing_over_momentum_thickness=dx, particle_overlap=overlap)
+    end
+
+    # Preserve selected folders' split assignments and metadata. Discarded IDs
+    # are intentionally omitted from the active manifest; raw deletion is done
+    # separately from this planner.
     existing = Dict{String,Dict{String,Any}}()
-    for split in ("train", "test", "validate", "validation"), simulation in ("vortexrings", "roundjet")
-        dir = joinpath(OUTPUT_ROOT, split, simulation)
+    for split in ("train", "test", "validate", "validation"), sim in ("vortexrings", "roundjet")
+        dir = joinpath(OUTPUT_ROOT, split, sim)
         isdir(dir) || continue
         for case_dir in readdir(dir; join=true)
             isdir(case_dir) || continue
             toml_path = joinpath(case_dir, "case.toml")
-            metadata = isfile(toml_path) ? TOML.parsefile(toml_path) : Dict{String,Any}("split" => split)
+            metadata = isfile(toml_path) ? TOML.parsefile(toml_path) : Dict{String,Any}()
             existing[String(get(metadata, "case_id", basename(case_dir)))] = metadata
         end
     end
-    kept_leap = String[id for id in leapfrog if haskey(existing, id)]
-    chosen_leap = evenly_select(leapfrog, 27;
-        required=unique(vcat(kept_leap, ["leapfrog_N320_d1p250_g0p500"])))
-    chosen_toroid = String[]
-    for radius in (0.75, 1.0, 1.25)
-        group = filter(id -> startswith(id, "toroidal_R$(safe_tag(radius))_"), toroidal)
-        append!(chosen_toroid, evenly_select(group, radius == 1.0 ? 6 : 5))
-    end
-    chosen_roundjet = evenly_select(roundjet, 20)
-    unseen_re_cases = ["jet_D1p000_U0p750_dx0p167_ov2p000_Re15000",
-                       "jet_D2p000_U1p250_dx0p125_ov3p000_Re15000"]
-    chosen_perturbed = evenly_select(perturbed, 9)
-    selected = vcat(chosen_leap, evenly_select(isolated, 16), evenly_select(signed, 14),
-                    chosen_toroid, evenly_select(freepair, 16), chosen_perturbed,
-                    chosen_roundjet, unseen_re_cases)
-    length(selected) == CASE_BUDGET || error("Balanced plan has $(length(selected)) cases, CASE_BUDGET=$CASE_BUDGET")
-    CASE_BUDGET == 120 || error("This balanced parameter design is defined for CASE_BUDGET=120")
-
-    # The two added Reynolds-number cases are held out operation conditions.
-    test_categories = Dict{String,Vector{String}}()
-    for id in chosen_toroid
-        occursin("toroidal_R1p250_", id) && (test_categories[id] = ["outside_training_regime"])
-    end
-    test_categories[unseen_re_cases[1]] = ["unseen_operating_condition", "unseen_Reynolds_number"]
-    test_categories[unseen_re_cases[2]] = ["unseen_operating_condition", "unseen_Reynolds_number", "spatial_superresolution"]
-    for id in chosen_perturbed
-        test_categories[id] = ["unseen_case", "unseen_initial_condition"]
-    end
-    test_categories[first(chosen_perturbed)] = ["unseen_case", "unseen_initial_condition", "temporal_superresolution"]
-
-    for (id, meta) in existing
-        haskey(CASE_PLAN, id) && continue
-        # Existing cases are retained only when they belong to the chosen plan.
-        id in selected || continue
-        split = String(get(meta, "split", "train"))
-        cats = String.(get(meta, "evaluation_categories", [split == "test" ? "in_regime" : split]))
-        CASE_PLAN[id] = Dict{String,Any}("split" => (split == "validation" ? "validate" : split),
-            "categories" => cats, "save_every" => Int(get(meta, "save_every_steps", SAVE_EVERY)),
-            "grid_points" => Int(get(meta, "grid_points", [GRID_POINTS])[1]))
+    for (id, plan) in CASE_PLAN
+        haskey(existing, id) || continue
+        old_split = String(get(existing[id], "split", plan["split"]))
+        old_split == "validation" && (old_split = "validate")
+        old_split == plan["split"] || error("Existing case $id is assigned to $old_split, planned for $(plan["split"])")
+        # All selected cases use a uniform 4-step cadence and 720-step standard
+        # horizon (180 transitions). The temporal test intentionally saves each
+        # of its first 180 integration steps.
+        plan["save_every"] = Int(plan["save_every"])
+        plan["steps"] = Int(plan["steps"])
     end
 
-    new_ids = [id for id in selected if !haskey(CASE_PLAN, id)]
-    mandatory_test = Set(vcat(collect(keys(test_categories)), unseen_re_cases))
-    for id in chosen_perturbed
-        push!(mandatory_test, id)
-    end
-    for id in mandatory_test
-        id in new_ids || continue
-        cats = get(test_categories, id, ["unseen_operating_condition"])
-        CASE_PLAN[id] = Dict{String,Any}("split" => "test", "categories" => cats,
-            "save_every" => id == first(chosen_perturbed) ? 1 : SAVE_EVERY,
-            "grid_points" => id == unseen_re_cases[2] ? 64 : GRID_POINTS)
-    end
-    current_train = count(p -> get(p, "split", "") == "train", values(CASE_PLAN))
-    current_val = count(p -> get(p, "split", "") == "validate", values(CASE_PLAN))
-    current_test = count(p -> get(p, "split", "") == "test", values(CASE_PLAN))
-    remaining = [id for id in new_ids if !haskey(CASE_PLAN, id)]
-    # Fill any remaining test slots with in-regime cases. On the interrupted
-    # run, the two existing test cases already fill these slots; on a clean
-    # output root, this selects two cases inside the training parameter range.
-    need_test = 18 - current_test
-    need_test >= 0 || error("Existing test cases exceed the planned budget")
-    length(remaining) >= need_test || error("Not enough cases to fill the in-regime test split")
-    for id in remaining[1:need_test]
-        CASE_PLAN[id] = Dict{String,Any}("split" => "test", "categories" => ["in_regime"],
-            "save_every" => SAVE_EVERY, "grid_points" => GRID_POINTS)
-    end
-    remaining = remaining[need_test+1:end]
-    need_train, need_val = 84 - current_train, 18 - current_val
-    need_train >= 0 && need_val >= 0 || error("Existing cases exceed the planned train/validate budget")
-    length(remaining) == need_train + need_val ||
-        error("Balanced plan needs $(need_train + need_val) train/validate cases but has $(length(remaining))")
-    # Stratify validation across flow families so it represents both the
-    # vortex-ring variants and roundjet conditions in the same case ratio.
-    family_prefixes = ("leapfrog_", "isolated_", "signed_", "toroidal_",
-                       "free_pair_", "perturbed_", "jet_")
-    family_groups = [filter(id -> startswith(id, prefix), remaining) for prefix in family_prefixes]
-    val_ids = Set{String}()
-    cursors = ones(Int, length(family_groups))
-    while length(val_ids) < need_val
-        progressed = false
-        for (index, group) in enumerate(family_groups)
-            if cursors[index] <= length(group)
-                push!(val_ids, group[cursors[index]])
-                cursors[index] += 1
-                progressed = true
-                length(val_ids) == need_val && break
-            end
-        end
-        progressed || error("Could not stratify the requested validation case count")
-    end
-    for id in remaining
-        split = id in val_ids ? "validate" : "train"
-        CASE_PLAN[id] = Dict{String,Any}("split" => split,
-            "categories" => [split], "save_every" => SAVE_EVERY, "grid_points" => GRID_POINTS)
-    end
-    final_counts = Dict(split => count(p -> p["split"] == split, values(CASE_PLAN))
-                        for split in ("train", "validate", "test"))
-    final_counts == Dict("train" => 84, "validate" => 18, "test" => 18) ||
-        error("Selected case split counts are not balanced: $final_counts")
-    manifest_cases = [Dict("case_id" => id,
-        "simulation" => (startswith(id, "jet_") ? "roundjet" : "vortexrings"),
-        "split" => CASE_PLAN[id]["split"], "evaluation_categories" => CASE_PLAN[id]["categories"],
-        "save_every_steps" => CASE_PLAN[id]["save_every"], "grid_points" => CASE_PLAN[id]["grid_points"])
-        for id in sort!(collect(keys(CASE_PLAN)))]
+    counts = Dict((sim, split) => count(p -> p["simulation"] == sim && p["split"] == split, values(CASE_PLAN))
+        for sim in ("vortexrings", "roundjet") for split in ("train", "validate", "test"))
+    counts[("vortexrings", "train")] == 9 && counts[("vortexrings", "validate")] == 4 && counts[("vortexrings", "test")] == 7 || error("Vortex-ring plan must contain 9/4/7 train/validate/test cases")
+    counts[("roundjet", "train")] == 9 && counts[("roundjet", "validate")] == 4 && counts[("roundjet", "test")] == 7 || error("Roundjet plan must contain 9/4/7 train/validate/test cases")
+    manifest_cases = [Dict("case_id" => id, "simulation" => plan["simulation"],
+        "split" => plan["split"], "evaluation_categories" => plan["categories"],
+        "save_every_steps" => plan["save_every"], "grid_points" => plan["grid_points"],
+        "steps" => plan["steps"]) for (id, plan) in sort!(collect(CASE_PLAN); by=first)]
     open(joinpath(OUTPUT_ROOT, "case_plan.toml"), "w") do io
-        TOML.print(io, Dict("case_budget" => CASE_BUDGET, "split_counts" => final_counts,
-                            "max_standard_pairs_per_case" => 100, "cases" => manifest_cases))
+        TOML.print(io, Dict("case_budget" => length(CASE_PLAN), "split_counts" => Dict(
+            "vortexrings" => Dict(split => counts[("vortexrings", split)] for split in ("train", "validate", "test")),
+            "roundjet" => Dict(split => counts[("roundjet", split)] for split in ("train", "validate", "test"))),
+            "transitions_per_standard_case" => 180, "cases" => manifest_cases))
     end
-    println("[plan] $(length(CASE_PLAN)) cases: $(final_counts); preserving $(length(kept_leap)) existing leapfrog cases")
+    println("[plan] $(length(CASE_PLAN)) cases: vortexrings 20, roundjet 20; split counts=$counts")
 end
 
 function run_vortexrings_sweep()
@@ -380,7 +370,7 @@ function run_vortexrings_sweep()
     case_limit = CASE_LIMIT > 0 ? CASE_LIMIT : typemax(Int)
 
     # Mid/high particle counts expand the image-defined leapfrogging sweep.
-    for N in (160, 320, 640), dR in (0.75, 1.0, 1.25, 1.5, 2.0), ratio in (1.0, 0.75, 0.5)
+    for N in (160, 320, 640), dR in (0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 2.5), ratio in (1.5, 1.0, 0.75, 0.5, 0.25)
         case_index += 1
         if case_index > case_limit
             return
@@ -422,7 +412,7 @@ function run_vortexrings_sweep()
     # Toroidal-vorticity ring using FLOWVPM's Cartesian-grid initializer.
     # Preserve the example's Gaussian core, Rcross/R=0.1, sigma=Rcross,
     # and 5% vorticity cutoff while sweeping circulation, radius, and dx.
-    for radius in (0.75, 1.0, 1.25), gamma in (5.0, 10.0, 20.0), dxratio in (0.5, 0.75, 1.0)
+    for radius in (0.75, 1.0, 1.25, 1.5), gamma in (5.0, 10.0, 20.0), dxratio in (0.5, 0.75, 1.0)
         case_index += 1
         case_index > case_limit && return
         case_id = "toroidal_R$(safe_tag(radius))_g$(safe_tag(gamma))_dx$(safe_tag(dxratio))"
@@ -432,7 +422,7 @@ function run_vortexrings_sweep()
 
     # Freely evolving pair in unbounded space, with controlled center spacing,
     # circulation ratio, and particle count. The pair is laterally offset.
-    for N in (160, 320, 640), separationR in (2.5, 3.0, 4.0), ratio in (-1.0, -0.75, -0.5)
+    for N in (160, 320, 640), separationR in (2.5, 3.0, 4.0, 5.0), ratio in (-1.0, -0.75, -0.5)
         case_index += 1
         case_index > case_limit && return
         case_id = "free_pair_N$(N)_sep$(safe_tag(separationR))_g$(safe_tag(ratio))"
@@ -452,6 +442,17 @@ function run_vortexrings_sweep()
         haskey(CASE_PLAN, case_id) || continue
         run_perturbed_ring_case(N, amplitudeR, mode)
     end
+
+    # Matched-parameter high-resolution target for a clean spatial
+    # superresolution evaluation against the N=320, d/R=1, ratio=1 train case.
+    case_index += 1
+    case_index > case_limit && return
+    case_id = "leapfrog_spatial_N320_d1p000_g1p000"
+    haskey(CASE_PLAN, case_id) && run_vortex_case(case_id,
+        Dict("family" => "leapfrogging_spatial_superresolution", "total_particles" => 320,
+            "radius" => 1.0, "spacing_over_radius" => 1.0,
+            "circulation_ratio" => [1.0, 1.0]),
+        2, [10.0, 10.0], [1.0, 1.0], 320, 1.0)
 end
 
 function run_toroidal_case(radius, gamma, dxratio)
@@ -463,7 +464,7 @@ function run_toroidal_case(radius, gamma, dxratio)
         "smoothing_radius_over_core_radius" => 1.0, "minWfraction" => 0.05)
     case_dir = new_case_dir("vortexrings", case_id, metadata)
     case_dir === nothing && return
-    fmm = vpm.FMM(; p=6, ncrit=60, theta=0.3, shrink_recenter=true)
+    fmm = generation_fmm()
     solver = (formulation=vpm.cVPM, SFS=vpm.noSFS,
         relaxation=vpm.correctedpedrizzetti, kernel=vpm.winckelmans,
         viscous=vpm.Inviscid(), transposed=true, integration=vpm.rungekutta3,
@@ -496,12 +497,12 @@ function run_perturbed_ring_case(N, amplitudeR, mode)
         "azimuthal_mode" => mode)
     case_dir = new_case_dir("vortexrings", case_id, metadata)
     case_dir === nothing && return
-    fmm = vpm.FMM(; p=6, ncrit=60, theta=0.3, shrink_recenter=true)
+    fmm = generation_fmm()
     solver = (formulation=vpm.cVPM, SFS=vpm.noSFS,
         relaxation=vpm.correctedpedrizzetti, kernel=vpm.winckelmans,
         viscous=vpm.Inviscid(), transposed=true, integration=vpm.rungekutta3,
         UJ=vpm.UJ_fmm, fmm=fmm)
-    pfield = vpm.ParticleField(N + NGRID; solver...)
+    pfield = vpm.ParticleField(N + case_grid_points(case_id)^3; solver...)
     R = 1.0
     Rcross = 0.10
     Nphi = N
@@ -523,8 +524,11 @@ function run_perturbed_ring_case(N, amplitudeR, mode)
     end
 
     Uref = VortexRingCode.Uring(10.0, R, Rcross, 0.5)
-    nsteps, Rtot = VORTEX_STEPS, VORTEX_RTOT
-    dt = (Rtot / Uref) / nsteps
+    nsteps = Int(get(CASE_PLAN[case_id], "steps", VORTEX_STEPS))
+    Rtot = VORTEX_RTOT
+    # Use the standard timestep and retain only the initial 120 steps. The
+    # every-step output then provides true temporal refinement of early flow.
+    dt = (Rtot / Uref) / VORTEX_STEPS
     println("\n[$case_id] held-out three-dimensional ring perturbation")
     VortexRingCode.run_vortexring_simulation(pfield, nsteps, dt, 1,
         [Nphi], [1], [0];
@@ -542,24 +546,27 @@ end
 function run_roundjet_case(case_id, metadata, diameter, exit_speed, dxotheta, overlap)
     case_dir = new_case_dir("roundjet", case_id, metadata)
     case_dir === nothing && return
-    fmm = vpm.FMM(; p=6, ncrit=60, theta=0.3, shrink_recenter=true)
-    maxparticles = roundjet_particle_capacity(diameter, exit_speed, dxotheta, overlap)
+    fmm = generation_fmm()
+    case_steps = Int(get(CASE_PLAN[case_id], "steps", round(Int, ROUNDJET_TRAVEL_D * ROUNDJET_STEPS_PER_D)))
+    travel_d = case_steps / ROUNDJET_STEPS_PER_D
+    thetaod = Float64(get(metadata, "momentum_thickness_over_diameter", 0.025))
+    maxparticles = roundjet_particle_capacity(diameter, exit_speed, dxotheta, overlap,
+        case_grid_points(case_id), thetaod)
     viscous = vpm.CoreSpreading(-1.0, -1.0, RoundJetCode.zeta_fmm_compat;
         itmax=20, tol=1e-2, iterror=false)
 
-    thetaod = 0.025 # Official example baseline; this driver has no inlet-forcing input.
     println("\n[$case_id] D=$diameter, Uexit=$exit_speed, dx/theta=$dxotheta, overlap=$overlap")
-    metadata["Reynolds_number"] = ROUNDJET_RE
+    metadata["Reynolds_number"] = Float64(get(metadata, "Reynolds_number", ROUNDJET_RE))
     metadata["steps_per_diameter"] = ROUNDJET_STEPS_PER_D
-    metadata["travel_diameters"] = ROUNDJET_TRAVEL_D
+    metadata["travel_diameters"] = travel_d
     pmin = [-2.5 * diameter, -2.5 * diameter, -2.0 * diameter]
-    pmax = [2.5 * diameter, 2.5 * diameter, (ROUNDJET_TRAVEL_D + 2.0) * diameter]
+    pmax = [2.5 * diameter, 2.5 * diameter, (travel_d + 2.0) * diameter]
     metadata["field_bounds_min"] = pmin
     metadata["field_bounds_max"] = pmax
     pfield = RoundJetCode.run_roundjet_simulation(diameter, exit_speed, 0.0;
         thetaod=thetaod,
         steps_per_d=ROUNDJET_STEPS_PER_D,
-        d_travel_tot=ROUNDJET_TRAVEL_D,
+        d_travel_tot=travel_d,
         dxotheta=dxotheta,
         overlap=overlap,
         minWfraction=1e-2,
@@ -583,10 +590,9 @@ function run_roundjet_case(case_id, metadata, diameter, exit_speed, dxotheta, ov
     reconstruct_fields!(pfield, case_dir, "pfield", pmin, pmax)
 end
 
-function roundjet_particle_capacity(diameter, exit_speed, dxotheta, overlap)
+function roundjet_particle_capacity(diameter, exit_speed, dxotheta, overlap, grid_points, thetaod)
     # Size for initialization and field reconstruction. The round-jet driver
     # grows its particle buffer as new inlet particles arrive over the trajectory.
-    thetaod = 0.025
     maxRoR = 1.0
     max_zsigma = 12.0
     minWfraction = 1e-2
@@ -621,20 +627,17 @@ function roundjet_particle_capacity(diameter, exit_speed, dxotheta, overlap)
 
     # Include the initial static wake, field-grid nodes, and headroom for
     # threshold/rounding differences. Dynamic inlet particles expand on demand.
-    return ceil(Int, 1.25 * initial_particles) + NGRID + 4096
+    return ceil(Int, 1.25 * initial_particles) + grid_points^3 + 4096
 end
 
 function run_roundjet_sweep()
-    # Retain the official theta/D=0.025 and 10D duration. Sweep supported
-    # operating conditions, particle resolution, and core overlap. The current
-    # driver exposes no inlet perturbation/forcing control.
+    # The balanced 20-case jet plan samples the same train/validation/test
+    # proportions as vortex rings and uses a 7.2D standard trajectory.
     case_index = 0
     case_limit = CASE_LIMIT > 0 ? CASE_LIMIT : typemax(Int)
     for diameter in (1.0, 2.0), exit_speed in (0.75, 1.0, 1.25), dxotheta in (1/6, 1/8), overlap in (2.0, 2.4, 3.0)
         case_index += 1
-        if case_index > case_limit
-            return
-        end
+        case_index > case_limit && return
         case_id = "jet_D$(safe_tag(diameter))_U$(safe_tag(exit_speed))_dx$(safe_tag(dxotheta))_ov$(safe_tag(overlap))"
         haskey(CASE_PLAN, case_id) || continue
         run_roundjet_case(case_id,
@@ -646,29 +649,36 @@ function run_roundjet_sweep()
                  "Reynolds_number" => ROUNDJET_RE),
             diameter, exit_speed, dxotheta, overlap)
     end
-    for (case_id, diameter, speed, dxotheta, overlap) in (
-        ("jet_D1p000_U0p750_dx0p167_ov2p000_Re15000", 1.0, 0.75, 1/6, 2.0),
-        ("jet_D2p000_U1p250_dx0p125_ov3p000_Re15000", 2.0, 1.25, 1/8, 3.0),
+
+    for (case_id, diameter, speed, dxotheta, overlap, Re, thetaod) in (
+        ("jet_D1p000_U0p750_dx0p167_ov2p000_Re15000", 1.0, 0.75, 1/6, 2.0, 15000.0, 0.025),
+        ("jet_D1p000_U1p000_dx0p167_ov2p400_theta0p040", 1.0, 1.0, 1/6, 2.4, ROUNDJET_RE, 0.040),
+        ("jet_D1p000_U1p500_dx0p167_ov2p400", 1.0, 1.5, 1/6, 2.4, ROUNDJET_RE, 0.025),
+        ("jet_D1p000_U1p000_dx0p167_ov2p400_temporal", 1.0, 1.0, 1/6, 2.4, ROUNDJET_RE, 0.025),
+        ("jet_D2p000_U1p000_dx0p125_ov2p400_spatial", 2.0, 1.0, 1/8, 2.4, ROUNDJET_RE, 0.025),
     )
+        case_index += 1
+        case_index > case_limit && return
+        haskey(CASE_PLAN, case_id) || continue
         metadata = Dict("family" => "roundjet", "diameter" => diameter,
             "exit_speed" => speed, "coflow_speed" => 0.0,
-            "momentum_thickness_over_diameter" => 0.025,
+            "momentum_thickness_over_diameter" => thetaod,
             "particle_spacing_over_momentum_thickness" => dxotheta,
-            "particle_overlap" => overlap, "Reynolds_number" => 15000.0)
+            "particle_overlap" => overlap, "Reynolds_number" => Re)
         run_roundjet_case(case_id, metadata, diameter, speed, dxotheta, overlap)
     end
 end
 
 mkpath(OUTPUT_ROOT)
-println("Train/validation/test output: $OUTPUT_ROOT/{train,validate,test}")
+println("Train/validation/test output: $OUTPUT_ROOT/{train,validate,test}/{vortexrings,roundjet}")
 println("Grid: $(GRID_POINTS) x $(GRID_POINTS) x $(GRID_POINTS) nodes; snapshots every $SAVE_EVERY steps")
+println("Julia threads: $(Threads.nthreads())")
 
+prepare_case_plan!()
 if DATASET in ("all", "vortexrings")
-    prepare_case_plan!()
     run_vortexrings_sweep()
 end
 if DATASET in ("all", "roundjet")
-    isempty(CASE_PLAN) && prepare_case_plan!()
     run_roundjet_sweep()
 end
 

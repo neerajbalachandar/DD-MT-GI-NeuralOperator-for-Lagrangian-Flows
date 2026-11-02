@@ -8,7 +8,7 @@ from . import preprocessing_pipeline
 DEFAULT_VPM_ROOT = Path("/media/dysco/New Volume/Neeraj/NeuralOp_FLOWVPM_Data")
 
 
-def run_preprocessing(source_root=None, output_dir=None, *, max_pairs_per_case=120, device="auto"):
+def run_preprocessing(source_root=None, output_dir=None, *, max_pairs_per_case=180, device="auto"):
     """Build from generated VPM data, using a consecutive prefix of each case."""
     requested_root = Path(source_root or DEFAULT_VPM_ROOT).expanduser().resolve()
     output_path = Path(output_dir or preprocessing_pipeline.SCRIPT_DIR / "processed_data_vpm").expanduser().resolve()

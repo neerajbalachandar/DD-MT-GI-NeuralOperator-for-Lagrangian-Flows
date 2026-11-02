@@ -19,21 +19,22 @@ FLOW_UNSTEADY_ROOT="${FLOW_UNSTEADY_ROOT:-$(cd -- "$SCRIPT_DIR/../.." && pwd)}"
 JULIA_PROJECT="${JULIA_PROJECT:-$FLOW_UNSTEADY_ROOT}"
 JULIA="${JULIA:-julia}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-/media/dysco/New Volume/Neeraj/NeuralOp_FLOWVPM_Data}" 
-# Save about 100 transitions per 1000-step standard case. Resume skips complete
+# Save 181 snapshots (180 transitions) per standard case. Resume skips complete
 # cases and removes/restarts only incomplete case directories.
 GRID_POINTS="${GRID_POINTS:-32}"
-SAVE_EVERY="${SAVE_EVERY:-10}"
+SAVE_EVERY="${SAVE_EVERY:-4}"
 CASE_LIMIT="${CASE_LIMIT:-0}"
-CASE_BUDGET="${CASE_BUDGET:-120}"
 RESUME="${RESUME:-1}"
-VORTEX_STEPS="${VORTEX_STEPS:-1000}"
-VORTEX_RTOT="${VORTEX_RTOT:-10}"
+VORTEX_STEPS="${VORTEX_STEPS:-720}"
+VORTEX_RTOT="${VORTEX_RTOT:-7.2}"
 ROUNDJET_STEPS_PER_D="${ROUNDJET_STEPS_PER_D:-100}"
-ROUNDJET_TRAVEL_D="${ROUNDJET_TRAVEL_D:-10}"
+ROUNDJET_TRAVEL_D="${ROUNDJET_TRAVEL_D:-7.2}"
 ROUNDJET_RE="${ROUNDJET_RE:-10000}"
 ROUNDJET_RBF_ITMAX="${ROUNDJET_RBF_ITMAX:-200}"
-export JULIA_NUM_THREADS="${JULIA_NUM_THREADS:-1}"
-export OUTPUT_ROOT GRID_POINTS SAVE_EVERY CASE_LIMIT CASE_BUDGET RESUME
+# Keep parallel execution while leaving headroom for the FMM tree and temporary
+# grid particles. Override JULIA_NUM_THREADS on machines with more memory.
+export JULIA_NUM_THREADS="${JULIA_NUM_THREADS:-4}"
+export OUTPUT_ROOT GRID_POINTS SAVE_EVERY CASE_LIMIT RESUME
 export VORTEX_STEPS VORTEX_RTOT ROUNDJET_STEPS_PER_D ROUNDJET_TRAVEL_D ROUNDJET_RE ROUNDJET_RBF_ITMAX
 
 [[ -f "$JULIA_PROJECT/Project.toml" ]] || {
