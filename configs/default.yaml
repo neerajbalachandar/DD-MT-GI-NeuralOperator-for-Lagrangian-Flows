@@ -9,11 +9,12 @@ data:
   input_features: [u_x, u_y, u_z, sigma, Gamma_x, Gamma_y, Gamma_z, gradU_xx, gradU_xy, gradU_xz, gradU_yx, gradU_yy, gradU_yz, gradU_zx, gradU_zy, gradU_zz, delta_t]
   global_condition_channels: [freestream_magnitude, phase]
   max_particles: 2048
-  max_queries: 32768
+  # Training field supervision uses a regular 16^3 subset per time pair.
+  # Native 32^3 HDF5 fields remain intact; spatial super-resolution evaluation uses every native node.
+  max_queries: 4096
 
 preprocessing:
-  max_rss_gb: 0
-  rollout_memory_cap_gb: 2.0
+  max_rss_gb: 32
   
 model:
   latent_res: 16

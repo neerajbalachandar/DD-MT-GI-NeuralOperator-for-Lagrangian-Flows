@@ -130,13 +130,24 @@ def main():
                                          key in archive for key in ("train_cases", "val_cases", "test_cases")) else set()
                     field_names = {str(value) for value in archive["field_target_names"]
                                    } if "field_target_names" in archive else set()
+                    schema_version = int(np.asarray(archive["preprocessing_schema_version"]).reshape(-1)[0]
+                                         if "preprocessing_schema_version" in archive else 0)
                 if expected_cases != present_cases:
                     rebuild_reason = "archive case IDs do not match merged-frame folders"
                 elif not {"omega_x", "omega_y", "omega_z"}.issubset(field_names):
                     rebuild_reason = "archive predates the velocity/vorticity target update"
+                elif schema_version < 3:
+                    rebuild_reason = "archive predates the memory-bounded preprocessing format"
             except Exception as exc:
                 rebuild_reason = f"archive could not be validated ({exc})"
         if rebuild_reason:
+            import os
+            os.environ["PREPROC_STREAMING"] = "1"
+            os.environ["MAX_PREPROCESS_PARTICLES"] = str(int(cfg["data"].get("max_particles", 2048)))
+            os.environ["MAX_FIELD_QUERY_POINTS"] = str(int(cfg["data"].get("max_queries", 4096)))
+            rss_cap = float(cfg.get("preprocessing", {}).get("max_rss_gb", 0) or 0)
+            if rss_cap > 0:
+                os.environ["PREPROC_MAX_RSS_GB"] = str(rss_cap)
             from gino.data.preprocessing import run_preprocessing_from_merged_frames
             print(f"[dataset] rebuilding from {merged_root}: {rebuild_reason}", flush=True)
             dataset_path = run_preprocessing_from_merged_frames(

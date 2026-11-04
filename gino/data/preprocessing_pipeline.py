@@ -21,6 +21,7 @@ import numpy as np
 
 PREPROC_MAX_RSS_GB = float(os.environ.get("PREPROC_MAX_RSS_GB", "0"))
 ROLLOUT_MEMORY_CAP_GB = float(os.environ.get("ROLLOUT_MEMORY_CAP_GB", "2.0"))
+MAX_PREPROCESS_PARTICLES = max(1, int(os.environ.get("MAX_PREPROCESS_PARTICLES", "2048")))
 PREPROCESS_DEVICE = "cpu"
 
 
@@ -49,6 +50,41 @@ def _rss_gb() -> float:
 def _check_rss_limit(case: str) -> None:
     if PREPROC_MAX_RSS_GB > 0 and _rss_gb() > PREPROC_MAX_RSS_GB:
         raise MemoryError(f"Preprocessing RSS exceeded PREPROC_MAX_RSS_GB after case={case}")
+
+
+def _release_process_memory() -> None:
+    """Collect Python objects and return freed glibc heap pages to the OS."""
+    gc.collect()
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except (OSError, AttributeError):
+        pass
+
+
+def _particle_subset_indices(ids: np.ndarray, count: int) -> np.ndarray:
+    """Select a stable, evenly distributed subset of particle rows."""
+    n = len(ids)
+    if n <= count:
+        return np.arange(n, dtype=np.int64)
+    decoded = np.char.decode(_to_s32(ids), "utf-8")
+    if np.any(np.char.find(decoded, ":id:") >= 0):
+        order = np.argsort(decoded, kind="stable")
+        return order[np.linspace(0, n - 1, count, dtype=np.int64)]
+    return np.linspace(0, n - 1, count, dtype=np.int64)
+
+
+def _field_query_indices(n_nodes: int, n_keep: int) -> np.ndarray:
+    """Select a regular 3-D lattice from a flattened cubic field grid."""
+    if n_keep >= n_nodes:
+        return np.arange(n_nodes, dtype=np.int64)
+    source_side = round(n_nodes ** (1.0 / 3.0))
+    target_side = round(n_keep ** (1.0 / 3.0))
+    if source_side ** 3 == n_nodes and target_side ** 3 == n_keep and target_side <= source_side:
+        axis = np.rint(np.linspace(0, source_side - 1, target_side)).astype(np.int64)
+        lattice = np.arange(n_nodes, dtype=np.int64).reshape(source_side, source_side, source_side)
+        return lattice[np.ix_(axis, axis, axis)].reshape(-1)
+    return np.linspace(0, n_nodes - 1, n_keep, dtype=np.int64)
 
 
 try:
@@ -138,7 +174,7 @@ TARGET_DELTA_NAMES = [
 ]
 
 FIELD_GRID_POINTS = int(os.environ.get("FIELD_GRID_POINTS", "32"))
-MAX_FIELD_QUERY_POINTS = int(os.environ.get("MAX_FIELD_QUERY_POINTS", str(FIELD_GRID_POINTS ** 3)))
+MAX_FIELD_QUERY_POINTS = int(os.environ.get("MAX_FIELD_QUERY_POINTS", str(min(FIELD_GRID_POINTS, 16) ** 3)))
 if FIELD_GRID_POINTS < 2 or MAX_FIELD_QUERY_POINTS < 1:
     raise ValueError("FIELD_GRID_POINTS must be >=2 and MAX_FIELD_QUERY_POINTS must be positive")
 FIELD_TARGET_NAMES = [
@@ -1662,8 +1698,7 @@ def _normalize_channels_rows(x: np.ndarray, train_rows: np.ndarray):
     mean = np.mean(x[train_rows], axis=0, keepdims=True)
     std = np.std(x[train_rows], axis=0, keepdims=True)
     std = np.maximum(std, 1e-8)
-    xn = ((x - mean) / std).astype(np.float32)
-    return mean.astype(np.float32), std.astype(np.float32), xn
+    return mean.astype(np.float32), std.astype(np.float32)
 
 def _case_split_label(case: str) -> str:
     if case in TRAIN_CASES:
@@ -1686,6 +1721,19 @@ def _load_and_track_case(case: str, plist: List[Path], meta: Dict[str, Any]):
         ids = _to_s32(data.get("particle_ids", [f"row:{j}" for j in range(len(state["x"]))]))
         if len(ids) != len(state["x"]):
             raise ValueError(f"Particle ID count does not match state rows in {path}")
+        source_particle_count = len(ids)
+        selected = _particle_subset_indices(ids, MAX_PREPROCESS_PARTICLES)
+        if len(selected) < source_particle_count:
+            ids = ids[selected]
+            state = {key: np.asarray(value)[selected] for key, value in state.items()}
+            velocity = velocity[selected]
+            static_mask = _require_scalar(data["static"], source_particle_count, "static")[selected] > 0.5
+            gradients = [as_xyz(data[key])[selected] for key in
+                        ("velocity_gradient_x", "velocity_gradient_y", "velocity_gradient_z")]
+        else:
+            static_mask = _require_scalar(data["static"], source_particle_count, "static") > 0.5
+            gradients = [as_xyz(data[key]) for key in
+                         ("velocity_gradient_x", "velocity_gradient_y", "velocity_gradient_z")]
         if "xmf_time" not in data:
             raise ValueError(f"Merged frame {path} has no XMF time metadata; rerun scripts/preprocess.py")
         xmf_time = float(np.asarray(data["xmf_time"]).reshape(-1)[0])
@@ -1695,11 +1743,12 @@ def _load_and_track_case(case: str, plist: List[Path], meta: Dict[str, Any]):
             "physical_time": xmf_time * float(meta["dt"]),
             "state": state,
             "particle_ids": ids,
-            "static_mask": _require_scalar(data["static"], len(state["x"]), "static") > 0.5,
+            "source_particle_count": source_particle_count,
+            "static_mask": static_mask,
             "velocity": velocity,
-            "velocity_gradient_x": as_xyz(data["velocity_gradient_x"]),
-            "velocity_gradient_y": as_xyz(data["velocity_gradient_y"]),
-            "velocity_gradient_z": as_xyz(data["velocity_gradient_z"]),
+            "velocity_gradient_x": gradients[0],
+            "velocity_gradient_y": gradients[1],
+            "velocity_gradient_z": gradients[2],
             "path": str(path),
             "vtk_path": str(np.asarray(data.get("source_vtk_path", "")).reshape(-1)[0]),
         })
@@ -1713,11 +1762,13 @@ def _load_and_track_case(case: str, plist: List[Path], meta: Dict[str, Any]):
     for frame in frames:
         frame["phase"] = 0.0 if span <= 0 else (float(frame["xmf_time"]) - float(times[0])) / span
     particle_counts = [len(frame["particle_ids"]) for frame in frames]
+    source_particle_counts = [int(frame["source_particle_count"]) for frame in frames]
     has_native_ids = any(
         np.any(np.char.find(np.char.decode(_to_s32(frame["particle_ids"]), "utf-8"), ":id:") >= 0)
         for frame in frames
     )
-    if FIXED_PARTICLE_ROW_ORDER and not has_native_ids and len(set(particle_counts)) == 1:
+    if (FIXED_PARTICLE_ROW_ORDER and not has_native_ids
+            and len(set(source_particle_counts)) == 1 and len(set(particle_counts)) == 1):
         # The selected vortex-ring data keeps the same particles in the same
         # stored row order at every frame. Use that identity directly instead
         # of nearest-neighbor tracking, which can swap close particles.
@@ -1730,6 +1781,9 @@ def _load_and_track_case(case: str, plist: List[Path], meta: Dict[str, Any]):
         print(f"[track] case={case} using fixed row correspondence for {count} particles across {len(frames)} frames")
     else:
         _assign_advected_position_tracks(frames, case)
+    if source_particle_counts and max(source_particle_counts) > MAX_PREPROCESS_PARTICLES:
+        print(f"[track] case={case} retained at most {MAX_PREPROCESS_PARTICLES} of up to "
+              f"{max(source_particle_counts)} source particles per frame", flush=True)
     return frames
 
 
@@ -1764,7 +1818,7 @@ def _scan_pairs(by_case, meta_by_case, field_files_by_case=None):
             chain_lengths[case] = longest_chain
         finally:
             del frames
-            gc.collect()
+            _release_process_memory()
         print(f"[mem] after case={case}: RSS={_rss_gb():.2f} GB", flush=True)
         _check_rss_limit(case)
     return pair_ranges, np.asarray(field_available, dtype=bool), chain_lengths
@@ -1777,15 +1831,6 @@ def _fill_one_case(case, case_plist, case_meta, case_pairs, field_entries,
     frames = _load_and_track_case(case, case_plist, case_meta)
     try:
         frame_index = {str(frame["frame_id"]): index for index, frame in enumerate(frames)}
-        if len(frames) >= 2:
-            aligned_states, rollout_ids = _aligned_rollout_truth(frames)
-            rollout_ids = _to_s32(rollout_ids)
-            rollout_phases = np.asarray([frame["phase"] for frame in frames], dtype=np.float32)
-            rollout = (aligned_states, rollout_ids, rollout_phases,
-                       np.asarray(float(case_meta["dt"]), dtype=np.float32))
-        else:
-            rollout = None
-
         for pair_id, global_start, global_end, expected_n, has_field, current_frame_id in case_pairs:
             current_index = frame_index[str(current_frame_id)]
             current, following = frames[current_index], frames[current_index + 1]
@@ -1854,8 +1899,7 @@ def _fill_one_case(case, case_plist, case_meta, case_pairs, field_entries,
             if field_path is not None:
                 coords, values = read_field_grid_h5(field_path, device=PREPROCESS_DEVICE)
                 n_query = min(len(coords), int(MAX_FIELD_QUERY_POINTS))
-                selected = (np.linspace(0, len(coords) - 1, n_query, dtype=np.int64)
-                            if len(coords) > n_query else np.arange(n_query, dtype=np.int64))
+                selected = _field_query_indices(len(coords), n_query)
                 if n_query:
                     field_query_coords[pair_id, :n_query] = coords[selected].astype(np.float32)
                     targets_velocity_field[pair_id, :n_query] = values[selected].astype(np.float32)
@@ -1883,7 +1927,6 @@ def _fill_one_case(case, case_plist, case_meta, case_pairs, field_entries,
                 "correspondence_source": correspondence,
                 "advected_track_match_fraction": float(following.get("advected_match_fraction", 1.0)),
             }
-        return rollout
     finally:
         del frames
 
@@ -1896,18 +1939,15 @@ def _fill_pairs(by_case, pair_ranges, field_available, out_arrays, field_query_c
     for pair_id, row in enumerate(pair_ranges):
         pairs_by_case[str(row[0])].append((pair_id, int(row[3]), int(row[4]), int(row[5]),
                                            bool(field_available[pair_id]), str(row[1])))
-    rollout_by_case = {}
     for case in sorted(by_case):
-        rollout = _fill_one_case(
+        _fill_one_case(
             case, by_case[case], meta_by_case[case], pairs_by_case[case],
             field_files_by_case.get(case, []), out_arrays, field_query_coords,
             targets_velocity_field, field_query_mask, ids_concat, pair_contexts, field_bounds)
-        if rollout is not None:
-            rollout_by_case[case] = rollout
-        gc.collect()
+        _release_process_memory()
         print(f"[mem] after case={case}: RSS={_rss_gb():.2f} GB", flush=True)
         _check_rss_limit(case)
-    return rollout_by_case
+    return None
 
 
 # This is the main dataset assembly routine. It groups merged frames by case, links each current particle frame to the matching Task 2 field, forms consecutive particle transitions, constructs both raw and physics-residual targets, and finally saves all representations together.
@@ -2218,7 +2258,7 @@ def _build_particle_evolution_dataset_legacy(merged: List[Path]) -> Path:
         if n_query <= 0:
             continue
         if query_coords.shape[0] > n_query:
-            picked = np.linspace(0, query_coords.shape[0] - 1, n_query, dtype=np.int64)
+            picked = _field_query_indices(query_coords.shape[0], n_query)
         else:
             picked = np.arange(n_query, dtype=np.int64)
         field_query_coords[pair_id, :n_query, :] = query_coords[picked, :]
@@ -2254,9 +2294,9 @@ def _build_particle_evolution_dataset_legacy(merged: List[Path]) -> Path:
     test_rows = _rows_from_pair_ids(pair_ranges, pair_split_test)
 
     # The normalization statistics are fitted only to training rows. Validation and test data are transformed with those fixed training statistics rather than influencing them.
-    in_mean, in_std, Xn = _normalize_channels_rows(X, train_rows)
-    raw_delta_mean, raw_delta_std, Yn_delta_raw = _normalize_channels_rows(Y_delta, train_rows)
-    residual_mean, residual_std, Yn_residual = _normalize_channels_rows(Y_residual, train_rows)
+    in_mean, in_std = _normalize_channels_rows(X, train_rows)
+    raw_delta_mean, raw_delta_std = _normalize_channels_rows(Y_delta, train_rows)
+    residual_mean, residual_std = _normalize_channels_rows(Y_residual, train_rows)
 
     train_field_values = targets_velocity_field[field_stats_pair_ids][field_query_mask[field_stats_pair_ids]]
     if train_field_values.size == 0:
@@ -2267,13 +2307,8 @@ def _build_particle_evolution_dataset_legacy(merged: List[Path]) -> Path:
     # Use the configured floor so a nearly constant field channel does not produce an excessively large normalized value from division by an almost-zero standard deviation.
     field_mean = np.mean(train_field_values, axis=0, keepdims=True).astype(np.float32)
     field_std = np.maximum(np.std(train_field_values, axis=0, keepdims=True), FIELD_STD_FLOOR).astype(np.float32)
-    n_field_channels = len(FIELD_TARGET_NAMES)
-    targets_velocity_field_norm = ((targets_velocity_field - field_mean.reshape(1, 1, n_field_channels)) /
-                                   field_std.reshape(1, 1, n_field_channels)).astype(np.float32)
-
     next_mean = np.mean(Y_next[train_rows], axis=0, keepdims=True)
     next_std = np.maximum(np.std(Y_next[train_rows], axis=0, keepdims=True), 1e-8)
-    Yn_next = ((Y_next - next_mean) / next_std).astype(np.float32)
 
     # Spatial coordinate extents are stored separately from the channel-wise normalization because downstream models may need the physical coordinate range for their own coordinate mapping.
     coord_cols = [PARTICLE_INPUT_FEATURES.index(k) for k in ("x", "y", "z")]
@@ -2299,7 +2334,7 @@ def _build_particle_evolution_dataset_legacy(merged: List[Path]) -> Path:
         field_coord_min = np.full(3, np.nan, dtype=np.float32)
         field_coord_max = np.full(3, np.nan, dtype=np.float32)
 
-    # Store the raw and normalized arrays together with their names, split indices, metadata, and normalization statistics so downstream training and analysis can reproduce the exact representation created here.
+    # Store raw targets plus normalization statistics; normalized full-size copies are generated per batch by the dataset loader.
     out_path = OUT_ROOT / "particle_evolution_dataset.npz"
     np.savez_compressed(
         out_path,
@@ -2313,15 +2348,11 @@ def _build_particle_evolution_dataset_legacy(merged: List[Path]) -> Path:
         field_query_mask=field_query_mask,
         # Keep the field query policy in the saved dataset so later code can identify which physical region and sampling rule produced these targets.
         field_query_source=np.asarray("generated_vpm_velocity_vorticity_grid", dtype=object),
+        preprocessing_schema_version=np.asarray(3, dtype=np.int64),
         field_query_bounds=np.asarray(_field_query_bounds() if _field_query_bounds() is not None else (), dtype=np.float32),
         field_std_floor=np.asarray(FIELD_STD_FLOOR, dtype=np.float32),
         field_root=np.asarray(str(field_root), dtype=object),
         targets_next_state=Y_next,
-        inputs_t_norm=Xn,
-        targets_delta_norm=Yn_delta_raw,
-        targets_residual_norm=Yn_residual,
-        targets_velocity_field_norm=targets_velocity_field_norm,
-        targets_next_state_norm=Yn_next,
         feature_names=np.asarray(PARTICLE_INPUT_FEATURES, dtype=object),
         state_names=np.asarray(STATE_NAMES, dtype=object),
         target_names=np.asarray(TARGET_DELTA_NAMES, dtype=object),
@@ -2334,11 +2365,6 @@ def _build_particle_evolution_dataset_legacy(merged: List[Path]) -> Path:
         train_rows=train_rows,
         val_rows=val_rows,
         test_rows=test_rows,
-        rollout_cases=np.asarray(rollout_cases, dtype=object),
-        rollout_true_states=np.asarray(rollout_true_states, dtype=object),
-        rollout_true_particle_ids=np.asarray(rollout_true_particle_ids, dtype=object),
-        rollout_phases=np.asarray(rollout_phases, dtype=object),
-        rollout_dts=np.asarray(rollout_dts, dtype=np.float32),
         train_id_val_pair_ids=pair_split_train_id_val,
         field_superres_pair_ids=field_superres_pair_ids,
         field_superres_stride=np.asarray(stride, dtype=np.int64),
@@ -2440,6 +2466,12 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         raise RuntimeError("No Task-1 pairs were built. Check frame availability and metadata.")
     n_pairs = len(pair_ranges)
     total_rows = sum(row[5] for row in pair_ranges)
+    estimated_gb = (total_rows * (len(PARTICLE_INPUT_FEATURES) + 2 * len(TARGET_DELTA_NAMES) + 7) * 4
+                    + n_pairs * MAX_FIELD_QUERY_POINTS * (3 + len(FIELD_TARGET_NAMES)) * 4) / 1e9
+    print(f"[mem] allocating dataset arrays: cases={len(all_cases)}, pairs={n_pairs}, "
+          f"particle rows={total_rows}, capped particles/frame={MAX_PREPROCESS_PARTICLES}, "
+          f"field queries/pair={MAX_FIELD_QUERY_POINTS}, estimated raw arrays={estimated_gb:.2f} GB",
+          flush=True)
     X = np.empty((total_rows, len(PARTICLE_INPUT_FEATURES)), dtype=np.float32)
     Y_delta = np.empty((total_rows, len(TARGET_DELTA_NAMES)), dtype=np.float32)
     Y_residual = np.empty_like(Y_delta)
@@ -2451,27 +2483,11 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     field_bounds = np.full((n_pairs, 2, 3), np.nan, dtype=np.float32)
     pair_contexts: List[Dict[str, object]] = [None] * n_pairs
     out_arrays = {"X": X, "Y_delta": Y_delta, "Y_residual": Y_residual, "Y_next": Y_next}
-    rollout_by_case = _fill_pairs(
+    _check_rss_limit("global array allocation")
+    _fill_pairs(
         by_case, pair_ranges, field_available, out_arrays, field_query_coords,
         targets_velocity_field, field_query_mask, ids_concat, meta_by_case,
         field_files_by_case, pair_contexts, field_bounds)
-
-    rollout_cases = sorted(rollout_by_case)
-    rollout_true_states, rollout_true_particle_ids, rollout_phases, rollout_dts = [], [], [], []
-    rollout_bytes = 0
-    for case in rollout_cases:
-        states, ids, phases, dt = rollout_by_case[case]
-        rollout_true_states.append(states)
-        rollout_true_particle_ids.append(_to_s32(ids))
-        rollout_phases.append(phases)
-        rollout_dts.append(float(np.asarray(dt)))
-        rollout_bytes += states.nbytes + ids.nbytes + phases.nbytes
-    if rollout_bytes > ROLLOUT_MEMORY_CAP_GB * 1e9:
-        print(f"[mem] rollout arrays={rollout_bytes / 1e9:.3f} GB exceed cap="
-              f"{ROLLOUT_MEMORY_CAP_GB:.3f} GB; retaining per-case arrays until archive write")
-    else:
-        print(f"[mem] rollout arrays={rollout_bytes / 1e9:.3f} GB; cap="
-              f"{ROLLOUT_MEMORY_CAP_GB:.3f} GB")
 
     pair_split_train_case = np.asarray([i for i, row in enumerate(pair_ranges)
                                         if _case_split_label(row[0]) == "train"], dtype=np.int64)
@@ -2496,9 +2512,9 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     train_rows = _rows_from_pair_ids(pair_ranges, pair_split_train)
     val_rows = _rows_from_pair_ids(pair_ranges, pair_split_val)
     test_rows = _rows_from_pair_ids(pair_ranges, pair_split_test)
-    in_mean, in_std, Xn = _normalize_channels_rows(X, train_rows)
-    raw_delta_mean, raw_delta_std, Yn_delta_raw = _normalize_channels_rows(Y_delta, train_rows)
-    residual_mean, residual_std, Yn_residual = _normalize_channels_rows(Y_residual, train_rows)
+    in_mean, in_std = _normalize_channels_rows(X, train_rows)
+    raw_delta_mean, raw_delta_std = _normalize_channels_rows(Y_delta, train_rows)
+    residual_mean, residual_std = _normalize_channels_rows(Y_residual, train_rows)
     train_field_values = targets_velocity_field[field_stats_pair_ids][field_query_mask[field_stats_pair_ids]]
     if not train_field_values.size:
         raise RuntimeError("No field-reconstruction query points were available in the training split.")
@@ -2507,12 +2523,11 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         raise RuntimeError("No finite field-reconstruction targets were available in the training split.")
     field_mean = np.mean(train_field_values, axis=0, keepdims=True).astype(np.float32)
     field_std = np.maximum(np.std(train_field_values, axis=0, keepdims=True), FIELD_STD_FLOOR).astype(np.float32)
-    n_field_channels = len(FIELD_TARGET_NAMES)
-    targets_velocity_field_norm = ((targets_velocity_field - field_mean.reshape(1, 1, n_field_channels)) /
-                                   field_std.reshape(1, 1, n_field_channels)).astype(np.float32)
+    del train_field_values
+    _release_process_memory()
+    _check_rss_limit("normalization statistics")
     next_mean = np.mean(Y_next[train_rows], axis=0, keepdims=True)
     next_std = np.maximum(np.std(Y_next[train_rows], axis=0, keepdims=True), 1e-8)
-    Yn_next = ((Y_next - next_mean) / next_std).astype(np.float32)
 
     coord_cols = [PARTICLE_INPUT_FEATURES.index(key) for key in ("x", "y", "z")]
     particle_coords = X[train_rows][:, coord_cols]
@@ -2539,19 +2554,15 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         targets_delta=Y_delta, targets_residual=Y_residual, query_coords=field_query_coords,
         targets_velocity_field=targets_velocity_field, field_query_mask=field_query_mask,
         field_query_source=np.asarray("generated_vpm_velocity_vorticity_grid", dtype=object),
+        preprocessing_schema_version=np.asarray(3, dtype=np.int64),
         field_query_bounds=np.asarray(_field_query_bounds() if _field_query_bounds() is not None else (), dtype=np.float32),
         field_std_floor=np.asarray(FIELD_STD_FLOOR, dtype=np.float32), field_root=np.asarray(str(field_root), dtype=object),
-        targets_next_state=Y_next, inputs_t_norm=Xn, targets_delta_norm=Yn_delta_raw,
-        targets_residual_norm=Yn_residual, targets_velocity_field_norm=targets_velocity_field_norm,
-        targets_next_state_norm=Yn_next, feature_names=np.asarray(PARTICLE_INPUT_FEATURES, dtype=object),
+        targets_next_state=Y_next, feature_names=np.asarray(PARTICLE_INPUT_FEATURES, dtype=object),
         state_names=np.asarray(STATE_NAMES, dtype=object), target_names=np.asarray(TARGET_DELTA_NAMES, dtype=object),
         field_target_names=np.asarray(FIELD_TARGET_NAMES, dtype=object), pair_ranges=np.asarray(pair_ranges, dtype=object),
         pair_contexts=np.asarray(pair_contexts, dtype=object), train_pair_ids=pair_split_train,
         val_pair_ids=pair_split_val, test_pair_ids=pair_split_test, train_rows=train_rows,
-        val_rows=val_rows, test_rows=test_rows, rollout_cases=np.asarray(rollout_cases, dtype=object),
-        rollout_true_states=np.asarray(rollout_true_states, dtype=object),
-        rollout_true_particle_ids=np.asarray(rollout_true_particle_ids, dtype=object),
-        rollout_phases=np.asarray(rollout_phases, dtype=object), rollout_dts=np.asarray(rollout_dts, dtype=np.float32),
+        val_rows=val_rows, test_rows=test_rows,
         train_id_val_pair_ids=pair_split_train_id_val, field_superres_pair_ids=field_superres_pair_ids,
         field_superres_stride=np.asarray(stride, dtype=np.int64), field_superres_offset=np.asarray(offset, dtype=np.int64),
         train_cases=np.asarray(TRAIN_CASES, dtype=object), val_cases=np.asarray(VAL_CASES, dtype=object),
