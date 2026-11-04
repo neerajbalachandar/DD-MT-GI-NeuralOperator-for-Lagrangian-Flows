@@ -4,14 +4,14 @@ from . import preprocessing_pipeline
 
 
 # Historical Task-1/Task-2 sources are retained in the legacy pipeline below;
-# current preprocessing reads the generated VPM cases from this single root.
-DEFAULT_VPM_ROOT = Path("/media/dysco/New Volume/Neeraj/NeuralOp_FLOWVPM_Data")
+# current preprocessing reads the generated VPM cases from this single repo-local root.
+DEFAULT_VPM_ROOT = Path(__file__).resolve().parents[2] / "datagen_code" / "training_data"
 
 
 def run_preprocessing(source_root=None, output_dir=None, *, max_pairs_per_case=None, device="auto"):
     """Build from generated VPM data, using a consecutive prefix of each case."""
     requested_root = Path(source_root or DEFAULT_VPM_ROOT).expanduser().resolve()
-    output_path = Path(output_dir or preprocessing_pipeline.SCRIPT_DIR / "processed_data_vpm").expanduser().resolve()
+    output_path = Path(output_dir or preprocessing_pipeline.SCRIPT_DIR / "processed_data").expanduser().resolve()
     if all((requested_root / split).is_dir() for split in ("train", "test", "validate")):
         return preprocessing_pipeline.preprocess_generated_vpm_cases(
             requested_root, output_path, max_pairs_per_case=max_pairs_per_case, device=device)

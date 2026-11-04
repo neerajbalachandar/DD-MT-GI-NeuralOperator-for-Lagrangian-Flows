@@ -17,6 +17,65 @@ def load_processed_dataset(path):
         return {key: archive[key] for key in archive.files}
 
 
+def ensure_legacy_input_feature_columns(data, requested_features):
+    """Backfill optional particle-input columns for older processed datasets.
+
+    Some archived datasets predate the `delta_t`/conditioning columns added by the
+    pipeline. Training config and the runtime loader still expect those names, so we
+    synthesize the missing columns in memory rather than failing at feature lookup.
+    """
+    requested = [str(x) for x in requested_features]
+    feature_names = [str(x) for x in np.asarray(data.get("feature_names", []), dtype=object).tolist()]
+    missing = [name for name in requested if name not in feature_names]
+    if not missing:
+        return data
+
+    allowed_legacy = {"phase", "delta_t", "angle_of_attack", "freestream_x", "freestream_y", "freestream_z"}
+    unknown = [name for name in missing if name not in allowed_legacy]
+    if unknown:
+        raise ValueError(
+            f"Dataset is missing requested feature columns {unknown}; "
+            "rebuild the processed archive with `python3 scripts/preprocess.py`."
+        )
+
+    inputs = np.asarray(data.get("inputs_t"), dtype=np.float32)
+    if inputs.ndim != 2:
+        raise ValueError("Data payload `inputs_t` must be a 2D array of particle features.")
+
+    appended = np.zeros((inputs.shape[0], len(missing)), dtype=np.float32)
+    pair_ranges = list(data.get("pair_ranges", []))
+    pair_contexts = data.get("pair_contexts", [])
+    for j, feature in enumerate(missing):
+        values = np.zeros(inputs.shape[0], dtype=np.float32)
+        if pair_ranges and len(pair_contexts) > 0:
+            for pair_id, row in enumerate(pair_ranges):
+                start, end = int(row[3]), int(row[4])
+                context = pair_contexts[int(pair_id)] if int(pair_id) < len(pair_contexts) else {}
+                if isinstance(context, np.ndarray):
+                    context = context.item()
+                if isinstance(context, dict):
+                    if feature == "delta_t":
+                        values[start:end] = float(context.get("dt", 0.0))
+                    elif feature == "phase":
+                        values[start:end] = float(context.get("phase_t", 0.0))
+                    elif feature in {"freestream_x", "freestream_y", "freestream_z"}:
+                        axis = {"freestream_x": 0, "freestream_y": 1, "freestream_z": 2}[feature]
+                        freestream = context.get("freestream", [0.0, 0.0, 0.0])
+                        values[start:end] = float(np.asarray(freestream).reshape(-1)[axis])
+                    elif feature == "angle_of_attack":
+                        values[start:end] = float(context.get("aoa_deg", 0.0))
+        appended[:, j] = values
+
+    data["inputs_t"] = np.concatenate((inputs, appended), axis=1)
+    data["feature_names"] = np.asarray(feature_names + missing, dtype=object)
+    for key in ("in_mean", "in_std"):
+        if key in data:
+            arr = np.asarray(data[key], dtype=np.float32).reshape(-1)
+            if arr.size < data["inputs_t"].shape[1]:
+                data[key] = np.concatenate((arr, np.zeros(data["inputs_t"].shape[1] - arr.size, dtype=np.float32)))
+    return data
+
+
 def sequence_level_split(data, seed=42):
     cases = sorted({str(row[0]) for row in data["pair_ranges"]})
     fixed_test = {str(x) for x in data.get("test_cases", [])}
@@ -49,11 +108,11 @@ class EvolutionDataset(Dataset):
                  max_queries=2048, rollout_horizon=16, normalization=None, residual_channels=None,
                  include_teacher_inputs=False, require_verified_correspondence=False,
                  field_target_exclude_ids=None):
-        self.data = data
+        self.data = ensure_legacy_input_feature_columns(data, input_features)
         self.pair_ids = np.asarray(pair_ids, dtype=np.int64)
         self.features = [str(x) for x in input_features]
         self.global_features = [str(x) for x in global_features]
-        names = [str(x) for x in data["feature_names"]]
+        names = [str(x) for x in self.data["feature_names"]]
         self.feature_indices = [names.index(name) for name in self.features]
         self.max_particles, self.max_queries = int(max_particles), int(max_queries)
         self.rollout_horizon = max(1, int(rollout_horizon))

@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 from gino.data.dataset import (
     EvolutionDataset,
     SUPPORTED_ROLLOUT_CORRESPONDENCE,
+    ensure_legacy_input_feature_columns,
     load_processed_dataset,
     sequence_level_split,
 )
@@ -106,7 +107,8 @@ def main():
     else:
         print(f"[device] training on {device}; CUDA available={torch.cuda.is_available()}")
     dataset_path = (HERE / cfg["data"]["dataset"]).resolve()
-    data = load_processed_dataset(dataset_path)
+    data = ensure_legacy_input_feature_columns(load_processed_dataset(dataset_path), cfg["data"]["input_features"])
+    cfg["data"]["input_features"] = [str(x) for x in data["feature_names"].tolist()]
     split = {
         "train_pair_ids": np.asarray(data["train_pair_ids"], dtype=np.int64),
         "val_pair_ids": np.asarray(data.get("val_pair_ids", []), dtype=np.int64),
@@ -248,16 +250,15 @@ def main():
     }
     validation_horizon = min(max_h, max(validation_chain_lengths.values(), default=1))
     if sequence_training and validation_horizon < 2:
-        raise ValueError(
-            "The validation split has no multi-step particle chain. Reprocess with the contiguous "
-            "train-case validation holdout enabled; a one-step validation score cannot select "
-            "checkpoints for rollout training."
-        )
-    validation_starts = (np.asarray([pid for pid in validation_pair_ids
-                                     if validation_chain_lengths[int(pid)] >= 2], dtype=np.int64)
-                         if sequence_training else validation_pair_ids)
-    if sequence_training and not validation_starts.size:
-        raise ValueError("The validation split contains no chainable rollout starts.")
+        print("[validation] no multi-step validation chain available; falling back to one-step validation for checkpoint selection.")
+        validation_horizon = 1
+        validation_starts = validation_pair_ids
+    else:
+        validation_starts = (np.asarray([pid for pid in validation_pair_ids
+                                         if validation_chain_lengths[int(pid)] >= 2], dtype=np.int64)
+                             if sequence_training else validation_pair_ids)
+        if sequence_training and not validation_starts.size:
+            raise ValueError("The validation split contains no chainable rollout starts.")
     val_ds = make_ds(validation_starts, validation_horizon)
     # Future pairs remain available as context, including terminal transitions
     # that are not themselves used as validation starts.

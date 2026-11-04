@@ -1,7 +1,12 @@
 import numpy as np
 import pytest
 
-from gino.data.dataset import sequence_level_split, assert_no_sequence_leakage
+from gino.data.dataset import (
+    sequence_level_split,
+    assert_no_sequence_leakage,
+    ensure_legacy_input_feature_columns,
+)
+from gino.data.geometry import particle_geometry_features
 from gino.data.normalization import NormalizationStats
 
 
@@ -32,3 +37,31 @@ def test_train_normalization_uses_selected_training_pairs_only():
     stats = NormalizationStats.fit_train_sequences(data, [0, 1], [0, 1, 2])
     np.testing.assert_allclose(stats.input_mean, data["inputs_t"][:4].mean(0))
     assert not np.allclose(stats.input_mean, data["inputs_t"].mean(0))
+
+
+def test_legacy_dataset_missing_delta_t_is_backfilled():
+    data = tiny_data()
+    data["feature_names"] = np.asarray(["x", "y", "z"], dtype=object)
+    data["inputs_t"] = np.asarray([[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]], dtype=np.float32)
+    data["in_mean"] = np.asarray([0.0, 1.0, 2.0], dtype=np.float32)
+    data["in_std"] = np.asarray([1.0, 1.0, 1.0], dtype=np.float32)
+    data["pair_ranges"] = np.asarray([
+        ("case-a", "0", "1", 0, 1, 1),
+        ("case-a", "1", "2", 1, 2, 1),
+    ], dtype=object)
+    data["pair_contexts"] = np.asarray([
+        {"dt": 0.25},
+        {"dt": 0.50},
+    ], dtype=object)
+
+    result = ensure_legacy_input_feature_columns(data, ["x", "y", "z", "delta_t"])
+    assert np.asarray(result["feature_names"]).tolist() == ["x", "y", "z", "delta_t"]
+    np.testing.assert_allclose(result["inputs_t"][:, -1], [0.25, 0.50])
+
+
+def test_missing_vtk_geometry_falls_back_to_zero_channels():
+    xyz = np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float64)
+    features = particle_geometry_features(xyz, "/definitely/missing/geometry.vtk", case="case-a")
+
+    for key in ("geom_dist", "geom_nx", "geom_ny", "geom_nz", "geom_body_near"):
+        np.testing.assert_array_equal(features[key], np.zeros(2, dtype=np.float64))

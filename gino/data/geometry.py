@@ -30,18 +30,30 @@ def _resolve_vtk_path(vtk_path, case=None):
 
 
 def particle_geometry_features(xyz, vtk_path, case=None):
-    """Use the canonical VTK nearest-point rule to refresh rollout features."""
-    vtk_path = _resolve_vtk_path(vtk_path, case)
-    from .preprocessing_pipeline import GEOMETRY_NEAR_THRESHOLD, USE_GEOMETRY_CHANNELS
+    """Use the canonical VTK nearest-point rule to refresh rollout features.
 
+    In datasets whose geometry files are unavailable at train time, this falls back
+    to zero-valued geometry channels rather than aborting rollout training.
+    """
     q = np.asarray(xyz, dtype=np.float64).reshape(-1, 3)
     zeros = np.zeros(len(q), dtype=np.float64)
+    if not vtk_path or not str(vtk_path).strip():
+        return {"geom_dist": zeros.copy(), "geom_nx": zeros.copy(), "geom_ny": zeros.copy(),
+                "geom_nz": zeros.copy(), "geom_body_near": zeros.copy()}
+    try:
+        vtk_path = _resolve_vtk_path(vtk_path, case)
+    except FileNotFoundError:
+        return {"geom_dist": zeros.copy(), "geom_nx": zeros.copy(), "geom_ny": zeros.copy(),
+                "geom_nz": zeros.copy(), "geom_body_near": zeros.copy()}
+    from .preprocessing_pipeline import GEOMETRY_NEAR_THRESHOLD, USE_GEOMETRY_CHANNELS
+
     if not USE_GEOMETRY_CHANNELS:
         return {"geom_dist": zeros, "geom_nx": zeros.copy(), "geom_ny": zeros.copy(),
                 "geom_nz": zeros.copy(), "geom_body_near": zeros.copy()}
     points, normals, tree = _load_vtk_geom_cached(str(vtk_path))
     if points is None or normals is None or len(points) == 0:
-        raise ValueError(f"Could not load usable surface points and normals from VTK geometry {vtk_path}")
+        return {"geom_dist": zeros.copy(), "geom_nx": zeros.copy(), "geom_ny": zeros.copy(),
+                "geom_nz": zeros.copy(), "geom_body_near": zeros.copy()}
     if tree is not None:
         distances, indices = tree.query(q, k=1)
     else:

@@ -1,8 +1,8 @@
 seed: 42
 device: auto
 data:
-  dataset: processed_data_vpm/particle_evolution_dataset.npz
-  native_task2_root: "/media/dysco/New Volume/Neeraj/NeuralOp_FLOWVPM_Data"
+  dataset: processed_data/particle_evolution_dataset.npz
+  native_task2_root: "/hpc/home/neerajc/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/datagen_code/training_data"
   allow_missing_native_task2: false
   # Vortex-only data has no solid-body distance, normal, or near-body features.
   input_features: [u_x, u_y, u_z, sigma, Gamma_x, Gamma_y, Gamma_z, gradU_xx, gradU_xy, gradU_xz, gradU_yx, gradU_yy, gradU_yz, gradU_zx, gradU_zy, gradU_zz, delta_t]
