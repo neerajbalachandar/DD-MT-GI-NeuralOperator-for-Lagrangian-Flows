@@ -2576,7 +2576,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         particle_coord_min=particle_coord_min, particle_coord_max=particle_coord_max,
         field_coord_min=field_coord_min, field_coord_max=field_coord_max,
         max_field_query_points=np.asarray(MAX_FIELD_QUERY_POINTS, dtype=np.int64))
-    print(f"[task1] streaming dataset built: rows={total_rows}, pairs={n_pairs}, rollouts={len(rollout_cases)}")
+    print(f"[task1] streaming dataset built: rows={total_rows}, pairs={n_pairs}")
     return out_path
 
 
