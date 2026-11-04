@@ -64,11 +64,11 @@ def physical_field_values(coords, velocity, shape=None, device="cpu"):
         tensor = torch.as_tensor(velocity_grid, dtype=torch.float32, device=device)
         spacing = tuple(torch.as_tensor(axis, dtype=torch.float32, device=device) for axis in axes)
         derivatives = torch.gradient(tensor, spacing=spacing, dim=(0, 1, 2), edge_order=2)
-        gradient_grid = torch.cat(derivatives, dim=-1).cpu().numpy()
+        gradient_grid = torch.stack(derivatives, dim=-1).cpu().numpy()
     else:
         derivatives = np.gradient(velocity_grid, *axes, axis=(0, 1, 2), edge_order=2)
-        gradient_grid = np.concatenate(derivatives, axis=-1)
-    gradient_rows = gradient_grid[indices]
+        gradient_grid = np.stack(derivatives, axis=-1)
+    gradient_rows = gradient_grid[indices].reshape(len(coords), 9)
     return np.concatenate((velocity, gradient_rows), axis=1).astype(np.float32)
 
 
@@ -87,10 +87,34 @@ def read_task2_velocity(path):
     return coords, velocity
 
 
+def read_task2_vorticity(path):
+    """Read the simulation's stored nodal vorticity without interpolation."""
+    with h5py.File(path, "r") as handle:
+        if "W" not in handle:
+            raise KeyError(f"{path}: no stored W vorticity dataset")
+        coords = _as_xyz(handle["nodes"])
+        vorticity = _as_vec(handle["W"])
+    if len(coords) != len(vorticity) or round(len(coords) ** (1.0 / 3.0)) ** 3 != len(coords):
+        raise ValueError(f"{path}: expected cubic nodes and matching vorticity rows")
+    return coords, vorticity
+
+
 def read_task2_field(path):
-    """Read native velocity and attach finite-difference gradient channels."""
+    """Read native velocity, finite-difference gradients, and stored/derived vorticity."""
     coords, velocity = read_task2_velocity(path)
-    return coords, physical_field_values(coords, velocity)
+    values = physical_field_values(coords, velocity)
+    try:
+        omega_coords, vorticity = read_task2_vorticity(path)
+        if not np.array_equal(coords, omega_coords):
+            raise ValueError(f"Velocity/vorticity node order differs in {path}")
+    except KeyError:
+        gradient = values[:, 3:12].reshape(-1, 3, 3)
+        vorticity = np.column_stack((
+            gradient[:, 2, 1] - gradient[:, 1, 2],
+            gradient[:, 0, 2] - gradient[:, 2, 0],
+            gradient[:, 1, 0] - gradient[:, 0, 1],
+        ))
+    return coords, np.concatenate((values, vorticity), axis=1).astype(np.float32)
 
 
 def find_task2_file(root, case, frame):

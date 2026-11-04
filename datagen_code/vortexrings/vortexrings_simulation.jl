@@ -59,8 +59,18 @@ function run_vortexring_simulation(
         end
     end
 
-    # Define runtime function
-    this_runtime_function(args...; optargs...) = monitors(args...; optargs...) || runtime_function(args...; optargs...)
+    # Ring cases have no inlet/outlet particle flux. Guard that invariant after
+    # monitors and case callbacks run, so every saved time step has the same
+    # physical particle count as the initialized field.
+    fixed_particle_count = vpm.get_np(pfield)
+    verbose && println("[particle-count] fixed at $fixed_particle_count for this vortex-ring case")
+    function this_runtime_function(args...; optargs...)
+        stop = monitors(args...; optargs...) || runtime_function(args...; optargs...)
+        current_particle_count = vpm.get_np(pfield)
+        current_particle_count == fixed_particle_count || error(
+            "Vortex-ring particle count changed from $fixed_particle_count to $current_particle_count")
+        return stop
+    end
 
     # -------------- SIMULATION ------------------------------------------------
     vpm.run_vpm!(pfield, dt, nsteps;    runtime_function=this_runtime_function,

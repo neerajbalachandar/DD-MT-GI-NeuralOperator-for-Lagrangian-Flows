@@ -14,7 +14,7 @@ from gino.data.dataset import EvolutionDataset, load_processed_dataset, collate_
 from gino.data.normalization import NormalizationStats
 from gino.evaluation.one_step import evaluate_one_step
 from gino.data.reconstruction import rebuild_next_batch_inference
-from gino.data.hdf5 import (read_task2_velocity, native_field_plane, native_coordinate_plane,
+from gino.data.hdf5 import (read_task2_velocity, read_task2_vorticity, native_field_plane, native_coordinate_plane,
                             highest_energy_y_plane)
 from gino.data.geometry import estimate_chordwise_bounds
 from gino.evaluation.metrics import mse, relative_l2, state_component_metrics, normalized_state_component_metrics
@@ -64,7 +64,7 @@ def predict_field_at_xyz(model, batch, xyz, latent, stats, device, chunk_size=81
         query_batch = {key: (value.to(device) if torch.is_tensor(value) else value)
                        for key, value in query_batch.items()}
         result = predict_next_state(model, query_batch, latent, stats)
-        predictions.append(result["field_phys"][0, :, :3].cpu().numpy())
+        predictions.append(result["field_phys"][0].cpu().numpy())
         del result, query_batch
     return np.concatenate(predictions, axis=0)
 
@@ -159,7 +159,8 @@ def main():
     for case in cases:
         case_records = [record for record in records if record.get("case", "unknown") == case]
         print(f"one-step {case}: {len(case_records)} pairs")
-        for key in ("position_rmse", "circulation_rmse", "sigma_rmse", "field_mse", "field_relative_l2"):
+        for key in ("position_rmse", "circulation_rmse", "sigma_rmse", "field_mse", "field_relative_l2",
+                    "vorticity_mse", "vorticity_relative_l2"):
             values = [float(record[key]) for record in case_records if key in record]
             if values:
                 print(f"  {key}: {float(np.mean(values)):.6g}")
@@ -188,6 +189,24 @@ def main():
     rollout_pair_ids = (np.asarray([pair_id for pair_id in pair_ids
                                     if chain_lengths[int(pair_id)] >= 2], dtype=np.int64)
                         if max_horizon > 1 else pair_ids)
+    starts_per_case = int(cfg["evaluation"].get("rollout_starts_per_case", 0))
+    if starts_per_case < 0:
+        raise ValueError("evaluation.rollout_starts_per_case must be 0 (all starts) or positive")
+    if max_horizon > 1 and starts_per_case:
+        ranges = list(data["pair_ranges"])
+        ids_by_case = {}
+        for pair_id in rollout_pair_ids:
+            case = str(ranges[int(pair_id)][0])
+            ids_by_case.setdefault(case, []).append(int(pair_id))
+        selected_starts = []
+        for case, ids in sorted(ids_by_case.items()):
+            ids.sort(key=lambda pid: int(pid))
+            count = min(starts_per_case, len(ids))
+            positions = np.unique(np.rint(np.linspace(0, len(ids) - 1, count)).astype(np.int64))
+            selected_starts.extend(ids[int(position)] for position in positions)
+        rollout_pair_ids = np.asarray(sorted(selected_starts), dtype=np.int64)
+        print(f"[rollout] evaluating {len(rollout_pair_ids)} starts across {len(ids_by_case)} cases "
+              f"(up to {starts_per_case} starts/case), horizons={horizons}")
     if max_horizon > 1 and not len(rollout_pair_ids):
         raise RuntimeError("No evaluation pair has a chainable future; inspect chain_length and "
                            "re-run scripts/preprocess.py after the identity-tracking fix.")
@@ -202,8 +221,12 @@ def main():
     if max_batches:
         from itertools import islice
         rollout_loader = islice(rollout_loader, max_batches)
+    out_dir = checkpoint_path.parent / "evaluation"
+    out_dir.mkdir(parents=True, exist_ok=True)
     model.eval()
     skipped_horizons = {horizon: 0 for horizon in horizons}
+    export_rollout_fields = bool(cfg["evaluation"].get("save_full_rollout_fields", True))
+    rollout_export_start_by_case = {}
     with torch.inference_mode():
         for batch_index, batch in enumerate(rollout_loader, start=1):
             targets = batch["rollout_state_targets"]
@@ -218,8 +241,14 @@ def main():
             batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in batch.items()}
             targets = targets[:, :steps].to(device)
             rebuild = lambda old, state, field: rebuild_next_batch_inference(old, state, field, stats)
-            pred_states, pred_fields = inference_rollout(model, batch, latent, stats, steps, rebuild, store_on_cpu=True)
+            field_horizons = [int(h) for h in horizons if int(h) <= steps]
+            field_slot = {h: index for index, h in enumerate(field_horizons)}
+            pred_states, pred_fields = inference_rollout(model, batch, latent, stats, steps, rebuild,
+                                                        store_on_cpu=True, field_steps=field_horizons)
             context = batch["pair_context"]
+            case_for_export = str(context.get("case", "unknown"))
+            rollout_export_start_by_case.setdefault(case_for_export, int(batch["pair_id"][0]))
+            export_this_start = int(batch["pair_id"][0]) == rollout_export_start_by_case[case_for_export]
             for horizon in horizons:
                 h = int(horizon)
                 if h <= steps:
@@ -231,7 +260,7 @@ def main():
                     field_available = bool(batch["rollout_field_available"][0, h - 1])
                     if field_available:
                         field_target = stats.denormalize_field(batch["rollout_field_targets"][:, h - 1]).cpu().numpy()
-                        field_prediction = pred_fields[:, h - 1].numpy()
+                        field_prediction = pred_fields[:, field_slot[h]].numpy()
                     case_name = context.get("case", "unknown")
                     visual_key = (case_name, h)
                     visual = rollout_visuals.setdefault(visual_key, {
@@ -262,6 +291,28 @@ def main():
                         record.update({"field_mse": mse(field_prediction[..., :3], field_target[..., :3]),
                                        "field_relative_l2": relative_l2(field_prediction[..., :3], field_target[..., :3]),
                                        "field_all_channel_mse": mse(field_prediction, field_target)})
+                        if field_prediction.shape[-1] >= 15:
+                            record.update({"vorticity_mse": mse(field_prediction[..., 12:15], field_target[..., 12:15]),
+                                           "vorticity_relative_l2": relative_l2(field_prediction[..., 12:15],
+                                                                                field_target[..., 12:15])})
+                            if export_rollout_fields and export_this_start:
+                                if h == 1:
+                                    field_coords = batch["query_xyz_phys"][0].cpu().numpy()
+                                else:
+                                    field_coords = batch["rollout_query_xyz_phys"][0, h - 2].cpu().numpy()
+                                rollout_case_dir = (out_dir / "full_field_reconstruction" / "rollout" /
+                                                    str(case_name).replace("/", "_"))
+                                rollout_case_dir.mkdir(parents=True, exist_ok=True)
+                                frame_label = str(state_frame).replace("/", "_")
+                                np.savez_compressed(rollout_case_dir / f"frame_{frame_label}_h{h}.npz",
+                                    coordinates=field_coords.astype(np.float32),
+                                    velocity_truth=field_target[0, :, :3].astype(np.float32),
+                                    velocity_prediction=field_prediction[0, :, :3].astype(np.float32),
+                                    vorticity_truth=field_target[0, :, 12:15].astype(np.float32),
+                                    vorticity_prediction=field_prediction[0, :, 12:15].astype(np.float32),
+                                    field_target_names=np.asarray(field_names, dtype="U"),
+                                    case=np.asarray(str(case_name)), frame=np.asarray(frame_label),
+                                    horizon=np.asarray(h, dtype=np.int32))
                     rollout_records.append(record)
                 else:
                     skipped_horizons[h] += 1
@@ -300,6 +351,9 @@ def main():
     native_records = []
     native_visual_candidates = {}
     plane_visual_candidates = {}
+    out_dir = checkpoint_path.parent / "evaluation"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    save_full_fields = bool(cfg["evaluation"].get("save_full_fields", True))
     native_root_value = str(cfg["data"].get("native_task2_root", "")).strip()
     native_root = str((HERE / native_root_value).resolve()) if native_root_value and not Path(native_root_value).is_absolute() else native_root_value
     allow_missing_native = cfg["evaluation"].get(
@@ -340,17 +394,31 @@ def main():
                 print(f"[native Task-2] skipping pair {pair_id}: preprocessing has no query samples "
                       "to compare against one-step evaluation")
                 continue
-            # Native Task-2 U is the evaluation truth. Gradient channels elsewhere in
-            # the pipeline are finite-difference derivatives, not stored measurements.
+            # Native Task-2 U and W are the simulation's field truth. The raw XMF/HDF5
+            # pair remains the authoritative full-grid archive; this stores matching
+            # full reconstructions alongside the scalar metrics.
             native_xyz, native_truth = read_task2_velocity(path)
-            valid = np.isfinite(native_xyz).all(axis=1) & np.isfinite(native_truth).all(axis=1)
-            native_xyz, native_truth = native_xyz[valid], native_truth[valid]
+            try:
+                omega_xyz, native_vorticity = read_task2_vorticity(path)
+                if not np.array_equal(omega_xyz, native_xyz):
+                    raise ValueError(f"Velocity/vorticity node order differs in {path}")
+            except KeyError:
+                from gino.data.hdf5 import read_task2_field
+                _, derived = read_task2_field(path)
+                native_vorticity = np.column_stack((
+                    derived[:, 3 + 2 * 3 + 1] - derived[:, 3 + 1 * 3 + 2],
+                    derived[:, 3 + 0 * 3 + 2] - derived[:, 3 + 2 * 3 + 0],
+                    derived[:, 3 + 1 * 3 + 0] - derived[:, 3 + 0 * 3 + 1],
+                ))
+            valid = (np.isfinite(native_xyz).all(axis=1) & np.isfinite(native_truth).all(axis=1)
+                     & np.isfinite(native_vorticity).all(axis=1))
+            native_xyz, native_truth, native_vorticity = native_xyz[valid], native_truth[valid], native_vorticity[valid]
             categories = [str(value) for value in raw_context.get("evaluation_categories", [])]
             spatial_superresolution = "spatial_superresolution" in categories
             if spatial_superresolution:
                 # Score every native high-resolution node; the input remains the
                 # corresponding test-case particle state from this same frame.
-                xyz, truth = native_xyz, native_truth
+                xyz, truth, vorticity_truth = native_xyz, native_truth, native_vorticity
             else:
                 # Match the processed training-resolution query nodes exactly.
                 xyz = batch["query_xyz_phys"][0].cpu().numpy()
@@ -361,14 +429,18 @@ def main():
                     raise ValueError(f"No preprocessed query coordinates match finite native nodes in {path}")
                 query_indices, native_indices = map(np.asarray, zip(*matched))
                 xyz, truth = xyz[query_indices], native_truth[native_indices]
+                vorticity_truth = native_vorticity[native_indices]
             normalized_native_xyz = (native_xyz - stats.coord_min) / np.maximum(stats.coord_span, 1e-8)
             outside_fraction = float(np.mean(np.any((normalized_native_xyz < 0.0) |
                                                      (normalized_native_xyz > 1.0), axis=1)))
             with torch.inference_mode():
-                predicted_velocity = predict_field_at_xyz(model, batch, xyz, latent, stats, device)
-            predicted = np.zeros((len(xyz), len(field_names)), dtype=np.float32)
-            predicted[:, :3] = predicted_velocity
-            native_records.append({"pair_id": pair_id, "case": context.get("case", "unknown"),
+                predicted = predict_field_at_xyz(model, batch, xyz, latent, stats, device)
+            predicted_velocity = predicted[:, :3]
+            omega_indices = [field_names.index(name) for name in ("omega_x", "omega_y", "omega_z")
+                             if name in field_names]
+            predicted_vorticity = (predicted[:, omega_indices] if len(omega_indices) == 3 else
+                                   np.zeros_like(vorticity_truth))
+            record = {"pair_id": pair_id, "case": context.get("case", "unknown"),
                 "evaluation_role": "field_superresolution" if pair_id in field_superres_set else split,
                 "frame": context.get("frame_t", ""), "phase": float(context.get("phase_t", 0.0)), "hdf5": str(path),
                 "task1_xmf_time": raw_context.get("xmf_time_t"),
@@ -376,12 +448,27 @@ def main():
                 "task2_frame_id": raw_context.get("task2_frame_id"),
                 "evaluation_categories": categories,
                 "native_grid_points": int(round(len(native_xyz) ** (1.0 / 3.0))),
-                "velocity_mse": mse(predicted[:, :3], truth),
-                "velocity_relative_l2": relative_l2(predicted[:, :3], truth),
-                "field_mse": mse(predicted[:, :3], truth),
-                "field_relative_l2": relative_l2(predicted[:, :3], truth),
+                "velocity_mse": mse(predicted_velocity, truth),
+                "velocity_relative_l2": relative_l2(predicted_velocity, truth),
+                "vorticity_mse": mse(predicted_vorticity, vorticity_truth),
+                "vorticity_relative_l2": relative_l2(predicted_vorticity, vorticity_truth),
+                "field_mse": mse(predicted_velocity, truth),
+                "field_relative_l2": relative_l2(predicted_velocity, truth),
                 "outside_train_domain_fraction": outside_fraction,
-                "n_points": int(len(truth))})
+                "n_points": int(len(truth))}
+            native_records.append(record)
+            if save_full_fields:
+                case_dir = out_dir / "full_field_reconstruction" / str(context.get("case", "unknown")).replace("/", "_")
+                case_dir.mkdir(parents=True, exist_ok=True)
+                frame_name = str(context.get("frame_t", pair_id)).replace("/", "_")
+                np.savez_compressed(case_dir / f"frame_{frame_name}.npz",
+                    coordinates=xyz.astype(np.float32), velocity_truth=truth.astype(np.float32),
+                    velocity_prediction=predicted_velocity.astype(np.float32),
+                    vorticity_truth=vorticity_truth.astype(np.float32),
+                    vorticity_prediction=predicted_vorticity.astype(np.float32),
+                    field_target_names=np.asarray(field_names, dtype="U"),
+                    case=np.asarray(str(context.get("case", "unknown"))),
+                    frame=np.asarray(frame_name), phase=np.asarray(float(context.get("phase_t", 0.0))))
             plane_mode = str(cfg["evaluation"].get("field_plane_mode", "highest_energy"))
             requested_y = (highest_energy_y_plane(native_xyz, native_truth)
                            if plane_mode == "highest_energy"
@@ -465,15 +552,14 @@ def main():
                     if record.get("case", "unknown") == case and record["evaluation_role"] == role]
             print(f"native Task-2 {case} ({role}): {len(rows)} frames | "
                   f"velocity MSE={np.mean([row['field_mse'] for row in rows]):.6g} | "
-                  f"field relL2={np.mean([row['field_relative_l2'] for row in rows]):.6g}")
+                  f"velocity relL2={np.mean([row['field_relative_l2'] for row in rows]):.6g} | "
+                  f"vorticity relL2={np.mean([row['vorticity_relative_l2'] for row in rows]):.6g}")
     if not native_records and not allow_missing_native:
         raise RuntimeError("Native Task-2 evaluation produced no records. Check stored task2_field_path "
                            "values or set evaluation.allow_missing_native_task2=true to allow this.")
     if not native_records:
         print("[native Task-2] skipped: no readable source field files were found; "
               "one-step and rollout evaluation results will still be saved.")
-    out_dir = checkpoint_path.parent / "evaluation"
-    out_dir.mkdir(parents=True, exist_ok=True)
     write_json(out_dir / "one_step.json", {"checkpoint": str(checkpoint_path), "dataset": str(data_path),
         "split": split, "architecture": model_cfg, "input_features": features, "target_features": target_names,
         "normalization_source": checkpoint.get("dataset_path", str(data_path)), "rollout_horizons": horizons, "records": records})
@@ -492,6 +578,11 @@ def main():
     })
     write_json(out_dir / "autoregressive.json", {"checkpoint": str(checkpoint_path), "split": split, "records": rollout_records})
     write_json(out_dir / "native_task2_field.json", {"root": native_root, "records": native_records})
+    if save_full_fields:
+        print(f"[field export] full velocity/vorticity grids saved under {out_dir / 'full_field_reconstruction'}")
+    if export_rollout_fields:
+        print(f"[rollout field export] selected full-grid horizon snapshots saved under "
+              f"{out_dir / 'full_field_reconstruction' / 'rollout'}")
     category_records = {}
     for record in native_records:
         for category in record.get("evaluation_categories", []):
