@@ -22,6 +22,14 @@ def run_preprocessing(source_root=None, output_dir=None, *, max_pairs_per_case=N
     )
 
 
+def run_preprocessing_from_merged_frames(merged_frames, output_dir=None, *, raw_root=None, device="auto"):
+    """Build the final train archive from an existing merged_frames tree."""
+    merged_path = Path(merged_frames).expanduser().resolve()
+    output_path = Path(output_dir or merged_path.parent).expanduser().resolve()
+    return preprocessing_pipeline.preprocess_vpm_merged_frames(
+        merged_path, output_path, raw_root=raw_root, device=device)
+
+
 def run_legacy_preprocessing(source_root=None, output_dir=None, field_root=None):
     """Explicit historical Task-1/Task-2 path; current scripts/preprocess.py does not call it."""
     # These roots are intentionally opt-in to avoid silently preprocessing the

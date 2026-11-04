@@ -106,7 +106,46 @@ def main():
         print(f"[device] training on {torch.cuda.get_device_name(device)}")
     else:
         print(f"[device] training on {device}; CUDA available={torch.cuda.is_available()}")
-    dataset_path = (HERE / cfg["data"]["dataset"]).resolve()
+    dataset_path = Path(cfg["data"]["dataset"]).expanduser()
+    if not dataset_path.is_absolute():
+        dataset_path = HERE / dataset_path
+    dataset_path = dataset_path.resolve()
+    merged_frames_value = str(cfg["data"].get("merged_frames", "")).strip()
+    if merged_frames_value:
+        merged_root = Path(merged_frames_value).expanduser()
+        if not merged_root.is_absolute():
+            merged_root = HERE / merged_root
+        merged_root = merged_root.resolve()
+        if not merged_root.is_dir():
+            raise FileNotFoundError(f"Configured VPM merged-frame directory does not exist: {merged_root}")
+        expected_cases = {path.name for path in merged_root.iterdir() if path.is_dir()}
+        rebuild_reason = None
+        if not dataset_path.is_file():
+            rebuild_reason = "final archive is missing"
+        else:
+            try:
+                with np.load(dataset_path, allow_pickle=True) as archive:
+                    present_cases = {str(value) for key in ("train_cases", "val_cases", "test_cases")
+                                     for value in archive[key]} if all(
+                                         key in archive for key in ("train_cases", "val_cases", "test_cases")) else set()
+                    field_names = {str(value) for value in archive["field_target_names"]
+                                   } if "field_target_names" in archive else set()
+                if expected_cases != present_cases:
+                    rebuild_reason = "archive case IDs do not match merged-frame folders"
+                elif not {"omega_x", "omega_y", "omega_z"}.issubset(field_names):
+                    rebuild_reason = "archive predates the velocity/vorticity target update"
+            except Exception as exc:
+                rebuild_reason = f"archive could not be validated ({exc})"
+        if rebuild_reason:
+            from gino.data.preprocessing import run_preprocessing_from_merged_frames
+            print(f"[dataset] rebuilding from {merged_root}: {rebuild_reason}", flush=True)
+            dataset_path = run_preprocessing_from_merged_frames(
+                merged_root, dataset_path.parent,
+                raw_root=cfg["data"].get("native_task2_root"),
+                device=str(cfg.get("device", "auto")))
+    if not dataset_path.is_file():
+        raise FileNotFoundError(f"Processed training archive not found: {dataset_path}")
+    print(f"[dataset] training archive: {dataset_path}", flush=True)
     data = ensure_legacy_input_feature_columns(load_processed_dataset(dataset_path), cfg["data"]["input_features"])
     cfg["data"]["input_features"] = [str(x) for x in data["feature_names"].tolist()]
     split = {

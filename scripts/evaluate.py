@@ -91,6 +91,21 @@ def main():
         print(f"[device] evaluation on {device}; CUDA available={torch.cuda.is_available()}")
     data_path = (HERE / cfg["data"]["dataset"]).resolve()
     data = load_processed_dataset(data_path)
+    merged_frames_value = str(cfg["data"].get("merged_frames", "")).strip()
+    if merged_frames_value:
+        merged_root = Path(merged_frames_value).expanduser()
+        if not merged_root.is_absolute():
+            merged_root = HERE / merged_root
+        expected_cases = {path.name for path in merged_root.resolve().iterdir() if path.is_dir()}
+        present_cases = {str(value) for key in ("train_cases", "val_cases", "test_cases")
+                         for value in data.get(key, [])}
+        field_names = {str(value) for value in data.get("field_target_names", [])}
+        if expected_cases != present_cases or not {"omega_x", "omega_y", "omega_z"}.issubset(field_names):
+            raise RuntimeError(
+                f"Processed archive {data_path} does not match VPM merged frames at {merged_root}. "
+                "Run `python3 scripts/preprocess.py --merged-frames <path> --raw-root <raw train/validate/test root>` "
+                "or run scripts/train.py to rebuild the archive before evaluating."
+            )
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     checkpoint_cfg = checkpoint.get("config", {})
     model_cfg = checkpoint_cfg.get("model", checkpoint_cfg or cfg)

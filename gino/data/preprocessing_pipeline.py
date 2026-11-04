@@ -2774,6 +2774,155 @@ def preprocess_generated_vpm_cases(source_root: Path, output_root: Path, *,
 
 
 # The script starts here when executed directly. It resolves the source roots, discovers and splits the cases, validates the metadata, creates the intermediate merged frames, and then builds the final particle-evolution dataset.
+def preprocess_vpm_merged_frames(merged_root: Path, output_root: Optional[Path] = None, *,
+                                 raw_root: Optional[Path] = None, device="auto") -> Path:
+    """Rebuild the trainable archive from the existing case/frame NPZ hierarchy."""
+    global RAW_ROOT, FIELD_ROOT, RAW_ROOT_CANDIDATES, FIELD_ROOT_CANDIDATES
+    global OUT_ROOT, MERGED_ROOT, FIELD_H5_PATTERN, TRAIN_CASES, VAL_CASES, TEST_CASES
+    global CASE_METADATA, ACTIVE_CASE_METADATA, VPM_CASE_PATHS, ACTIVE_FIELD_QUERY_BOUNDS
+    global CONDITIONING_CHANNEL_NAMES, ACTIVE_CONDITIONING_CHANNEL_NAMES, PARTICLE_INPUT_FEATURES
+    global USE_GEOMETRY_CHANNELS, GEOMETRY_CHANNEL_NAMES, PREPROCESS_DEVICE
+
+    merged_root = Path(merged_root).expanduser().resolve()
+    if not merged_root.is_dir():
+        raise FileNotFoundError(f"Merged-frame directory does not exist: {merged_root}")
+    merged = sorted(merged_root.glob("*/*.npz"), key=lambda p: (p.parent.name, frame_id(p)))
+    if not merged:
+        raise FileNotFoundError(f"No merged case/frame NPZ files found under {merged_root}")
+
+    # Each merged frame records its original particle HDF5 path. Use it to recover
+    # case.toml, the matching full-field directory, and the original split tags.
+    sample_by_case = {}
+    for path in merged:
+        with np.load(path, allow_pickle=True) as archive:
+            case_key = str(np.asarray(archive["source_dataset"]).reshape(-1)[0])
+            if case_key != path.parent.name:
+                raise ValueError(f"Merged-frame case key {case_key!r} does not match folder {path.parent.name!r}")
+            sample_by_case.setdefault(case_key, str(np.asarray(archive["source_input_h5_path"]).reshape(-1)[0]))
+
+    configured_raw_root = Path(raw_root).expanduser().resolve() if raw_root else None
+    raw_case_dirs = {}
+    for case, source in sample_by_case.items():
+        source_case_dir = Path(source).expanduser().resolve().parent
+        case_id = case.split("__", 1)[1] if "__" in case else source_case_dir.name
+        matched_case_dir = None
+        if configured_raw_root is not None and configured_raw_root.is_dir():
+            for split_name in ("train", "validate", "val", "test"):
+                candidate = configured_raw_root / split_name / case.split("__", 1)[0] / case_id
+                if candidate.is_dir():
+                    matched_case_dir = candidate
+                    break
+            if matched_case_dir is None:
+                for metadata_path in configured_raw_root.rglob("case.toml"):
+                    with metadata_path.open("rb") as stream:
+                        candidate_metadata = tomllib.load(stream)
+                    if str(candidate_metadata.get("case_id", "")) == case_id:
+                        matched_case_dir = metadata_path.parent
+                        break
+        raw_case_dirs[case] = matched_case_dir or source_case_dir
+    missing_sources = [str(path) for path in raw_case_dirs.values() if not path.is_dir()]
+    if missing_sources:
+        raise FileNotFoundError("Merged frames reference unavailable raw case folders: " + ", ".join(missing_sources[:5]))
+    raw_roots = {case_dir.parents[2] for case_dir in raw_case_dirs.values()}
+    if len(raw_roots) != 1:
+        raise ValueError(f"Merged frames reference more than one raw dataset root: {sorted(map(str, raw_roots))}")
+    raw_root = raw_roots.pop()
+    manifest_cases = {}
+    manifest_path = next((parent / "case_plan.toml" for parent in (raw_root, *raw_root.parents)
+                          if (parent / "case_plan.toml").is_file()), None)
+    if manifest_path is not None:
+        with manifest_path.open("rb") as stream:
+            manifest_cases = {entry["case_id"]: entry for entry in tomllib.load(stream).get("cases", [])}
+
+    requested_device = str(device).lower()
+    if requested_device not in ("auto", "cpu", "cuda"):
+        raise ValueError("device must be auto, cpu, or cuda")
+    try:
+        import torch
+        cuda_available = torch.cuda.is_available()
+    except Exception:
+        torch, cuda_available = None, False
+    if requested_device == "cuda" and not cuda_available:
+        raise RuntimeError("CUDA preprocessing was requested, but PyTorch reports no available CUDA device")
+    PREPROCESS_DEVICE = "cuda" if requested_device == "cuda" or (requested_device == "auto" and cuda_available) else "cpu"
+    print(f"[device] merged-frame preprocessing on {torch.cuda.get_device_name(0) if PREPROCESS_DEVICE == 'cuda' else 'CPU'}")
+
+    RAW_ROOT = FIELD_ROOT = raw_root
+    RAW_ROOT_CANDIDATES = FIELD_ROOT_CANDIDATES = [raw_root]
+    OUT_ROOT = Path(output_root).expanduser().resolve() if output_root else merged_root.parent
+    MERGED_ROOT = merged_root
+    FIELD_H5_PATTERN = "fields_fdom.*.h5"
+    TRAIN_CASES, VAL_CASES, TEST_CASES = [], [], []
+    CASE_METADATA, ACTIVE_CASE_METADATA, VPM_CASE_PATHS = {}, {}, {}
+    for case_key, case_dir in raw_case_dirs.items():
+        metadata_path = case_dir / "case.toml"
+        if not metadata_path.is_file():
+            raise FileNotFoundError(f"Merged case {case_key} has no source metadata: {metadata_path}")
+        with metadata_path.open("rb") as stream:
+            metadata = tomllib.load(stream)
+        case_id = str(metadata.get("case_id", case_dir.name))
+        plan_entry = manifest_cases.get(case_id, {})
+        if plan_entry:
+            metadata["evaluation_categories"] = plan_entry.get(
+                "evaluation_categories", metadata.get("evaluation_categories", []))
+        split = str(plan_entry.get("split", metadata.get("split", ""))).lower()
+        split = "val" if split in ("val", "validate", "validation") else split
+        if split not in ("train", "val", "test"):
+            raise ValueError(f"Merged case {case_key} has no recognized train/val/test assignment")
+        simulation = str(metadata.get("simulation", case_key.split("__", 1)[0]))
+        freestream = [0.0, 0.0, float(metadata.get("exit_speed", 0.0)) if simulation == "roundjet" else 0.0]
+        metadata.update({"aoa_deg": 0.0, "freestream": freestream, "dt": 1.0,
+                         "particles_per_step": int(metadata.get("total_particles", 1)),
+                         "split": split, "simulation": simulation})
+        CASE_METADATA[case_key] = ACTIVE_CASE_METADATA[case_key] = metadata
+        VPM_CASE_PATHS[case_key] = case_dir
+        {"train": TRAIN_CASES, "val": VAL_CASES, "test": TEST_CASES}[split].append(case_key)
+
+    CONDITIONING_CHANNEL_NAMES = ACTIVE_CONDITIONING_CHANNEL_NAMES = ["phase"]
+    PARTICLE_INPUT_FEATURES = [
+        "x", "y", "z", "Gamma_x", "Gamma_y", "Gamma_z", "sigma",
+        "u_x", "u_y", "u_z", "gradU_xx", "gradU_xy", "gradU_xz",
+        "gradU_yx", "gradU_yy", "gradU_yz", "gradU_zx", "gradU_zy", "gradU_zz", "phase", "delta_t",
+    ]
+    USE_GEOMETRY_CHANNELS, GEOMETRY_CHANNEL_NAMES = False, []
+    ACTIVE_FIELD_QUERY_BOUNDS = None
+    print(f"[merged frames] source={merged_root}; cases train/val/test="
+          f"{len(TRAIN_CASES)}/{len(VAL_CASES)}/{len(TEST_CASES)}; frames={len(merged)}")
+    ensure_dir(OUT_ROOT)
+    previous_field_root = os.environ.get("FIELD_ROOT")
+    previous_task2_root = os.environ.get("TASK2_ROOT")
+    previous_bounds = os.environ.get("FIELD_QUERY_BOUNDS")
+    os.environ["FIELD_ROOT"] = str(raw_root)
+    os.environ.pop("TASK2_ROOT", None)
+    # The merged VPM source is intended to retain the complete field domain.
+    os.environ["FIELD_QUERY_BOUNDS"] = "none"
+    try:
+        dataset_path = build_particle_evolution_dataset(merged)
+    finally:
+        if previous_field_root is None:
+            os.environ.pop("FIELD_ROOT", None)
+        else:
+            os.environ["FIELD_ROOT"] = previous_field_root
+        if previous_task2_root is None:
+            os.environ.pop("TASK2_ROOT", None)
+        else:
+            os.environ["TASK2_ROOT"] = previous_task2_root
+        if previous_bounds is None:
+            os.environ.pop("FIELD_QUERY_BOUNDS", None)
+        else:
+            os.environ["FIELD_QUERY_BOUNDS"] = previous_bounds
+    with np.load(dataset_path, allow_pickle=True) as archive:
+        summary = {
+            "dataset_type": "generated_vpm_merged_frames", "merged_frames": str(merged_root),
+            "raw_root": str(raw_root), "train_cases": TRAIN_CASES, "val_cases": VAL_CASES,
+            "test_cases": TEST_CASES, "train_pairs": int(len(archive["train_pair_ids"])),
+            "val_pairs": int(len(archive["val_pair_ids"])), "test_pairs": int(len(archive["test_pair_ids"])),
+            "field_target_names": [str(value) for value in archive["field_target_names"]],
+        }
+    (OUT_ROOT / "preprocess_summary.json").write_text(json.dumps(summary, indent=2))
+    return dataset_path
+
+
 def main() -> None:
     global ACTIVE_CASE_METADATA
     global ACTIVE_CONDITIONING_CHANNEL_NAMES
