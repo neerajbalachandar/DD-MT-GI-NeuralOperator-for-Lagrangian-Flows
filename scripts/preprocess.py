@@ -17,9 +17,19 @@ def main():
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--max-pairs-per-case", type=int, default=0,
                         help="Optional cap on consecutive transitions per case; default 0 processes every available pair.")
+    parser.add_argument("--preproc-max-rss-gb", type=float, default=None,
+                        help="Optional RSS guard for preprocessing in GB. Lower this for large VPM cases.")
+    parser.add_argument("--rollout-memory-cap-gb", type=float, default=None,
+                        help="Optional cap on temporary rollout arrays in GB. Lower this to avoid OOM during large-case preprocessing.")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto",
                         help="Use CUDA for field-gradient preprocessing when available.")
     args = parser.parse_args()
+    if args.preproc_max_rss_gb is not None:
+        import os
+        os.environ["PREPROC_MAX_RSS_GB"] = str(args.preproc_max_rss_gb)
+    if args.rollout_memory_cap_gb is not None:
+        import os
+        os.environ["ROLLOUT_MEMORY_CAP_GB"] = str(args.rollout_memory_cap_gb)
     from gino.data.preprocessing import run_preprocessing, run_preprocessing_from_merged_frames
 
     if args.merged_frames:
