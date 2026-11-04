@@ -46,19 +46,20 @@ training:
   mixed_precision: false
   use_state_loss: true
   use_field_loss: true
-  use_rollout_loss: true
+  use_rollout_loss: false
   rollout_weight: 0.1
-  # The current tracked sequences support at most four consecutive steps.
-  rollout_horizon_max: 4
-  rollout_horizon_schedule: [2, 2, 3, 3, 4, 4, 4, 4, 4, 4]
-  pushforward_weight: 0.0
+  # Train detached multi-step pushforward on the saved adjacent sequence.
+  # Eight-step training limits activation memory; evaluation checks longer horizons.
+  rollout_horizon_max: 8
+  rollout_horizon_schedule: [2, 2, 4, 4, 6, 6, 8, 8, 8, 8]
+  pushforward_weight: 0.1
   use_scheduled_sampling: true
   scheduled_sampling_max_probability: 0.2
   scheduled_sampling_ramp_epochs: 12
   use_gns_noise: true
   gns_initial_std: 0.005
   gns_walk_std: 0.0025
-  use_pushforward: false
+  use_pushforward: true
   use_homoscedastic_weighting: true
   state_loss_weight: 1.0
   field_loss_weight: 1.0
@@ -66,10 +67,13 @@ training:
 evaluation:
   checkpoint: ""
   split: test
-  rollout_horizons: [1, 2, 4]
+  rollout_horizons: [1, 4, 8, 16, 32, 64, 180]
+  rollout_starts_per_case: 5
   max_batches: 0
   allow_missing_native_task2: true
   save_plots: true
+  save_full_fields: true
+  save_full_rollout_fields: true
   field_visual_phase: 0.5
   field_visual_phases: [0.1, 0.3, 0.5, 0.7, 0.9]
   field_plane_mode: highest_energy

@@ -45,5 +45,8 @@ def evaluate_one_step(model, loader, latent_grid, normalization, device, visual_
                            "field_mse": float(mse(pred_np[..., :3], true_np[..., :3])),
                            "field_relative_l2": relative_l2(pred_np[..., :3], true_np[..., :3]),
                            "field_all_channel_mse": float(mse(pred_np, true_np))})
+            if pred_np.shape[-1] >= 15:
+                record.update({"vorticity_mse": float(mse(pred_np[..., 12:15], true_np[..., 12:15])),
+                               "vorticity_relative_l2": relative_l2(pred_np[..., 12:15], true_np[..., 12:15])})
         records.append(record)
     return records

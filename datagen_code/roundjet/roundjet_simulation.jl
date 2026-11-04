@@ -11,8 +11,14 @@
 # FLOWVPM's installed zeta_fmm calls FastMultipole.Tree without the explicit
 # source/target flag required by the FastMultipole version in the FLOWUnsteady
 # environment. Keep the same direct-list accumulation while supplying it.
-function zeta_fmm_compat(pfield)
+function zeta_fmm_compat(pfield; progress=false, deadline=Inf)
     vpm.get_np(pfield) == 0 && return nothing
+    started = time()
+    time() < deadline || error("Roundjet RBF exceeded its configured time limit before an FMM evaluation")
+    if progress
+        println("[roundjet RBF] building FMM interaction tree for $(vpm.get_np(pfield)) particles")
+        flush(stdout)
+    end
     options = pfield.fmm
     # FastMultipole 1.x expects a one-system static vector here; the installed
     # FLOWVPM zeta_fmm passes its scalar ncrit and fails during tree subdivision.
@@ -21,27 +27,64 @@ function zeta_fmm_compat(pfield)
         shrink_recenter=options.shrink_recenter)
     _, direct_list = vpm.FastMultipole.build_interaction_lists(
         tree.branches, tree.branches, leaf_size, options.theta, false, true, true)
+    time() < deadline || error("Roundjet RBF exceeded its configured time limit while building the FMM interaction tree")
     sort_index = tree.sort_index_list[1]
     zeta = pfield.kernel.zeta
+    branches = tree.branches
+
+    # Direct-list entries for one source leaf all accumulate into particles in
+    # that leaf. Group them so each threaded worker owns disjoint output
+    # particles and the vorticity sums need no atomics.
+    targets_by_source = [Int[] for _ in eachindex(branches)]
     for (i_target, i_source) in direct_list
-        target_branch = tree.branches[i_target]
-        source_branch = tree.branches[i_source]
-        for i_source_particle in source_branch.bodies_index[1]
-            Pi = vpm.get_particle(pfield, sort_index[i_source_particle])
-            for i_target_particle in target_branch.bodies_index[1]
-                Pj = vpm.get_particle(pfield, sort_index[i_target_particle])
+        push!(targets_by_source[i_source], i_target)
+    end
+    active_sources = findall(targets -> !isempty(targets), targets_by_source)
+    if progress
+        println("[roundjet RBF] FMM evaluation: $(vpm.get_np(pfield)) particles, $(length(direct_list)) near-field leaf pairs, $(Threads.nthreads()) threads")
+        flush(stdout)
+    end
+
+    isempty(active_sources) && return nothing
+    completed_sources = Threads.Atomic{Int}(0)
+    report_every = max(1, cld(length(active_sources), 10))
+    Threads.@threads for work_index in eachindex(active_sources)
+        i_source = active_sources[work_index]
+        source_branch = branches[i_source]
+        for i_target in targets_by_source[i_source]
+            target_branch = branches[i_target]
+            for i_source_particle in source_branch.bodies_index[1]
+                Pi = vpm.get_particle(pfield, sort_index[i_source_particle])
                 X_i = vpm.get_X(Pi)
-                X_j = vpm.get_X(Pj)
-                r = sqrt(sum((X_i[k] - X_j[k])^2 for k in 1:3))
-                sigma = vpm.get_sigma(Pj)[]
-                zeta_sigma = zeta(r / sigma) / sigma^3
-                Gamma = vpm.get_Gamma(Pj)
                 J = vpm.get_J(Pi)
-                for k in 1:3
-                    J[k] += Gamma[k] * zeta_sigma
+                for i_target_particle in target_branch.bodies_index[1]
+                    Pj = vpm.get_particle(pfield, sort_index[i_target_particle])
+                    X_j = vpm.get_X(Pj)
+                    dx = X_i[1] - X_j[1]
+                    dy = X_i[2] - X_j[2]
+                    dz = X_i[3] - X_j[3]
+                    sigma = vpm.get_sigma(Pj)[]
+                    zeta_sigma = zeta(sqrt(dx*dx + dy*dy + dz*dz) / sigma) / sigma^3
+                    Gamma = vpm.get_Gamma(Pj)
+                    for k in 1:3
+                        J[k] += Gamma[k] * zeta_sigma
+                    end
                 end
             end
         end
+        if progress
+            completed = Threads.atomic_add!(completed_sources, 1) + 1
+            if completed == 1 || completed % report_every == 0 || completed == length(active_sources)
+                elapsed = round(time() - started; digits=1)
+                println("[roundjet RBF] FMM progress: $completed/$(length(active_sources)) source leaves ($(round(Int, 100*completed/length(active_sources)))%), $(elapsed)s")
+                flush(stdout)
+            end
+            time() < deadline || error("Roundjet RBF exceeded its configured time limit during an FMM evaluation")
+        end
+    end
+    if progress
+        println("[roundjet RBF] FMM evaluation completed in $(round(time() - started; digits=1))s")
+        flush(stdout)
     end
     return nothing
 end
@@ -61,13 +104,14 @@ function run_roundjet_simulation(pfield::vpm.ParticleField,
                                         # ------- SOLVER OPTIONS ---------------
                                         steps_per_d=50, # Number of time steps for the centerline at U1 to travel one diameter
                                         d_travel_tot=10,# Run simulation for an equivalent of this many diameters
+                                        pulse_steps=10, # Finite inlet pulse length in integration steps; no runtime shedding.
                                         dxotheta=1/4,   # Distance Δx between particles over momentum thickness θ
                                         overlap=2.4,    # Overlap between particles
                                         minWfraction=1e-2,  # Threshold at which not to add particles
                                         maxRoR=1.0,     # (m) maximum radial distance to discretize
-                                        max_zsigma=12.0,# Maximum sigmas in z-direction to create annulis for defining BC
                                         rbf=true,       # If true, it runs an RBF interpolation to match the analytic vorticity with more accuracy
                                         rbf_optargs=[(:itmax,200), (:tol,2.5e-2), (:iterror,true), (:verbose,true), (:debug,false)],
+                                        rbf_timeout_seconds=1800.0,
                                         rbf_Wf=0.5,     # Scales target RBF vorticity by this factor
                                         rbf_fullcylinder=false,  # Use a cylinder of particles for the RBF with half of it in inside the jet
                                         keep_rbfparticles=false, # Keep particles used for RBF as static particles
@@ -92,6 +136,8 @@ function run_roundjet_simulation(pfield::vpm.ParticleField,
     # Temporal discretization
     dt         = d/steps_per_d / U1         # (s) time step
     nsteps     = ceil(Int, d_travel_tot*d / U1 / dt) # Number of time steps
+    pulse_steps >= 1 || error("pulse_steps must be at least one")
+    pulse_steps < nsteps || error("pulse_steps must be shorter than the roundjet trajectory")
 
     # Spatial discretization
     maxR       = maxRoR*R
@@ -123,9 +169,8 @@ function run_roundjet_simulation(pfield::vpm.ParticleField,
     end
 
     V2 = dot(Vfreestream, Cline)     # Axial component of the freestream
-    BCi = Int[]                            # Indices of particles that make up the boundary condition
 
-    # Spatial discretization of the boundary condition
+    # Spatial discretization of the finite jet pulse
     for ri in 1:NR         # Iterate over annuli (NOTE: Here we assume that the profile is symmetric from -R to R)
 
         # Lower and upper bounds, and center of annulus
@@ -147,14 +192,13 @@ function run_roundjet_simulation(pfield::vpm.ParticleField,
         # NOTE: This line implicitely assumes AR=1.0
         area = dz*(rup-rlo)
 
-        Nz = ceil(Int, max_zsigma*sigma/dz)
-
         if abs(Wmean) / Wpeak >= minWfraction
-            for zi in 0:Nz                  # Iterate over Z layers (time steps)
+            # Initialize the entire finite-duration jet pulse at t=0. Every
+            # particle is active from the start, so particle count stays
+            # constant instead of growing by one inlet layer each timestep.
+            for zi in 0:pulse_steps
 
                 for sgn in [1, -1][1:2^(rbf_fullcylinder && zi!=0)]
-                    org_np = vpm.get_np(pfield)
-
                     this_O = O + sgn*zi*dz*Cline  # Center of this layer
 
                     # Discretize the annulus into Nphi sections as particles
@@ -162,22 +206,15 @@ function run_roundjet_simulation(pfield::vpm.ParticleField,
                                             rc, AR,
                                             Nphi, sigma, area;
                                             O=this_O, Oaxis=Oaxis,
-                                            static=zi!=0,
+                                            static=false,
                                             verbose=verbose, v_lvl=v_lvl+1)
-
-                    # Save indices of particles at the boundary
-                    if zi==0
-                        for pi in org_np+1:vpm.get_np(pfield)
-                            push!(BCi, pi)
-                        end
-                    end
                 end
             end
         end
     end
 
     if verbose
-        println("\t"^v_lvl*"Initial boundary-condition particles:\t$(vpm.get_np(pfield))")
+        println("\t"^v_lvl*"Initialized finite-pulse particles:\t$(vpm.get_np(pfield))")
     end
 
     # Determine the vortex strength of the boundary condition through RBF on the target vorticity
@@ -216,79 +253,49 @@ function run_roundjet_simulation(pfield::vpm.ParticleField,
             end
         end
 
-        # Switch static particles to non-static so they are included in the RBF
+        # Keep all finite-pulse particles active during the RBF fit.
         for P in vpm.iterate(pfield; include_static=true); vpm.set_static(P, false); end
 
         # RBF interpolation of the analytic distribution
-        rbf_scheme = vpm.CoreSpreading(-1, -1, zeta_fmm_compat; v_lvl=v_lvl+1, rbf_optargs...)
+        rbf_timeout_seconds > 0 || error("rbf_timeout_seconds must be positive")
+        rbf_started = time()
+        rbf_deadline = rbf_started + rbf_timeout_seconds
+        rbf_evaluations = Ref(0)
+        println("[roundjet RBF] starting conjugate-gradient fit: $(vpm.get_np(pfield)) particles, max $(get(Dict(rbf_optargs), :itmax, 200)) iterations, timeout $(rbf_timeout_seconds)s")
+        flush(stdout)
+        function monitored_rbf_zeta(field)
+            rbf_evaluations[] += 1
+            println("[roundjet RBF] operator evaluation $(rbf_evaluations[]) starting; $(vpm.get_np(field)) particles")
+            flush(stdout)
+            return zeta_fmm_compat(field; progress=true, deadline=rbf_deadline)
+        end
+        rbf_scheme = vpm.CoreSpreading(-1, -1, monitored_rbf_zeta; v_lvl=v_lvl+1, rbf_optargs...)
         vpm.rbf_conjugategradient(pfield, rbf_scheme)
+        println("[roundjet RBF] fit completed in $(round(time() - rbf_started; digits=1))s using $(rbf_evaluations[]) operator evaluations")
 
-        # Switch them back to static
-        for P in vpm.iterate(pfield; include_static=true); vpm.set_static(P, true); end
-        for pi in BCi; vpm.set_static(pfield, pi, false); end
-    end
-
-    # Save a copy of boundary-condition particles
-    BC = [deepcopy(vpm.get_particle(pfield, pi)) for pi in BCi]
-
-    # Remove particles used for boundary condition RBF
-    if keep_rbfparticles # Remove only the particles that later will be injected
-
-        for pi in sort(BCi; rev=true)
-            vpm.remove_particle(pfield, pi)
+        # This is a finite pulse, not an inlet boundary condition: all fitted
+        # particles remain active for the full trajectory.
+        for P in vpm.iterate(pfield; include_static=true); vpm.set_static(P, false); end
+    else
+        # The annulus strengths already integrate the analytic vorticity
+        # profile over each particle's support. Keep that discretization and
+        # apply the same calibration used by the RBF target without solving a
+        # global, quadratic-cost conjugate-gradient problem.
+        for P in vpm.iterate(pfield; include_static=true)
+            vpm.get_Gamma(P) .*= rbf_Wf
         end
-
-        # Case that a full cylinder was used for RBF
-        if rbf_fullcylinder
-
-            auxX = zeros(3)
-
-            for pi in vpm.get_np(pfield):-1:1
-                P = vpm.get_particle(pfield, pi)
-                auxX .= vpm.get_X(P)
-                auxX .-= O
-                if dot(auxX, Cline) > 0
-
-                    if keep_rbffullcylinder # Case of keeping the full cylinder
-                        # Make particle non-static
-                        vpm.set_static(P, false)
-                    else # Case of removing half of the cylinder
-                        vpm.remove_particle(pfield, pi)
-                    end
-
-                end
-            end
-        end
-
-    else                 # Remove all particles
-        for pi in vpm.get_np(pfield):-1:1
-            vpm.remove_particle(pfield, pi)
+        if verbose
+            println("[roundjet] using analytically integrated annulus strengths (scale=$(rbf_Wf)); iterative RBF fit disabled")
+            flush(stdout)
         end
     end
 
-    # Runtime function that adds particles imposing the boundary condition.
-    # The jet emits new particles at every step, so grow the backing storage as
-    # needed instead of relying on a large fixed maximum chosen in advance.
-    function boundary_condition(pfield, t, dt; optargs...)
-
-        required = pfield.np + length(BC)
-        if required > pfield.maxparticles
-            new_capacity = max(required, max(1024, 2 * pfield.maxparticles))
-            particles = zeros(eltype(pfield.particles), size(pfield.particles, 1), new_capacity)
-            copyto!(view(particles, :, 1:pfield.np), view(pfield.particles, :, 1:pfield.np))
-            pfield.particles = particles
-            pfield.maxparticles = new_capacity
-        end
-
-        for P in BC
-            vpm.add_particle(pfield, P)
-        end
-
-        return false
-    end
-
+    vpm.get_np(pfield) <= pfield.maxparticles || error("Finite roundjet pulse exceeds its preallocated particle capacity")
     if verbose
-        println("\t"^v_lvl*"Final boundary-condition particles:\t$(length(BC))")
+        println("\t"^v_lvl*"Finite-pulse particles:\t$(vpm.get_np(pfield))")
+        println("[roundjet] initialized a $(pulse_steps/steps_per_d)D finite pulse; particle count is fixed")
+        println("[roundjet] particle buffer capacity=$(pfield.maxparticles)")
+        flush(stdout)
     end
 
     # Simulation restart
@@ -330,7 +337,13 @@ function run_roundjet_simulation(pfield::vpm.ParticleField,
     end
 
     # --------------- DEFINE RUNTIME FUNCTION ----------------------------------
-    this_runtime_functions = vcat(boundary_condition, runtime_functions)
+    expected_particles = vpm.get_np(pfield)
+    function check_fixed_particle_count(field, t, dt; optargs...)
+        actual = vpm.get_np(field)
+        actual == expected_particles || error("Roundjet particle count changed from $expected_particles to $actual at t=$t")
+        return false
+    end
+    this_runtime_functions = vcat(check_fixed_particle_count, runtime_functions)
     runtime_function(args...; optargs...) = !prod(!f(args...; optargs...) for f in this_runtime_functions)
 
 

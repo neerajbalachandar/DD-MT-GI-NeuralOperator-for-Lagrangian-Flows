@@ -99,13 +99,18 @@ solid or inlet boundary, so a boundary-condition holdout is not applicable.
 
 The roundjet plan uses the same 9/4/7 split. Its regular cases vary diameter
 `D` (1 or 2), exit speed `U` (0.75, 1, 1.25), spacing/momentum-thickness
-(`dx/theta`, about 0.167 or 0.125), and overlap (2, 2.4, 3). The seven tests
+(`dx/theta`, 1/3 or 1/4), and overlap (2, 2.4, 3). These coarser annulus
+resolutions reduce particle counts compared with the original 1/6 and 1/8
+spacing sweep. The seven tests
 include two in-range points, one Reynolds-number holdout at 15000, one faster
 unseen operating point (`U=1.5`), an unseen inlet momentum-thickness condition
 (`theta/D=0.04` versus the training baseline 0.025), and temporal and spatial
 superresolution cases. The spatial target uses 64-cubed fields; the temporal
-case saves every integration step. Standard roundjets run 720 steps (7.2
-diameters at 100 steps per diameter), saved every 4 steps, for 180 transitions.
+case saves every integration step over the same trajectory. Standard roundjets
+run 360 steps (7.2 diameters at 50 steps per diameter), saved every 2 steps,
+for 180 transitions. All roundjets use a finite 0.10D initial pulse, with fixed
+particle count through the run; their output folder names include the pulse
+length. The spatial test still reconstructs fields on a 64-cubed grid.
 
 ## Failure stability
 
