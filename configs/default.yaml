@@ -1,21 +1,23 @@
 seed: 42
 device: auto
+
+# Default to controlled one-step leapfrogging pretraining. For long-horizon
+# optimization after this checkpoint exists, use configs/leapfrogging_rollout.yaml.
 data:
-  dataset: "/hpc/home/neerajc/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/processed_data/particle_evolution_dataset.npz"
-  merged_frames: "/hpc/home/neerajc/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/processed_data/merged_frames"
-  native_task2_root: "/hpc/home/neerajc/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/datagen_code/training_data"
+  dataset: processed_data/leapfrogging/particle_evolution_dataset.npz
+  merged_frames: processed_data/leapfrogging/merged_frames
+  native_task2_root: datagen_code/training_data
   allow_missing_native_task2: false
-  # Vortex-only data has no solid-body distance, normal, or near-body features.
   input_features: [u_x, u_y, u_z, sigma, Gamma_x, Gamma_y, Gamma_z, gradU_xx, gradU_xy, gradU_xz, gradU_yx, gradU_yy, gradU_yz, gradU_zx, gradU_zy, gradU_zz, delta_t]
   global_condition_channels: [freestream_magnitude, phase]
   max_particles: 2048
-  # Training field supervision uses a regular 16^3 subset per time pair.
-  # Native 32^3 HDF5 fields remain intact; spatial super-resolution evaluation uses every native node.
-  max_queries: 4096
+  # Supervise every node of the native 32^3 Eulerian field grid.
+  max_queries: 32768
 
 preprocessing:
   max_rss_gb: 32
-  
+
+# Preserve the shared-latent GNO-FNO model architecture for the controlled baseline.
 model:
   latent_res: 16
   hidden_channels: 128
@@ -32,15 +34,13 @@ model:
   predict_delta_u: true
 
 training:
-  run_dir: runs/
+  run_dir: runs/leapfrogging_pretrain
   epochs: 120
   batch_size: 1
   gradient_accumulation_steps: 4
   dataloader_num_workers: 8
   validation_every_n_epochs: 1
-  # Stability-first defaults: full precision avoids the complex-gradient autocast issue
-  # noted in the project review, while the lower LR reduces rollout drift.
-  learning_rate: 0.0001
+  learning_rate: 0.00005
   weight_decay: 0.00003
   scheduler: plateau
   grad_clip_norm: 0.5
@@ -48,24 +48,24 @@ training:
   mixed_precision: false
   use_state_loss: true
   use_field_loss: true
-  use_rollout_loss: false
-  rollout_weight: 0.1
-  # Train detached multi-step pushforward on the saved adjacent sequence.
-  # Eight-step training limits activation memory; evaluation checks longer horizons.
-  rollout_horizon_max: 16
-  rollout_horizon_schedule: [2, 2, 4, 4, 6, 6, 8, 8, 8, 8]
-  pushforward_weight: 0.1
-  use_scheduled_sampling: true
-  scheduled_sampling_max_probability: 0.2
-  scheduled_sampling_ramp_epochs: 12
-  use_gns_noise: true
-  gns_initial_std: 0.005
-  gns_walk_std: 0.0025
-  use_pushforward: true
-  use_homoscedastic_weighting: true
+  # Fixed task weights keep a learned uncertainty weight from hiding weak field fit.
+  use_homoscedastic_weighting: false
   state_loss_weight: 1.0
   field_loss_weight: 1.0
+  # Field target channels are [u(0:3), grad(u)(3:12), omega(12:15)].
+  field_velocity_weight: 1.0
+  field_gradient_weight: 0.5
+  field_vorticity_weight: 0.1
   use_relative_l2_field_loss: true
+  use_rollout_loss: false
+  use_pushforward: false
+  use_scheduled_sampling: false
+  use_gns_noise: false
+  rollout_weight: 0.0
+  pushforward_weight: 0.0
+  rollout_horizon_max: 1
+  rollout_horizon_schedule: [1]
+
 evaluation:
   checkpoint: ""
   split: test
