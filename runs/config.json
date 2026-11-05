@@ -2,7 +2,8 @@
   "seed": 42,
   "device": "auto",
   "data": {
-    "dataset": "processed_data/particle_evolution_dataset.npz",
+    "dataset": "/hpc/home/neerajc/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/processed_data/particle_evolution_dataset.npz",
+    "merged_frames": "/hpc/home/neerajc/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/processed_data/merged_frames",
     "native_task2_root": "/hpc/home/neerajc/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/datagen_code/training_data",
     "allow_missing_native_task2": false,
     "input_features": [
@@ -25,14 +26,6 @@
       "gradU_zx",
       "gradU_zy",
       "gradU_zz",
-      "geom_dist",
-      "geom_nx",
-      "geom_ny",
-      "geom_nz",
-      "geom_body_near",
-      "angle_of_attack",
-      "freestream_x",
-      "freestream_z",
       "phase",
       "delta_t"
     ],
@@ -41,11 +34,10 @@
       "phase"
     ],
     "max_particles": 2048,
-    "max_queries": 32768
+    "max_queries": 4096
   },
   "preprocessing": {
-    "max_rss_gb": 0,
-    "rollout_memory_cap_gb": 2.0
+    "max_rss_gb": 32
   },
   "model": {
     "latent_res": 16,
@@ -79,18 +71,18 @@
     "use_field_loss": true,
     "use_rollout_loss": false,
     "rollout_weight": 0.1,
-    "rollout_horizon_max": 4,
+    "rollout_horizon_max": 8,
     "rollout_horizon_schedule": [
       2,
       2,
       4,
       4,
-      4,
-      4,
-      4,
-      4,
-      4,
-      4
+      6,
+      6,
+      8,
+      8,
+      8,
+      8
     ],
     "pushforward_weight": 0.1,
     "use_scheduled_sampling": true,

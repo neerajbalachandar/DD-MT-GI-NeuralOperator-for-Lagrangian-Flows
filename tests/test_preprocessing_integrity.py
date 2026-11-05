@@ -3,6 +3,7 @@ import pytest
 
 from gino.data.preprocessing_pipeline import (
     _aligned_rollout_truth,
+    _intersect_bounds,
     match_task2_xmf_time,
     _require_scalar,
     _validate_structured_node_order,
@@ -33,7 +34,7 @@ def test_task2_xmf_rejects_wrong_nodal_count(tmp_path):
         'field.20.h5:U</DataItem></Attribute>'
         '</Grid></Domain></Xdmf>'
     )
-    with pytest.raises(ValueError, match="expected nodes and nodal U"):
+    with pytest.raises(ValueError, match="expected.*nodal U"):
         validate_task2_xmf_layout(xmf_path, h5_path)
 
 
@@ -58,6 +59,13 @@ def test_particle_scalar_lengths_must_match_particle_count():
         _require_scalar(np.arange(2), 3, "sigma")
     with pytest.raises(ValueError, match="exactly 3 values"):
         _require_scalar(np.arange(4), 3, "static")
+
+
+def test_field_bounds_are_clipped_to_particle_support():
+    field_bounds = (0.0, 12.0, -4.0, 8.0, -2.0, 10.0)
+    particle_bounds = (2.0, 9.0, 1.0, 6.0, 0.0, 7.0)
+    clipped = _intersect_bounds(field_bounds, particle_bounds)
+    assert clipped == (2.0, 9.0, 1.0, 6.0, 0.0, 7.0)
 
 
 def test_rollout_truth_uses_persistent_ids_not_row_positions():

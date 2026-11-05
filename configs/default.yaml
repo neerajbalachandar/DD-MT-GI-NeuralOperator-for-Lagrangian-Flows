@@ -52,7 +52,7 @@ training:
   rollout_weight: 0.1
   # Train detached multi-step pushforward on the saved adjacent sequence.
   # Eight-step training limits activation memory; evaluation checks longer horizons.
-  rollout_horizon_max: 8
+  rollout_horizon_max: 16
   rollout_horizon_schedule: [2, 2, 4, 4, 6, 6, 8, 8, 8, 8]
   pushforward_weight: 0.1
   use_scheduled_sampling: true

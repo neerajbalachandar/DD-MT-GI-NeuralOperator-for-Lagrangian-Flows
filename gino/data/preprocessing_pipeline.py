@@ -514,7 +514,33 @@ def _assign_advected_position_tracks(frames: List[Dict[str, object]], case: str)
           f"matched=0/{len(first_indices)} new={len(first_indices)}")
 
 
-# Task 2 provides an Eulerian field on a structured grid. Its default query domain is inferred from training-case meshes; FIELD_QUERY_BOUNDS can explicitly override it.
+def _intersect_bounds(
+    bounds_a: Optional[Tuple[float, float, float, float, float, float]],
+    bounds_b: Optional[Tuple[float, float, float, float, float, float]],
+) -> Optional[Tuple[float, float, float, float, float, float]]:
+    """Intersect two axis-aligned 3-D boxes; return None when they do not overlap."""
+    if bounds_a is None:
+        return bounds_b
+    if bounds_b is None:
+        return bounds_a
+    lower = np.maximum(
+        np.asarray([bounds_a[0], bounds_a[2], bounds_a[4]], dtype=np.float64),
+        np.asarray([bounds_b[0], bounds_b[2], bounds_b[4]], dtype=np.float64),
+    )
+    upper = np.minimum(
+        np.asarray([bounds_a[1], bounds_a[3], bounds_a[5]], dtype=np.float64),
+        np.asarray([bounds_b[1], bounds_b[3], bounds_b[5]], dtype=np.float64),
+    )
+    if np.any(upper <= lower):
+        return None
+    return (
+        float(lower[0]), float(upper[0]),
+        float(lower[1]), float(upper[1]),
+        float(lower[2]), float(upper[2]),
+    )
+
+
+# Task 2 provides an Eulerian field on a structured grid. Its default query domain is the overlap of the training-case mesh and the particle support; FIELD_QUERY_BOUNDS can explicitly override it.
 def _field_query_bounds() -> Optional[Tuple[float, float, float, float, float, float]]:
     raw = os.environ.get("FIELD_QUERY_BOUNDS", "").strip()
     if raw.lower() in {"none", "full", "all", "off", "false", "0"}:
@@ -660,10 +686,37 @@ def _validate_structured_node_order(coords: np.ndarray, spatial_shape: Tuple[int
         )
 
 
+def _particle_support_bounds_for_training_cases(
+    by_case: Dict[str, List[Path]],
+) -> Optional[Tuple[float, float, float, float, float, float]]:
+    """Infer the global particle-support box from the training-case merged particle frames."""
+    lows, highs = [], []
+    for case in TRAIN_CASES:
+        for frame_path in by_case.get(str(case), []):
+            try:
+                with np.load(frame_path, allow_pickle=True) as payload:
+                    coords = np.asarray(payload["particle_xyz"], dtype=np.float64)
+            except Exception:
+                continue
+            finite = coords[np.isfinite(coords).all(axis=1)]
+            if finite.size:
+                lows.append(finite.min(axis=0))
+                highs.append(finite.max(axis=0))
+    if not lows:
+        return None
+    lower = np.min(np.asarray(lows), axis=0)
+    upper = np.max(np.asarray(highs), axis=0)
+    if not np.all(upper > lower):
+        raise ValueError(f"Inferred training particle-support domain is degenerate: {lower}, {upper}")
+    return (float(lower[0]), float(upper[0]), float(lower[1]), float(upper[1]),
+            float(lower[2]), float(upper[2]))
+
+
 def _infer_training_field_bounds(
     field_files_by_case: Dict[str, List[Tuple[float, Path]]],
+    particle_support_bounds: Optional[Tuple[float, float, float, float, float, float]] = None,
 ) -> Optional[Tuple[float, float, float, float, float, float]]:
-    """Infer a shared query domain from training-case Task-2 meshes only."""
+    """Infer a shared query domain from training-case Task-2 meshes and clip it to the training-case particle support."""
     raw_override = os.environ.get("FIELD_QUERY_BOUNDS", "").strip()
     if raw_override:
         return _field_query_bounds()
@@ -678,12 +731,21 @@ def _infer_training_field_bounds(
                 lows.append(coords.min(axis=0))
                 highs.append(coords.max(axis=0))
     if not lows:
-        return None
+        return particle_support_bounds
     lower, upper = np.min(lows, axis=0), np.max(highs, axis=0)
+    field_bounds = (float(lower[0]), float(upper[0]), float(lower[1]), float(upper[1]),
+                   float(lower[2]), float(upper[2]))
+    if particle_support_bounds is not None:
+        clipped = _intersect_bounds(field_bounds, particle_support_bounds)
+        if clipped is None:
+            raise ValueError(
+                "Training particle support does not overlap the Task-2 field box: "
+                f"field={field_bounds}, particle={particle_support_bounds}"
+            )
+        return clipped
     if not np.all(upper > lower):
         raise ValueError(f"Inferred training Task-2 domain has degenerate bounds: {lower}, {upper}")
-    return (float(lower[0]), float(upper[0]), float(lower[1]), float(upper[1]),
-            float(lower[2]), float(upper[2]))
+    return field_bounds
 
 
 # These helpers deal with small shape and indexing issues that occur repeatedly when the frame-level arrays are converted into the final flattened dataset.
@@ -1988,10 +2050,11 @@ def _build_particle_evolution_dataset_legacy(merged: List[Path]) -> Path:
         print(f"[field] {case}: fdom frames={len(entries)}; XMF times="
               f"{[time for time, _ in field_files_by_case[case]][:8]}")
 
+    particle_support_bounds = _particle_support_bounds_for_training_cases(by_case)
     if not os.environ.get("FIELD_QUERY_BOUNDS", "").strip():
-        ACTIVE_FIELD_QUERY_BOUNDS = _infer_training_field_bounds(field_files_by_case)
+        ACTIVE_FIELD_QUERY_BOUNDS = _infer_training_field_bounds(field_files_by_case, particle_support_bounds)
     inferred_bounds = _field_query_bounds()
-    print(f"[field] query domain from training meshes: {inferred_bounds}")
+    print(f"[field] query domain from training meshes and particle support: {inferred_bounds}")
 
     def field_grid_for_time(case: str, task1_time: float):
         match = match_task2_xmf_time(field_files_by_case.get(case, []), task1_time)
@@ -2458,8 +2521,9 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
                 raise ValueError(f"Task-2 case {case} has duplicate XMF time {current[0]}")
         field_files_by_case[case] = entries
         print(f"[field] {case}: fdom frames={len(entries)}; XMF times={[t for t, _ in entries][:8]}")
+    particle_support_bounds = _particle_support_bounds_for_training_cases(by_case)
     if not os.environ.get("FIELD_QUERY_BOUNDS", "").strip():
-        ACTIVE_FIELD_QUERY_BOUNDS = _infer_training_field_bounds(field_files_by_case)
+        ACTIVE_FIELD_QUERY_BOUNDS = _infer_training_field_bounds(field_files_by_case, particle_support_bounds)
 
     pair_ranges, field_available, chain_lengths = _scan_pairs(by_case, meta_by_case, field_files_by_case)
     if not pair_ranges:
@@ -2905,8 +2969,7 @@ def preprocess_vpm_merged_frames(merged_root: Path, output_root: Optional[Path] 
     previous_bounds = os.environ.get("FIELD_QUERY_BOUNDS")
     os.environ["FIELD_ROOT"] = str(raw_root)
     os.environ.pop("TASK2_ROOT", None)
-    # The merged VPM source is intended to retain the complete field domain.
-    os.environ["FIELD_QUERY_BOUNDS"] = "none"
+    # Keep the field target box restricted to the particle-supported region unless the user requests an explicit override.
     try:
         dataset_path = build_particle_evolution_dataset(merged)
     finally:
