@@ -1,6 +1,6 @@
 import torch
 from gino.dynamics.state_transition import predict_next_state
-from .metrics import state_component_metrics, normalized_state_component_metrics, mse, relative_l2
+from .metrics import state_component_metrics, normalized_state_component_metrics, mse, relative_l2, field_group_metrics
 
 
 @torch.inference_mode()
@@ -44,7 +44,8 @@ def evaluate_one_step(model, loader, latent_grid, normalization, device, visual_
             record.update({"field_mse_normalized": float(torch.mean((result["field_norm"] - batch["field_target"]) ** 2).cpu()),
                            "field_mse": float(mse(pred_np[..., :3], true_np[..., :3])),
                            "field_relative_l2": relative_l2(pred_np[..., :3], true_np[..., :3]),
-                           "field_all_channel_mse": float(mse(pred_np, true_np))})
+                           "field_all_channel_mse": float(mse(pred_np, true_np)),
+                           **field_group_metrics(pred_np, true_np)})
             if pred_np.shape[-1] >= 15:
                 record.update({"vorticity_mse": float(mse(pred_np[..., 12:15], true_np[..., 12:15])),
                                "vorticity_relative_l2": relative_l2(pred_np[..., 12:15], true_np[..., 12:15])})

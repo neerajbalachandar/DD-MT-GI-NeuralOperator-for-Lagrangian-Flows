@@ -14,7 +14,8 @@ def run_preprocessing(source_root=None, output_dir=None, *, max_pairs_per_case=N
     output_path = Path(output_dir or preprocessing_pipeline.SCRIPT_DIR / "processed_data").expanduser().resolve()
     if all((requested_root / split).is_dir() for split in ("train", "test", "validate")):
         return preprocessing_pipeline.preprocess_generated_vpm_cases(
-            requested_root, output_path, max_pairs_per_case=max_pairs_per_case, device=device)
+            requested_root, output_path, max_pairs_per_case=max_pairs_per_case, device=device,
+            case_prefix=None)
     raise FileNotFoundError(
         f"Generated FLOWVPM data root {requested_root} must contain train/, validate/, and test/. "
         "Pass the mounted dataset directory with --source-root. Legacy Task-1/Task-2 data is not "

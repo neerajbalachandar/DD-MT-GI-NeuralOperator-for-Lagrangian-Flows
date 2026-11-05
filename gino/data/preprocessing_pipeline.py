@@ -23,6 +23,7 @@ PREPROC_MAX_RSS_GB = float(os.environ.get("PREPROC_MAX_RSS_GB", "0"))
 ROLLOUT_MEMORY_CAP_GB = float(os.environ.get("ROLLOUT_MEMORY_CAP_GB", "2.0"))
 MAX_PREPROCESS_PARTICLES = max(1, int(os.environ.get("MAX_PREPROCESS_PARTICLES", "2048")))
 PREPROCESS_DEVICE = "cpu"
+FIELD_SOURCE_DIAGNOSTICS: List[Dict[str, Any]] = []
 
 
 def _to_s32(values) -> np.ndarray:
@@ -253,6 +254,12 @@ def ensure_dir(p: Path) -> Path:
 def frame_id(path: Path) -> str:
     m = FRAME_RE.search(path.stem)
     return m.group(1).zfill(6) if m else path.stem
+
+
+def case_id_matches_prefix(case_id: str, prefix: Optional[str]) -> bool:
+    """Match stable metadata case IDs rather than family directory names."""
+    prefix = "" if prefix is None else str(prefix)
+    return not prefix or str(case_id).startswith(prefix)
 
 
 def read_xmf_time(path: Path) -> float:
@@ -560,6 +567,8 @@ def _field_query_bounds() -> Optional[Tuple[float, float, float, float, float, f
 
 def _filter_field_queries(coords: np.ndarray, values: np.ndarray, path: Path) -> Tuple[np.ndarray, np.ndarray]:
     finite = np.isfinite(coords).all(axis=1) & np.isfinite(values).all(axis=1)
+    if not finite.all():
+        raise ValueError(f"{path}: found {int((~finite).sum())}/{len(finite)} non-finite Eulerian nodes; invalid targets are not discarded silently")
     bounds = _field_query_bounds()
     keep = finite.copy()
     # Apply the configured spatial bounds only after rejecting non-finite coordinate or field values.
@@ -590,6 +599,8 @@ def read_field_grid_h5(path: Path, device="cpu") -> Tuple[np.ndarray, np.ndarray
             _validate_structured_node_order(coords, raw_velocity.shape[1:], path)
         vel = as_vec_field(raw_velocity)
         vorticity = as_vec_field(raw_vorticity) if raw_vorticity is not None else None
+    FIELD_SOURCE_DIAGNOSTICS.append({"path": str(path), "stored_W": raw_vorticity is not None,
+                                     "W_shape": None if raw_vorticity is None else list(raw_vorticity.shape)})
 
     resolution = round(len(coords) ** (1.0 / 3.0)) if len(coords) else -1
     if resolution < FIELD_GRID_POINTS or resolution ** 3 != len(coords) or len(vel) != len(coords):
@@ -2582,9 +2593,9 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     train_field_values = targets_velocity_field[field_stats_pair_ids][field_query_mask[field_stats_pair_ids]]
     if not train_field_values.size:
         raise RuntimeError("No field-reconstruction query points were available in the training split.")
-    train_field_values = train_field_values[np.isfinite(train_field_values).all(axis=1)]
-    if not train_field_values.size:
-        raise RuntimeError("No finite field-reconstruction targets were available in the training split.")
+    if not np.isfinite(train_field_values).all():
+        bad = np.argwhere(~np.isfinite(train_field_values))[:10].tolist()
+        raise ValueError(f"Training field targets contain non-finite values (first indices {bad}); refusing to hide invalid targets.")
     field_mean = np.mean(train_field_values, axis=0, keepdims=True).astype(np.float32)
     field_std = np.maximum(np.std(train_field_values, axis=0, keepdims=True), FIELD_STD_FLOOR).astype(np.float32)
     del train_field_values
@@ -2645,13 +2656,14 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
 
 
 def preprocess_generated_vpm_cases(source_root: Path, output_root: Path, *,
-                                   max_pairs_per_case=None, device="auto") -> Path:
+                                   max_pairs_per_case=None, device="auto", case_prefix=None) -> Path:
     """Build the same model archive directly from generated VPM train/validate/test cases."""
     global RAW_ROOT, FIELD_ROOT, FIELD_ROOT_CANDIDATES, OUT_ROOT, MERGED_ROOT
     global FIELD_H5_PATTERN, TRAIN_CASES, VAL_CASES, TEST_CASES, CASE_METADATA
     global ACTIVE_CASE_METADATA, ACTIVE_CONDITIONING_CHANNEL_NAMES, CONDITIONING_CHANNEL_NAMES
     global PARTICLE_INPUT_FEATURES, VPM_CASE_PATHS, ACTIVE_FIELD_QUERY_BOUNDS
     global PREPROCESS_DEVICE
+    global FIELD_SOURCE_DIAGNOSTICS
 
     source_root, output_root = Path(source_root).expanduser().resolve(), Path(output_root).expanduser().resolve()
     if not all((source_root / split).is_dir() for split in ("train", "test", "validate")):
@@ -2666,6 +2678,7 @@ def preprocess_generated_vpm_cases(source_root: Path, output_root: Path, *,
     OUT_ROOT, MERGED_ROOT = output_root, output_root / "merged_frames"
     FIELD_H5_PATTERN = "fields_fdom.*.h5"
     max_pairs = None if max_pairs_per_case is None or int(max_pairs_per_case) <= 0 else int(max_pairs_per_case)
+    case_prefix = str(case_prefix if case_prefix is not None else os.environ.get("CASE_PREFIX", "")).strip()
     requested_device = str(device).lower()
     if requested_device not in ("auto", "cpu", "cuda"):
         raise ValueError("device must be auto, cpu, or cuda")
@@ -2689,6 +2702,7 @@ def preprocess_generated_vpm_cases(source_root: Path, output_root: Path, *,
     ensure_dir(MERGED_ROOT)
 
     TRAIN_CASES, VAL_CASES, TEST_CASES = [], [], []
+    FIELD_SOURCE_DIAGNOSTICS = []
     CASE_METADATA, ACTIVE_CASE_METADATA, VPM_CASE_PATHS = {}, {}, {}
     split_cases = {"train": TRAIN_CASES, "validate": VAL_CASES, "test": TEST_CASES}
     selected_pairs_by_split = {"train": 0, "validate": 0, "test": 0}
@@ -2714,6 +2728,8 @@ def preprocess_generated_vpm_cases(source_root: Path, output_root: Path, *,
                 with metadata_path.open("rb") as stream:
                     metadata = tomllib.load(stream)
                 case_id = str(metadata.get("case_id", case_dir.name))
+                if not case_id_matches_prefix(case_id, case_prefix):
+                    continue
                 plan_entry = manifest_cases.get(case_id, {})
                 planned_split = str(plan_entry.get("split", directory_split))
                 if planned_split != directory_split:
@@ -2794,6 +2810,19 @@ def preprocess_generated_vpm_cases(source_root: Path, output_root: Path, *,
                     merged_path = out_case / f"{case_key}__frame_{frame}.npz"
                     np.savez_compressed(merged_path, **arrays)
                     merged.append(merged_path)
+    if case_prefix == "leapfrog_":
+        expected = {"train": 7, "validate": 4, "test": 4}
+        actual = {key: len(values) for key, values in split_cases.items()}
+        if actual != expected:
+            raise ValueError(f"Leapfrogging case selection does not match case_plan.toml: expected {expected}, got {actual}")
+        test_category_counts = defaultdict(int)
+        for case_key in TEST_CASES:
+            for category in CASE_METADATA[case_key].get("evaluation_categories", []):
+                test_category_counts[str(category)] += 1
+        expected_categories = {"in_regime": 2, "outside_training_regime": 1, "spatial_superresolution": 1}
+        found_categories = {key: test_category_counts.get(key, 0) for key in expected_categories}
+        if found_categories != expected_categories:
+            raise ValueError(f"Leapfrogging test categories do not match expected protocol: {found_categories}")
     if not merged:
         details = "\n".join(skipped[:20])
         raise RuntimeError(f"No complete generated VPM cases found under {source_root}. {details}")
@@ -2821,27 +2850,97 @@ def preprocess_generated_vpm_cases(source_root: Path, output_root: Path, *,
     if skipped:
         print(f"[VPM] skipped {len(skipped)} incomplete/unreadable cases; first: {skipped[:5]}")
     path = build_particle_evolution_dataset(sorted(merged, key=lambda value: (value.parent.name, value.name)))
+    stored_w_flags = {bool(item["stored_W"]) for item in FIELD_SOURCE_DIAGNOSTICS}
+    if len(stored_w_flags) > 1:
+        raise ValueError("Stored vorticity W is present for only part of the selected field files; refusing to mix stored and derived vorticity targets.")
     with np.load(path, allow_pickle=True) as archive:
         pair_counts = {"train": int(len(archive["train_pair_ids"])),
                        "validate": int(len(archive["val_pair_ids"])),
                        "test": int(len(archive["test_pair_ids"]))}
+        query_counts = np.asarray(archive["field_query_mask"], dtype=bool).sum(axis=1)
+        coordinate_min = np.asarray(archive["coord_min"], dtype=np.float64).reshape(3)
+        coordinate_max = coordinate_min + np.asarray(archive["coord_span"], dtype=np.float64).reshape(3)
+        field_coordinate_min = np.asarray(archive["field_coord_min"], dtype=np.float64).reshape(3)
+        field_coordinate_max = np.asarray(archive["field_coord_max"], dtype=np.float64).reshape(3)
+        channel_names = [str(value) for value in archive["field_target_names"]]
+        target_summary, ood_summary, correspondence_summary = {}, {}, {}
+        stats_percentiles = [0, 1, 5, 25, 50, 75, 95, 99, 100]
+        for split_name, pair_key in (("train", "train_pair_ids"), ("validate", "val_pair_ids"), ("test", "test_pair_ids")):
+            ids = np.asarray(archive[pair_key], dtype=np.int64)
+            mask = np.asarray(archive["field_query_mask"][ids], dtype=bool)
+            vals = np.asarray(archive["targets_velocity_field"][ids])[mask]
+            channel_stats = {}
+            if vals.size:
+                for column, name in enumerate(channel_names):
+                    values = vals[:, column]
+                    channel_stats[name] = {"mean": float(np.mean(values)), "std": float(np.std(values)),
+                        "min": float(np.min(values)), "max": float(np.max(values)),
+                        "percentiles": {str(p): float(np.percentile(values, p)) for p in stats_percentiles},
+                        "finite_fraction": float(np.isfinite(values).mean())}
+            target_summary[split_name] = channel_stats
+            coords = np.asarray(archive["query_coords"][ids])[mask]
+            ood_summary[split_name] = float(np.mean(np.any((coords < coordinate_min) | (coords > coordinate_max), axis=1))) if len(coords) else None
+            split_contexts = np.asarray(archive["pair_contexts"], dtype=object)[ids]
+            sources = []
+            for context in split_contexts:
+                context = context.item() if isinstance(context, np.ndarray) else context
+                sources.append(str(context.get("correspondence_source", "unknown")))
+            correspondence_summary[split_name] = dict(sorted({source: sources.count(source) for source in set(sources)}.items()))
+        channel_floor_count = int(np.sum(np.asarray(archive["field_std"]).reshape(-1) <= float(np.asarray(archive["field_std_floor"]).reshape(-1)[0])))
+        pair_ranges = list(archive["pair_ranges"])
+        ids_all = np.asarray(archive["particle_ids_t"])
+        starts = {(str(row[0]), str(row[1])): index for index, row in enumerate(pair_ranges)}
+        longest_chain = 0
+        for pair_id, row in enumerate(pair_ranges):
+            chain, frame = 1, str(row[2])
+            start, end = int(row[3]), int(row[4])
+            common = set(ids_all[start:end].tolist())
+            following = starts.get((str(row[0]), frame))
+            while following is not None:
+                next_row = pair_ranges[following]
+                ns, ne = int(next_row[3]), int(next_row[4])
+                common.intersection_update(ids_all[ns:ne].tolist())
+                if not common:
+                    break
+                chain += 1
+                frame = str(next_row[2])
+                following = starts.get((str(row[0]), frame))
+            longest_chain = max(longest_chain, chain)
     print(f"[VPM] processed pair counts: train={pair_counts['train']}, "
           f"validate={pair_counts['validate']}, test={pair_counts['test']}, "
           f"total={sum(pair_counts.values())}")
     summary = {
         "raw_root": str(source_root), "dataset_type": "generated_vpm", "n_merged_frames": len(merged),
+        "case_prefix_filter": case_prefix or None,
+        "case_ids_by_split": {"train": [CASE_METADATA[c]["case_id"] for c in TRAIN_CASES],
+                              "validate": [CASE_METADATA[c]["case_id"] for c in VAL_CASES],
+                              "test": [CASE_METADATA[c]["case_id"] for c in TEST_CASES]},
         "train_cases": TRAIN_CASES, "val_cases": VAL_CASES, "test_cases": TEST_CASES,
         "max_pairs_per_case": max_pairs, "pair_counts": pair_counts,
+        "transition_counts": pair_counts,
+        "field_query_counts": {"min": int(query_counts.min()), "mean": float(query_counts.mean()), "max": int(query_counts.max())},
+        "field_bounds": {"min": field_coordinate_min.tolist(), "max": field_coordinate_max.tolist()},
+        "training_coordinate_domain": {"min": coordinate_min.tolist(), "max": coordinate_max.tolist()},
+        "field_channel_statistics": target_summary,
+        "normalized_query_out_of_training_domain_fraction": ood_summary,
+        "field_std_floor_channels": channel_floor_count,
+        "field_time_alignment_contract": "Task-2 XMF time must match the current particle snapshot XMF time within configured tolerance.",
+        "available_consecutive_rollout_steps": int(longest_chain),
+        "particle_correspondence_sources_by_split": correspondence_summary,
+        "stored_W_diagnostics": {"files_with_W": sum(bool(item["stored_W"]) for item in FIELD_SOURCE_DIAGNOSTICS),
+                                 "files_without_W": sum(not bool(item["stored_W"]) for item in FIELD_SOURCE_DIAGNOSTICS),
+                                 "target_source": ("stored_W" if stored_w_flags == {True} else "derived_from_velocity_gradient"),
+                                 "entries": FIELD_SOURCE_DIAGNOSTICS},
         "selected_prefix_transition_counts": selected_pairs_by_split,
         "preprocessing_device": preprocess_device, "cuda_available": bool(cuda_available),
         "selection": "all consecutive paired frames" if max_pairs is None else
                      "first consecutive paired frames; no temporal frame skipping",
         "test_categories": {
-            case: CASE_METADATA[case].get("evaluation_categories", []) for case in TEST_CASES
+            CASE_METADATA[case]["case_id"]: CASE_METADATA[case].get("evaluation_categories", []) for case in TEST_CASES
         },
-        "spatial_resolution_test_cases": [case for case in TEST_CASES
+        "spatial_resolution_test_cases": [CASE_METADATA[case]["case_id"] for case in TEST_CASES
             if "spatial_superresolution" in CASE_METADATA[case].get("evaluation_categories", [])],
-        "temporal_resolution_test_cases": [case for case in TEST_CASES
+        "temporal_resolution_test_cases": [CASE_METADATA[case]["case_id"] for case in TEST_CASES
             if "temporal_superresolution" in CASE_METADATA[case].get("evaluation_categories", [])],
     }
     (OUT_ROOT / "preprocess_summary.json").write_text(json.dumps(summary, indent=2))

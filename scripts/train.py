@@ -83,6 +83,39 @@ def report_identity_retention(dataset, pair_ids, horizon, split_name):
             print(f"[identity] {split_name} {case}: " + ", ".join(values))
 
 
+def validate_warm_start_checkpoint(checkpoint, model_config, feature_names, target_names,
+                                   field_target_names, global_condition_channels, normalization):
+    """Validate all semantic interfaces needed before loading a Stage 1 model."""
+    checks = {
+        "feature_names": (list(checkpoint.get("feature_names", [])), list(feature_names)),
+        "target_names": (list(checkpoint.get("target_names", [])), list(target_names)),
+        "field_target_names": (list(checkpoint.get("field_target_names", [])), list(field_target_names)),
+        "global_condition_channels": (list(checkpoint.get("global_condition_channels", [])), list(global_condition_channels)),
+    }
+    for key, (found, expected) in checks.items():
+        if found != expected:
+            raise ValueError(f"Warm-start checkpoint {key} mismatch: checkpoint={found}, current={expected}")
+    warm_cfg = checkpoint.get("config", {}).get("model", {})
+    architecture_keys = ("latent_res", "hidden_channels", "fno_layers", "fno_modes", "gno_radius",
+                         "mlp_layers", "mlp_hidden", "query_pos_encoding_frequencies",
+                         "use_attention", "use_skip", "use_global_conditioning", "use_task_adapters",
+                         "predict_delta_u")
+    missing_architecture = [key for key in architecture_keys if key not in warm_cfg or key not in model_config]
+    if missing_architecture:
+        raise ValueError(f"Warm-start checkpoint/config is missing architecture fields: {missing_architecture}")
+    mismatches = {key: (warm_cfg.get(key), model_config.get(key)) for key in architecture_keys
+                  if warm_cfg.get(key) != model_config.get(key)}
+    if mismatches:
+        raise ValueError(f"Warm-start architecture mismatch: {mismatches}")
+    warm_stats = checkpoint.get("normalization", {})
+    for key in ("input_mean", "input_std", "residual_mean", "residual_std", "field_mean", "field_std",
+                "coord_min", "coord_span"):
+        if key not in warm_stats or not np.allclose(np.asarray(warm_stats[key]), np.asarray(normalization[key]),
+                                                     rtol=1e-6, atol=1e-8):
+            raise ValueError(f"Warm-start normalization mismatch for {key}; Stage 1 and Stage 2 must use identical training data and preprocessing.")
+    return checkpoint["model_state_dict"]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train the shared latent VPM GINO.")
     parser.add_argument("--config", default=str(HERE / "configs/default.yaml"))
@@ -145,6 +178,9 @@ def main():
             os.environ["PREPROC_STREAMING"] = "1"
             os.environ["MAX_PREPROCESS_PARTICLES"] = str(int(cfg["data"].get("max_particles", 2048)))
             os.environ["MAX_FIELD_QUERY_POINTS"] = str(int(cfg["data"].get("max_queries", 4096)))
+            if int(cfg["data"].get("max_queries", 4096)) >= 32 ** 3:
+                os.environ["FIELD_GRID_POINTS"] = "32"
+                os.environ["FIELD_QUERY_BOUNDS"] = "none"
             rss_cap = float(cfg.get("preprocessing", {}).get("max_rss_gb", 0) or 0)
             if rss_cap > 0:
                 os.environ["PREPROC_MAX_RSS_GB"] = str(rss_cap)
@@ -305,7 +341,7 @@ def main():
         validation_starts = validation_pair_ids
     else:
         validation_starts = (np.asarray([pid for pid in validation_pair_ids
-                                         if validation_chain_lengths[int(pid)] >= 2], dtype=np.int64)
+                                         if validation_chain_lengths[int(pid)] >= validation_horizon], dtype=np.int64)
                              if sequence_training else validation_pair_ids)
         if sequence_training and not validation_starts.size:
             raise ValueError("The validation split contains no chainable rollout starts.")
@@ -313,6 +349,7 @@ def main():
     # Future pairs remain available as context, including terminal transitions
     # that are not themselves used as validation starts.
     val_ds.allowed_pair_ids = set(validation_pair_ids.tolist())
+    training_cfg["validation_rollout_horizon"] = int(validation_horizon)
     print(f"[validation] longest consecutive chain: {validation_horizon} steps; "
           f"rollout starts: {len(validation_starts)}/{len(validation_pair_ids)}")
     retention_train = EvolutionDataset(
@@ -323,6 +360,19 @@ def main():
                               validation_horizon, "validation")
     model = GINOSharedLatent(len(in_names), delta_channels, len(data["field_target_names"]),
                              len(cfg["data"]["global_condition_channels"]), cfg["model"]).to(device)
+    init_checkpoint = str(training_cfg.get("init_checkpoint", "")).strip()
+    if init_checkpoint:
+        warm_path = Path(init_checkpoint).expanduser()
+        if not warm_path.is_absolute():
+            warm_path = (HERE / warm_path).resolve()
+        if not warm_path.is_file():
+            raise FileNotFoundError(f"training.init_checkpoint does not exist: {warm_path}")
+        warm = torch.load(warm_path, map_location=device, weights_only=False)
+        warm_state = validate_warm_start_checkpoint(
+            warm, cfg["model"], in_names, [str(x) for x in data["target_names"][:delta_channels]],
+            [str(x) for x in data["field_target_names"]], cfg["data"]["global_condition_channels"], vars(stats))
+        model.load_state_dict(warm_state, strict=True)
+        print(f"[warm start] loaded compatible Stage 1 weights from {warm_path}")
     latent = build_latent_grid(cfg["model"]["latent_res"], device)
     run_dir = (HERE / cfg["training"]["run_dir"]).resolve()
     norm_meta = {k: np.asarray(v).tolist() for k, v in vars(stats).items()}

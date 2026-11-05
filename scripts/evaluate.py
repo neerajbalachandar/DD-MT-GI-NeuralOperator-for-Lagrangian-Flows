@@ -17,7 +17,8 @@ from gino.data.reconstruction import rebuild_next_batch_inference
 from gino.data.hdf5 import (read_task2_velocity, read_task2_vorticity, native_field_plane, native_coordinate_plane,
                             highest_energy_y_plane)
 from gino.data.geometry import estimate_chordwise_bounds
-from gino.evaluation.metrics import mse, relative_l2, state_component_metrics, normalized_state_component_metrics
+from gino.evaluation.metrics import (mse, relative_l2, state_component_metrics,
+                                     normalized_state_component_metrics, field_group_metrics)
 from gino.dynamics.rollout import inference_rollout
 from gino.dynamics.state_transition import predict_next_state
 from gino.model.gino import GINOSharedLatent, build_latent_grid
@@ -25,8 +26,9 @@ from gino.utils import load_config, write_json
 from visualization.fields import (plot_native_ux_comparison, plot_normalized_ux_profiles,
                                   plot_velocity_magnitude_summary, plot_plane_snapshot_comparison)
 from visualization.temporal import (plot_temporal_errors, plot_rollout_snapshots,
-                                    plot_rmse_vs_phase_grid)
-from visualization.evaluation import plot_state_parity, plot_field_error_maps
+                                    plot_rmse_vs_phase_grid, plot_training_history)
+from visualization.evaluation import (plot_state_parity, plot_eulerian_field_comparison,
+                                       plot_eulerian_velocity_plane)
 
 
 def field_visual_plane_specs(case_name, native_xyz, native_velocity):
@@ -305,7 +307,8 @@ def main():
                     if field_available:
                         record.update({"field_mse": mse(field_prediction[..., :3], field_target[..., :3]),
                                        "field_relative_l2": relative_l2(field_prediction[..., :3], field_target[..., :3]),
-                                       "field_all_channel_mse": mse(field_prediction, field_target)})
+                                       "field_all_channel_mse": mse(field_prediction, field_target),
+                                       **field_group_metrics(field_prediction, field_target)})
                         if field_prediction.shape[-1] >= 15:
                             record.update({"vorticity_mse": mse(field_prediction[..., 12:15], field_target[..., 12:15]),
                                            "vorticity_relative_l2": relative_l2(field_prediction[..., 12:15],
@@ -613,6 +616,7 @@ def main():
     })
     if cfg["evaluation"].get("save_plots", True):
         plot_temporal_errors(records, rollout_records, out_dir)
+        plot_training_history(checkpoint.get("history", []), out_dir / "training_loss_history.png")
         snapshot_cases = sorted({case for case, _ in rollout_visuals})
         for case_name in snapshot_cases:
             snapshots = {horizon: item for (case, horizon), item in rollout_visuals.items()
@@ -632,6 +636,10 @@ def main():
             plot_native_ux_comparison(x_axis, z_axis, true_ux, predicted_ux,
                 out_dir / f"native_ux_comparison_{safe_case}_{role}.png",
                 phase=sample["phase"], physical_time=time_value)
+            plot_eulerian_velocity_plane(x_axis, z_axis, sample["true_velocity"],
+                sample["predicted_velocity"],
+                out_dir / f"native_eulerian_velocity_{safe_case}_{role}.png",
+                title=f"{case_name}: native-grid Eulerian velocity, phase={sample['phase']:.3f}")
             configured_chord = cfg["evaluation"].get("reference_chord", None)
             configured_leading_edge = cfg["evaluation"].get("reference_leading_edge_x", None)
             if configured_chord is None or configured_leading_edge is None:
@@ -705,9 +713,9 @@ def main():
                               out_dir / f"one_step_state_parity_{safe_case}.png",
                               title=f"{case_name}: one-step particle state")
             if "field_truth" in sample:
-                plot_field_error_maps(sample["coords"], sample["field_truth"], sample["field_prediction"],
-                                      out_dir / f"field_error_maps_{safe_case}.png",
-                                      title=f"{case_name}: one-step field prediction error")
+                plot_eulerian_field_comparison(sample["coords"], sample["field_truth"], sample["field_prediction"],
+                                               out_dir / f"eulerian_field_comparison_{safe_case}.png",
+                                               title=f"{case_name}: one-step Eulerian field reconstruction")
     if cfg["evaluation"].get("save_plots", True):
         plot_rmse_vs_phase_grid(records, out_dir)
     if records:

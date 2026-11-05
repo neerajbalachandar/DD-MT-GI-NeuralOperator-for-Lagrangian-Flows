@@ -14,11 +14,13 @@ def _rollout(model, initial_batch, latent_grid, normalization, steps, rebuild_ba
     states, fields = [], []
     selected_field_steps = None if field_steps is None else {int(value) for value in field_steps}
     for step in range(steps):
-        result = predict_next_state(model, batch, latent_grid, normalization)
+        save_field = collect_fields and (selected_field_steps is None or step + 1 in selected_field_steps)
+        result = predict_next_state(model, batch, latent_grid, normalization,
+                                    decode_output_field=save_field)
         predicted, field = result["predicted_state"], result["particle_field_phys"]
-        query_field = result["field_phys"]
         states.append(predicted.detach().cpu() if store_on_cpu else predicted)
-        if collect_fields and (selected_field_steps is None or step + 1 in selected_field_steps):
+        if save_field:
+            query_field = result["field_phys"]
             fields.append(query_field.detach().cpu() if store_on_cpu else query_field)
         if step + 1 < steps:
             batch = rebuild_batch(batch, predicted.detach() if detach_generated else predicted,

@@ -1,6 +1,7 @@
 import torch
+import pytest
 
-from gino.training.losses import normalized_rollout_loss
+from gino.training.losses import normalized_rollout_loss, grouped_field_loss
 from gino.training.noise import perturb_flow_inputs, random_walk_noise, noise_for_rollout_input
 from gino.training.scheduled_sampling import (choose_predicted_flow_inputs,
     scheduled_sampling_probability, teacher_input_at)
@@ -74,3 +75,23 @@ def test_normalized_rollout_loss_scales_each_state_component():
     target = torch.tensor([[[[1.0, 2.0]]]])
     loss = normalized_rollout_loss(predicted, target, mean=[0.0, 0.0], std=[1.0, 2.0])
     torch.testing.assert_close(loss, torch.tensor(1.0))
+
+
+def test_grouped_field_loss_slices_canonical_channels_and_weights_groups():
+    target = torch.ones((1, 4, 15))
+    prediction = target.clone()
+    prediction[..., :3] += 1.0
+    prediction[..., 3:12] += 2.0
+    prediction[..., 12:15] += 3.0
+    aggregate, groups = grouped_field_loss(prediction, target)
+    torch.testing.assert_close(groups["velocity"], torch.tensor(1.0))
+    torch.testing.assert_close(groups["gradient"], torch.tensor(2.0))
+    torch.testing.assert_close(groups["vorticity"], torch.tensor(3.0))
+    torch.testing.assert_close(aggregate, torch.tensor(2.3))
+
+
+def test_grouped_field_loss_rejects_invalid_targets_instead_of_masking():
+    target = torch.ones((1, 2, 15))
+    target[0, 0, 0] = float("nan")
+    with pytest.raises(ValueError, match="NaN or infinite"):
+        grouped_field_loss(torch.zeros_like(target), target)

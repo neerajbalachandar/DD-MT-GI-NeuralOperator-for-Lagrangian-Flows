@@ -2,12 +2,12 @@ import torch
 from .physics import physical_transition
 
 
-def predict_next_state(model, batch, latent_grid, normalization, dt=None):
+def predict_next_state(model, batch, latent_grid, normalization, dt=None, decode_output_field=True):
     """Canonical model + field denormalization + physical and residual transition."""
     encoded = model.encode_process(batch["input_geom"], latent_grid, batch["x"], batch["global_params"])
     residual_norm = model.decode_particle(encoded)
     particle_field_norm = model.decode_field(encoded, batch.get("particle_queries", batch["input_geom"]))
-    field_norm = model.decode_field(encoded, batch["output_queries"])
+    field_norm = model.decode_field(encoded, batch["output_queries"]) if decode_output_field else None
     residual = normalization.denormalize_residual(residual_norm)[..., :7]
     field = normalization.denormalize_field(particle_field_norm)
     velocity, grad = field[..., :3], field[..., 3:12].reshape(*field.shape[:-1], 3, 3)
@@ -17,5 +17,6 @@ def predict_next_state(model, batch, latent_grid, normalization, dt=None):
         step = step.unsqueeze(-1)
     base = physical_transition(state, velocity, grad, step)
     return {"predicted_state": base + residual, "base_state": base, "residual": residual,
-            "field_norm": field_norm, "field_phys": normalization.denormalize_field(field_norm),
+            "field_norm": field_norm, "field_phys": (normalization.denormalize_field(field_norm)
+                                                         if field_norm is not None else None),
             "particle_field_norm": particle_field_norm, "particle_field_phys": field}

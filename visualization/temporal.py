@@ -47,34 +47,43 @@ def plot_one_step_loss_vs_time(records, output_path, bins=20):
 
 
 def plot_rollout_error_by_step(records, output_path):
-    """Aggregate within each test simulation, then show mean +/- std across cases."""
+    """Plot all particle-state groups across long autoregressive rollouts."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics = (("position_normalized_relative_l2", "Position"),
+               ("circulation_normalized_relative_l2", "Circulation"),
+               ("sigma_normalized_relative_l2", "Core size"))
     by_case_horizon = {}
     for row in records:
-        value = row.get("position_relative_l2")
-        if value is None or not np.isfinite(value):
-            continue
         key = (str(row.get("case", "unknown")), int(row["horizon"]))
-        by_case_horizon.setdefault(key, []).append(float(value))
-    by_horizon = {}
-    for (_, horizon), values in by_case_horizon.items():
-        by_horizon.setdefault(horizon, []).append(float(np.mean(values)))
-    horizons = np.asarray(sorted(by_horizon), dtype=int)
+        by_case_horizon.setdefault(key, []).append(row)
+    horizons = np.asarray(sorted({int(row["horizon"]) for row in records}), dtype=int)
     if not len(horizons):
         return
-    means = np.asarray([np.mean(by_horizon[int(h)]) for h in horizons])
-    stds = np.asarray([np.std(by_horizon[int(h)]) for h in horizons])
     fig, axis = plt.subplots(figsize=(8, 5.2), constrained_layout=True)
-    axis.plot(horizons, means, marker="o", color="#176b87", label="Mean across test simulations")
-    axis.fill_between(horizons, np.maximum(means - stds, 0.0), means + stds,
-                      color="#176b87", alpha=0.2, label=" +/- 1 std across simulations")
+    colors = ("#176b87", "#d66b35", "#568b50")
+    for (metric, label), color in zip(metrics, colors):
+        by_horizon = {}
+        for (case, horizon), rows in by_case_horizon.items():
+            values = [float(row[metric]) for row in rows
+                      if row.get(metric) is not None and np.isfinite(row[metric])]
+            if values:
+                by_horizon.setdefault(horizon, []).append(float(np.mean(values)))
+        valid = np.asarray(sorted(by_horizon), dtype=int)
+        if not len(valid):
+            continue
+        mean = np.asarray([np.mean(by_horizon[int(h)]) for h in valid])
+        std = np.asarray([np.std(by_horizon[int(h)]) for h in valid])
+        axis.plot(valid, mean, marker="o", color=color, label=label)
+        axis.fill_between(valid, np.maximum(mean - std, 1e-8), mean + std,
+                          color=color, alpha=0.15)
     axis.set_xlabel("Autoregressive rollout step k")
-    axis.set_ylabel("Particle position relative L2 error")
-    axis.set_title("Long-horizon rollout error")
+    axis.set_ylabel("Normalized relative L2 error")
+    axis.set_title("Long-horizon particle-state rollout error")
     axis.set_xticks(horizons)
     axis.grid(alpha=0.22)
-    axis.legend(frameon=False)
+    axis.set_yscale("log")
+    axis.legend(frameon=False, title="State component; mean ± case std")
     fig.savefig(output_path, dpi=160, bbox_inches="tight")
     plt.close(fig)
 
@@ -84,6 +93,45 @@ def plot_temporal_errors(one_step, rollout, output_dir):
     output_dir = Path(output_dir)
     plot_one_step_loss_vs_time(one_step, output_dir / "one_step_loss_vs_time.png")
     plot_rollout_error_by_step(rollout, output_dir / "rollout_loss_vs_step.png")
+
+
+def plot_training_history(history, output_path):
+    """Show one-step state/field groups and autoregressive losses over epochs."""
+    if not history:
+        return
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    panels = [
+        (("state_loss", "State"), ("field_loss", "Grouped field")),
+        (("field_velocity_loss", "Velocity"), ("field_gradient_loss", "Velocity gradient"),
+         ("field_vorticity_loss", "Vorticity")),
+        (("rollout_loss", "Differentiable rollout"), ("pushforward_loss", "Pushforward")),
+    ]
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.8), constrained_layout=True)
+    colors = {"train": "#176b87", "val": "#d66b35"}
+    for axis, panel in zip(axes, panels):
+        for metric, label in panel:
+            for split in ("train", "val"):
+                key = f"{split}_{metric}"
+                epochs, values = [], []
+                for row in history:
+                    value = row.get(key)
+                    if value is not None and np.isfinite(value) and float(value) > 0:
+                        epochs.append(int(row["epoch"]))
+                        values.append(float(value))
+                if values:
+                    axis.plot(epochs, values, color=colors[split], alpha=0.9 if metric == panel[0][0] else 0.65,
+                              linestyle="-" if split == "train" else "--",
+                              label=f"{label} {split}")
+        axis.set_yscale("log")
+        axis.set_xlabel("Epoch")
+        axis.set_ylabel("Loss (log scale)")
+        axis.grid(True, which="both", alpha=0.2)
+        if axis.lines:
+            axis.legend(frameon=False, fontsize=8)
+    fig.suptitle("Training and validation loss history")
+    fig.savefig(output_path, dpi=170, bbox_inches="tight")
+    plt.close(fig)
 
 
 def plot_rmse_vs_phase_grid(records, output_path, phase_key="phase"):

@@ -7,8 +7,15 @@ from gino.data.preprocessing_pipeline import (
     match_task2_xmf_time,
     _require_scalar,
     _validate_structured_node_order,
+    case_id_matches_prefix,
     validate_task2_xmf_layout,
 )
+
+
+def test_case_prefix_filter_uses_stable_case_id():
+    assert case_id_matches_prefix("leapfrog_spatial_N320_d1p000_g1p000", "leapfrog_")
+    assert not case_id_matches_prefix("perturbed_N320_amp0p100_mode3", "leapfrog_")
+    assert not case_id_matches_prefix("isolated_N320_g20p000_sigma0p080", "leapfrog_")
 
 
 def test_task2_xmf_declares_65_cubed_nodal_data(tmp_path):

@@ -48,6 +48,18 @@ def test_rollout_cannot_predict_past_context_chain():
         autoregressive_rollout(IncrementModel(), batch, torch.zeros(1, 1, 3), stats, 2, lambda *args: batch)
 
 
+def test_rollout_supports_horizons_greater_than_eight():
+    stats = NormalizationStats(torch.zeros(1), torch.ones(1), torch.zeros(7), torch.ones(7),
+                               torch.zeros(12), torch.ones(12), torch.zeros(3), torch.ones(3))
+    batch = {"input_geom": torch.zeros(1, 1, 3), "output_queries": torch.zeros(1, 1, 3),
+             "x": torch.zeros(1, 1, 1), "global_params": torch.zeros(1, 1),
+             "state_phys": torch.zeros(1, 1, 7), "dt": torch.tensor([0.]),
+             "rollout_contexts": [{} for _ in range(11)]}
+    states, _ = autoregressive_rollout(IncrementModel(), batch, torch.zeros(1, 1, 3), stats, 12,
+                                        lambda old, state, field: {**old, "state_phys": state})
+    assert states.shape == (1, 12, 1, 7)
+
+
 def test_state_transition_exposes_physical_base_and_residual():
     class ConstantModel:
         def encode_process(self, geom, latent, x, global_params):

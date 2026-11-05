@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from .losses import combined_loss, field_loss, state_loss, normalized_rollout_loss
+from .losses import combined_loss, grouped_field_loss, state_loss, normalized_rollout_loss
 from .noise import perturb_flow_inputs, random_walk_noise, noise_for_rollout_input
 from .scheduled_sampling import scheduled_sampling_probability, choose_predicted_flow_inputs, teacher_input_at
 from gino.data.reconstruction import rebuild_next_batch_training
@@ -65,7 +65,9 @@ class Trainer:
 
     def _epoch(self, loader, train, epoch=1):
         self.model.train(train)
-        totals = {k: [] for k in ("total_loss", "state_loss", "field_loss", "rollout_loss", "pushforward_loss", "gradient_norm", "effective_horizon")}
+        totals = {k: [] for k in ("total_loss", "state_loss", "field_loss", "field_velocity_loss",
+                                  "field_gradient_loss", "field_vorticity_loss", "rollout_loss",
+                                  "pushforward_loss", "gradient_norm", "effective_horizon")}
         accum = max(int(self.config.get("gradient_accumulation_steps", 1)), 1)
         max_probability = float(self.config.get("scheduled_sampling_max_probability", 0.3))
         use_scheduled_sampling = bool(self.config.get("use_scheduled_sampling", False))
@@ -73,7 +75,13 @@ class Trainer:
             epoch, max_probability, self.config.get("scheduled_sampling_ramp_epochs", 30)
         ) if train and use_scheduled_sampling else 0.0
         schedule = self.config.get("rollout_horizon_schedule", [1])
-        active_horizon = min(int(self.config.get("rollout_horizon_max", max(schedule))), horizon_for_epoch(epoch, self.config.get("epochs", 1), schedule))
+        if train:
+            active_horizon = min(int(self.config.get("rollout_horizon_max", max(schedule))),
+                                 horizon_for_epoch(epoch, self.config.get("epochs", 1), schedule))
+        else:
+            # Keep checkpoint selection comparable across epochs: validation always
+            # scores the same longest supported chain, independent of the curriculum.
+            active_horizon = max(1, int(self.config.get("validation_rollout_horizon", 1)))
         # Evaluate the autoregressive objective on validation data as well, so
         # checkpoint selection cannot silently optimize only the one-step task.
         use_rollout = bool(self.config.get("use_rollout_loss", False))
@@ -118,8 +126,15 @@ class Trainer:
                 pred, field = self.model(batch["input_geom"], self.latent_grid, batch["output_queries"], batch["x"], batch["global_params"], batch_dict=batch)
                 state_term = state_loss(pred[..., :batch["delta_target"].shape[-1]], batch["delta_target"])
                 has_field_target = bool(batch.get("field_available", True))
-                field_term = (field_loss(field, batch["field_target"], bool(self.config.get("use_relative_l2_field_loss", False)))
-                              if has_field_target else None)
+                if has_field_target:
+                    field_term, field_groups = grouped_field_loss(
+                        field, batch["field_target"],
+                        {"velocity": self.config.get("field_velocity_weight", 1.0),
+                         "gradient": self.config.get("field_gradient_weight", 0.5),
+                         "vorticity": self.config.get("field_vorticity_weight", 0.1)},
+                        relative=bool(self.config.get("use_relative_l2_field_loss", True)))
+                else:
+                    field_term, field_groups = None, {}
                 one_step = combined_loss(state_term if self.config.get("use_state_loss", True) else None,
                                       field_term if self.config.get("use_field_loss", True) else None,
                                       weights={"state": self.config.get("state_loss_weight", 1.0), "field": self.config.get("field_loss_weight", 1.0)},
@@ -193,6 +208,10 @@ class Trainer:
             totals["state_loss"].append(state_term.detach())
             if field_term is not None:
                 totals["field_loss"].append(field_term.detach())
+                for name, metric in (("velocity", "field_velocity_loss"),
+                                     ("gradient", "field_gradient_loss"),
+                                     ("vorticity", "field_vorticity_loss")):
+                    totals[metric].append(field_groups[name].detach())
             totals["rollout_loss"].append(rollout_term.detach() if rollout_term is not None else total.detach().new_zeros(()))
             totals["pushforward_loss"].append(pushforward_term.detach() if pushforward_term is not None else total.detach().new_zeros(()))
             if grad_norm is not None:
@@ -263,6 +282,7 @@ class Trainer:
                    "learning_rate": float(self.optimizer.param_groups[0]["lr"]),
                    "train_effective_rollout_horizon": train_metrics["effective_horizon"],
                    "rollout_horizon": active_horizon if self.config.get("use_rollout_loss") or self.config.get("use_pushforward") else 1,
+                   "validation_rollout_horizon": int(self.config.get("validation_rollout_horizon", 1)),
                    "scheduled_sampling_probability": scheduled_sampling_probability(
                        epoch, max_probability, self.config.get("scheduled_sampling_ramp_epochs", 30)
                    ) if self.config.get("use_scheduled_sampling") else 0.0,
@@ -270,8 +290,10 @@ class Trainer:
                    "noise_walk_std": float(self.config.get("gns_walk_std", 0.0)) if self.config.get("use_gns_noise") else 0.0,
                    "log_state_variance": float(self.model.log_delta_var.detach().cpu()),
                    "log_field_variance": float(self.model.log_field_var.detach().cpu()),
-                   "state_task_weight": float(torch.exp(-self.model.log_delta_var.detach()).cpu()),
-                   "field_task_weight": float(torch.exp(-self.model.log_field_var.detach()).cpu())}
+                   "state_task_weight": (float(torch.exp(-self.model.log_delta_var.detach()).cpu())
+                       if self.config.get("use_homoscedastic_weighting", True) else float(self.config.get("state_loss_weight", 1.0))),
+                   "field_task_weight": (float(torch.exp(-self.model.log_field_var.detach()).cpu())
+                       if self.config.get("use_homoscedastic_weighting", True) else float(self.config.get("field_loss_weight", 1.0)))}
             self.history.append(row)
             print(
                 f"epoch {epoch:03d} | train {train_loss:.6g} | val {val_loss:.6g} | "
