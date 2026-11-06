@@ -26,16 +26,16 @@ model:
   use_task_adapters: true
   predict_delta_u: true
 training:
-  run_dir: runs/leapfrogging_rollout
-  init_checkpoint: runs/leapfrogging_pretrain/best_model.pt
+  run_dir: runs/leapfrogging_rollout_fieldbalanced
+  init_checkpoint: runs/leapfrogging_pretrain_fieldbalanced/best_model.pt
   epochs: 100
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 1
   dataloader_num_workers: 8
   validation_every_n_epochs: 1
   learning_rate: 0.00002
   weight_decay: 0.00003
   scheduler: plateau
-  grad_clip_norm: 0.5
+  grad_clip_norm: 5.0
   early_stopping_patience: 25
   mixed_precision: false
   use_state_loss: true
@@ -46,10 +46,10 @@ training:
   use_gns_noise: false
   use_homoscedastic_weighting: false
   state_loss_weight: 1.0
-  field_loss_weight: 1.0
+  field_loss_weight: 2.0
   field_velocity_weight: 1.0
-  field_gradient_weight: 0.5
-  field_vorticity_weight: 0.1
+  field_gradient_weight: 1.0
+  field_vorticity_weight: 1.0
   use_relative_l2_field_loss: true
   rollout_weight: 0.05
   pushforward_weight: 0.05

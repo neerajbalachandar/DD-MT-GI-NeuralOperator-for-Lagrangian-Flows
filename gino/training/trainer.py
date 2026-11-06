@@ -67,7 +67,8 @@ class Trainer:
         self.model.train(train)
         totals = {k: [] for k in ("total_loss", "state_loss", "field_loss", "field_velocity_loss",
                                   "field_gradient_loss", "field_vorticity_loss", "rollout_loss",
-                                  "pushforward_loss", "gradient_norm", "effective_horizon")}
+                                  "pushforward_loss", "gradient_norm", "effective_horizon",
+                                  "field_supervision_fraction")}
         accum = max(int(self.config.get("gradient_accumulation_steps", 1)), 1)
         max_probability = float(self.config.get("scheduled_sampling_max_probability", 0.3))
         use_scheduled_sampling = bool(self.config.get("use_scheduled_sampling", False))
@@ -126,6 +127,7 @@ class Trainer:
                 pred, field = self.model(batch["input_geom"], self.latent_grid, batch["output_queries"], batch["x"], batch["global_params"], batch_dict=batch)
                 state_term = state_loss(pred[..., :batch["delta_target"].shape[-1]], batch["delta_target"])
                 has_field_target = bool(batch.get("field_available", True))
+                totals["field_supervision_fraction"].append(float(has_field_target))
                 if has_field_target:
                     field_term, field_groups = grouped_field_loss(
                         field, batch["field_target"],
@@ -298,6 +300,9 @@ class Trainer:
             print(
                 f"epoch {epoch:03d} | train {train_loss:.6g} | val {val_loss:.6g} | "
                 f"state {train_metrics['state_loss']:.6g} | field {train_metrics['field_loss']:.6g} | "
+                f"field groups (u/grad/omega) {train_metrics['field_velocity_loss']:.4g}/"
+                f"{train_metrics['field_gradient_loss']:.4g}/{train_metrics['field_vorticity_loss']:.4g} | "
+                f"field coverage {train_metrics['field_supervision_fraction']:.1%} | "
                 f"rollout {train_metrics['rollout_loss']:.6g} | pushforward {train_metrics['pushforward_loss']:.6g} | "
                 f"H {row['rollout_horizon']} (effective {train_metrics['effective_horizon']:.2f}) | "
                 f"sampling {row['scheduled_sampling_probability']:.3f} | "

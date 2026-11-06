@@ -34,16 +34,18 @@ model:
   predict_delta_u: true
 
 training:
-  run_dir: runs/leapfrogging_pretrain
+  run_dir: runs/leapfrogging_pretrain_fieldbalanced
   epochs: 120
   batch_size: 1
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 1
   dataloader_num_workers: 8
   validation_every_n_epochs: 1
   learning_rate: 0.00005
   weight_decay: 0.00003
   scheduler: plateau
-  grad_clip_norm: 0.5
+  # The saved runs averaged pre-clip norms around 9-11, so 0.5 clipped nearly
+  # every update. A 5.0 cap retains stability without shrinking updates so hard.
+  grad_clip_norm: 5.0
   early_stopping_patience: 30
   mixed_precision: false
   use_state_loss: true
@@ -51,11 +53,11 @@ training:
   # Fixed task weights keep a learned uncertainty weight from hiding weak field fit.
   use_homoscedastic_weighting: false
   state_loss_weight: 1.0
-  field_loss_weight: 1.0
+  field_loss_weight: 2.0
   # Field target channels are [u(0:3), grad(u)(3:12), omega(12:15)].
   field_velocity_weight: 1.0
-  field_gradient_weight: 0.5
-  field_vorticity_weight: 0.1
+  field_gradient_weight: 1.0
+  field_vorticity_weight: 1.0
   use_relative_l2_field_loss: true
   use_rollout_loss: false
   use_pushforward: false
