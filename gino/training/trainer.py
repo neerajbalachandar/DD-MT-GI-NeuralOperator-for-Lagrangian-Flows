@@ -79,6 +79,10 @@ class Trainer:
                                   "field_gradient_loss", "field_vorticity_loss", "rollout_loss",
                                   "pushforward_loss", "gradient_norm", "effective_horizon",
                                   "field_supervision_fraction")}
+        category_names = ("uniform", "vortex", "trajectory")
+        for group in ("velocity", "gradient", "vorticity"):
+            for category in category_names:
+                totals[f"field_{group}_{category}_loss"] = []
         accum = max(int(self.config.get("gradient_accumulation_steps", 1)), 1)
         max_probability = float(self.config.get("scheduled_sampling_max_probability", 0.3))
         use_scheduled_sampling = bool(self.config.get("use_scheduled_sampling", False))
@@ -148,8 +152,10 @@ class Trainer:
                 has_field_target = bool(batch.get("field_available", True))
                 totals["field_supervision_fraction"].append(float(has_field_target))
                 if has_field_target:
-                    _, field_groups = grouped_field_loss(field, batch["field_target"])
-                    field_term = sum(field_groups.values())
+                    _, field_groups = grouped_field_loss(
+                        field, batch["field_target"], categories=batch.get("field_query_categories"),
+                        category_weights=self.config.get("field_category_loss_weights", [0.4, 0.4, 0.2]))
+                    field_term = sum(field_groups[name] for name in ("velocity", "gradient", "vorticity"))
                 else:
                     field_term, field_groups = None, {}
                 task_losses = {}
@@ -157,7 +163,8 @@ class Trainer:
                     task_losses["physical_state"] = state_term
                     task_losses["residual"] = residual_term
                 if self.config.get("use_field_loss", True) and has_field_target:
-                    task_losses.update({f"field_{key}": value for key, value in field_groups.items()})
+                    task_losses.update({f"field_{key}": field_groups[key]
+                                        for key in ("velocity", "gradient", "vorticity")})
                 variances = {"physical_state": self.model.log_physical_state_var,
                              "residual": self.model.log_residual_var,
                              "field_velocity": self.model.log_velocity_var,
@@ -240,6 +247,11 @@ class Trainer:
                                      ("gradient", "field_gradient_loss"),
                                      ("vorticity", "field_vorticity_loss")):
                     totals[metric].append(field_groups[name].detach())
+                for group in ("velocity", "gradient", "vorticity"):
+                    for category, label in enumerate(category_names):
+                        value = field_groups.get(f"{group}_category_{category}")
+                        if value is not None:
+                            totals[f"field_{group}_{label}_loss"].append(value.detach())
             totals["rollout_loss"].append(rollout_term.detach() if rollout_term is not None else total.detach().new_zeros(()))
             totals["pushforward_loss"].append(pushforward_term.detach() if pushforward_term is not None else total.detach().new_zeros(()))
             if grad_norm is not None:
@@ -265,6 +277,10 @@ class Trainer:
                 metric_means.append(torch.stack(tensors).mean())
         values = torch.stack(metric_means).detach().cpu().tolist()
         metrics = dict(zip(totals, map(float, values)))
+        for key, items in totals.items():
+            if "_uniform_loss" in key or "_vortex_loss" in key or "_trajectory_loss" in key:
+                if not items:
+                    metrics.pop(key, None)
         metrics.update(data_time=t_data, fwd_time=t_fwd, bwd_time=t_bwd)
         return metrics
 

@@ -34,18 +34,38 @@ def field_loss(pred, target, relative=False):
     return relative_l2(pred, target) if relative else F.mse_loss(pred, target)
 
 
-def grouped_field_loss(pred, target, weights=None, relative=False):
-    """Return independently averaged normalized MSEs for u, grad(u), and omega."""
+def grouped_field_loss(pred, target, weights=None, relative=False, categories=None, category_weights=None):
+    """Group normalized MSE, optionally balancing spatial query categories."""
     if pred.shape != target.shape or pred.shape[-1] != 15:
         raise ValueError(f"Expected matching field tensors with 15 channels, got {pred.shape} and {target.shape}")
     if not torch.isfinite(pred).all() or not torch.isfinite(target).all():
         raise ValueError("Field prediction/target contains NaN or infinite values")
     groups = {"velocity": slice(0, 3), "gradient": slice(3, 12), "vorticity": slice(12, 15)}
-    terms = {name: F.mse_loss(pred[..., channels], target[..., channels])
-             for name, channels in groups.items()}
-    # `weights` and `relative` remain accepted for old callers, but intentionally
-    # do not alter the normalized-MSE objective or task balancing.
+    if categories is None:
+        terms = {name: F.mse_loss(pred[..., channels], target[..., channels])
+                 for name, channels in groups.items()}
+        return sum(terms.values()), terms
+    categories = torch.as_tensor(categories, device=pred.device).long()
+    if categories.shape != pred.shape[:-1]:
+        raise ValueError(f"Field category shape {categories.shape} does not align with queries {pred.shape[:-1]}")
+    weights = torch.as_tensor(category_weights if category_weights is not None else (.4, .4, .2),
+                              dtype=pred.dtype, device=pred.device)
+    raw, terms = {}, {}
+    for name, channels in groups.items():
+        cat_losses = {}
+        for category in range(3):
+            mask = categories == category
+            if mask.any():
+                cat_losses[category] = F.mse_loss(pred[..., channels][mask], target[..., channels][mask])
+                raw[f"{name}_category_{category}"] = cat_losses[category]
+        active = torch.as_tensor(list(cat_losses), device=pred.device, dtype=torch.long)
+        active_weights = weights[active]
+        active_weights = active_weights / active_weights.sum().clamp_min(1e-12)
+        terms[name] = sum(active_weights[i] * loss for i, loss in enumerate(cat_losses.values()))
+    terms.update(raw)
     aggregate = sum(terms.values())
+    # Only physical groups contribute to the learned task objective; raw category losses are diagnostics.
+    aggregate = sum(terms[name] for name in groups)
     return aggregate, terms
 
 

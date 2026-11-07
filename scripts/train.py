@@ -179,8 +179,18 @@ def main():
                     rebuild_reason = "archive case IDs do not match merged-frame folders"
                 elif not {"omega_x", "omega_y", "omega_z"}.issubset(field_names):
                     rebuild_reason = "archive predates the velocity/vorticity target update"
-                elif schema_version < 3:
-                    rebuild_reason = "archive predates the memory-bounded preprocessing format"
+                elif schema_version < 4:
+                    rebuild_reason = "archive predates spatial-query metadata"
+                elif "field_query_categories" not in archive:
+                    rebuild_reason = "archive has no spatial sampling category labels"
+                elif str(np.asarray(archive.get("field_sampling_mode", "regular_grid")).reshape(-1)[0]) != str(cfg["data"].get("field_sampling", {}).get("mode", "regular_grid")):
+                    rebuild_reason = "archive uses a different field sampling strategy"
+                elif str(np.asarray(archive.get("field_domain_mode", "particle_support_overlap")).reshape(-1)[0]) != str(cfg["data"].get("field_domain_mode", "full_native_grid")):
+                    rebuild_reason = "archive uses a different field query domain"
+                elif "field_sampling_config_json" not in archive or json.loads(str(np.asarray(archive["field_sampling_config_json"]).reshape(-1)[0])) != cfg["data"].get("field_sampling", {"mode": "regular_grid"}):
+                    rebuild_reason = "archive uses different field sampling parameters"
+                elif int(np.asarray(archive["max_field_query_points"]).reshape(-1)[0]) != int(cfg["data"].get("max_queries", 4096)):
+                    rebuild_reason = "archive uses a different field query budget"
             except Exception as exc:
                 rebuild_reason = f"archive could not be validated ({exc})"
         if rebuild_reason:
@@ -188,9 +198,6 @@ def main():
             os.environ["PREPROC_STREAMING"] = "1"
             os.environ["MAX_PREPROCESS_PARTICLES"] = str(int(cfg["data"].get("max_particles", 2048)))
             os.environ["MAX_FIELD_QUERY_POINTS"] = str(int(cfg["data"].get("max_queries", 4096)))
-            if int(cfg["data"].get("max_queries", 4096)) >= 32 ** 3:
-                os.environ["FIELD_GRID_POINTS"] = "32"
-                os.environ["FIELD_QUERY_BOUNDS"] = "none"
             rss_cap = float(cfg.get("preprocessing", {}).get("max_rss_gb", 0) or 0)
             if rss_cap > 0:
                 os.environ["PREPROC_MAX_RSS_GB"] = str(rss_cap)
@@ -199,7 +206,10 @@ def main():
             dataset_path = run_preprocessing_from_merged_frames(
                 merged_root, dataset_path.parent,
                 raw_root=cfg["data"].get("native_task2_root"),
-                device=str(cfg.get("device", "auto")))
+                device=str(cfg.get("device", "auto")),
+                field_sampling=cfg["data"].get("field_sampling", {"mode": "regular_grid"}),
+                field_domain_mode=cfg["data"].get("field_domain_mode", "full_native_grid"),
+                max_queries=int(cfg["data"].get("max_queries", 4096)))
     if not dataset_path.is_file():
         raise FileNotFoundError(f"Processed training archive not found: {dataset_path}")
     print(f"[dataset] training archive: {dataset_path}", flush=True)

@@ -284,6 +284,8 @@ class EvolutionDataset(Dataset):
         fmean = np.asarray(self.data["field_mean"], dtype=np.float32).reshape(-1) if self.normalization is None else self.normalization.field_mean
         fstd = np.maximum(np.asarray(self.data["field_std"], dtype=np.float32).reshape(-1), 1e-8) if self.normalization is None else np.maximum(self.normalization.field_std, 1e-8)
         field = (np.asarray(self.data["targets_velocity_field"][pid, qmask], dtype=np.float32) - fmean) / fstd
+        field_categories = (np.asarray(self.data["field_query_categories"][pid, qmask], dtype=np.int64)
+                            if "field_query_categories" in self.data else np.zeros(len(qmask), dtype=np.int64))
         if not field_available:
             coords, queries = xyz[:1].copy(), geom[:1].copy()
             field = np.zeros((1, len(fmean)), dtype=np.float32)
@@ -324,6 +326,7 @@ class EvolutionDataset(Dataset):
             rollout_states = np.concatenate((next_state[None, :, :7], future), axis=0)
             q_common = min([len(queries)] + [len(x) for x in future_queries])
             queries, coords, field = queries[:q_common], coords[:q_common], field[:q_common]
+            field_categories = field_categories[:q_common]
             future_queries = np.stack([x[:q_common] for x in future_queries], axis=0)
             future_query_xyz = np.stack([x[:q_common] for x in future_query_xyz], axis=0)
             future_fields = np.stack([x[:q_common] for x in future_fields], axis=0)
@@ -347,7 +350,7 @@ class EvolutionDataset(Dataset):
         return {"pair_id": pid, "input_geom": geom, "output_queries": queries, "x": x,
                 "global_params": np.asarray(global_values, dtype=np.float32), "state_phys": full[:, state_idx],
                 "delta_target": (residuals - residual_mean) / residual_std,
-                "field_target": field, "field_available": field_available,
+                "field_target": field, "field_query_categories": field_categories, "field_available": field_available,
                 "dt": float(context.get("dt", 0.0034)),
                 "next_state_phys": next_state[:, :7], "one_step_target": next_state[:, :7],
                 "rollout_state_targets": rollout_states,

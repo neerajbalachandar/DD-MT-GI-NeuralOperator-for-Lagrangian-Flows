@@ -16,7 +16,7 @@ from gino.evaluation.one_step import evaluate_one_step
 from gino.evaluation.field import evaluate_teacher_forced_field, field_group_metrics_torch
 from gino.data.reconstruction import rebuild_next_batch_inference
 from gino.data.hdf5 import (read_task2_velocity, read_task2_vorticity, native_field_plane, native_coordinate_plane,
-                            highest_energy_y_plane)
+                            highest_energy_y_plane, read_task2_field)
 from gino.data.geometry import estimate_chordwise_bounds
 from gino.evaluation.metrics import (mse, relative_l2, state_component_metrics,
                                      normalized_state_component_metrics, field_group_metrics)
@@ -32,7 +32,7 @@ from visualization.evaluation import (plot_state_parity, plot_eulerian_field_com
                                        plot_eulerian_velocity_plane)
 
 
-def field_visual_plane_specs(case_name, native_xyz, native_velocity):
+def field_visual_plane_specs(case_name, native_xyz, native_velocity, ring_geometry=None, smoothed_center=None):
     """Choose each flow-family view at the highest-energy coordinate plane."""
     axes = [np.unique(native_xyz[:, axis]) for axis in range(3)]
     name = str(case_name).lower()
@@ -41,9 +41,29 @@ def field_visual_plane_specs(case_name, native_xyz, native_velocity):
         # a transverse cut, with each plane location chosen from this frame.
         orientations = ((1, "meridional_y"), (0, "meridional_x"), (2, "transverse_z"))
     elif "vortexring" in name or "vortex_ring" in name or "ring" in name:
-        # Rings lie in x-y and propagate along z; x-z and y-z are the two
-        # orthogonal meridional views through the ring axis.
-        orientations = ((1, "meridional_y"), (0, "meridional_x"))
+        # Ring planes are conditioned on reference vorticity; exact coordinates
+        # are shared by prediction and truth and are recorded as diagnostics.
+        if ring_geometry and ring_geometry.get("valid"):
+            axis = int(ring_geometry.get("propagation_axis", 2))
+            trans = ring_geometry["transverse_axes"]
+            center = np.asarray(smoothed_center if smoothed_center is not None else
+                                 ring_geometry["axis_center_instantaneous"])
+            specs = [(trans[0], float(center[trans[0]]), "vortex_axis_centred_plane_meridional") ,
+                     (trans[1], float(center[trans[1]]), "vortex_axis_centred_plane_meridional")]
+            specs.extend((axis, float(z), "transverse_ring_plane") for z in ring_geometry.get(
+                "ring_axial_locations_used_for_planes", ring_geometry.get("ring_axial_locations", [])))
+            specs.extend((i, float(axes[i][len(axes[i]) // 2]), "fixed_reference_plane") for i in range(3))
+            return specs
+        kinetic_energy = np.sum(np.asarray(native_velocity, dtype=np.float64) ** 2, axis=1)
+        specs = []
+        for normal_axis in (1, 0):
+            plane_energy = [float(np.mean(kinetic_energy[np.isclose(native_xyz[:, normal_axis], value)]))
+                            for value in axes[normal_axis]]
+            specs.append((normal_axis, float(axes[normal_axis][int(np.argmax(plane_energy))]),
+                          "fallback_max_kinetic_energy"))
+        specs.extend((axis, float(values[len(values) // 2]), "fixed_reference_plane")
+                     for axis, values in enumerate(axes))
+        return specs
     else:
         orientations = tuple((axis, f"normal_{'xyz'[axis]}") for axis in range(3))
 
@@ -370,6 +390,8 @@ def main():
         print(f"rollout summary {case}: time-averaged position RMSE={time_average:.6g}; "
               f"final H={final_horizon} phase={final_phase:.6g} position RMSE={final_error:.6g}")
     native_records = []
+    axis_smooth_by_case = {}
+    ring_peaks_by_case = {}
     native_visual_candidates = {}
     plane_visual_candidates = {}
     out_dir = checkpoint_path.parent / "evaluation"
@@ -418,49 +440,61 @@ def main():
             # Native Task-2 U and W are the simulation's field truth. The raw XMF/HDF5
             # pair remains the authoritative full-grid archive; this stores matching
             # full reconstructions alongside the scalar metrics.
-            native_xyz, native_truth = read_task2_velocity(path)
-            try:
-                omega_xyz, native_vorticity = read_task2_vorticity(path)
-                if not np.array_equal(omega_xyz, native_xyz):
-                    raise ValueError(f"Velocity/vorticity node order differs in {path}")
-            except KeyError:
-                from gino.data.hdf5 import read_task2_field
-                _, derived = read_task2_field(path)
-                native_vorticity = np.column_stack((
-                    derived[:, 3 + 2 * 3 + 1] - derived[:, 3 + 1 * 3 + 2],
-                    derived[:, 3 + 0 * 3 + 2] - derived[:, 3 + 2 * 3 + 0],
-                    derived[:, 3 + 1 * 3 + 0] - derived[:, 3 + 0 * 3 + 1],
-                ))
-            valid = (np.isfinite(native_xyz).all(axis=1) & np.isfinite(native_truth).all(axis=1)
-                     & np.isfinite(native_vorticity).all(axis=1))
-            native_xyz, native_truth, native_vorticity = native_xyz[valid], native_truth[valid], native_vorticity[valid]
+            native_xyz, native_truth = read_task2_field(path)
+            valid = np.isfinite(native_xyz).all(axis=1) & np.isfinite(native_truth).all(axis=1)
+            native_xyz, native_truth = native_xyz[valid], native_truth[valid]
             categories = [str(value) for value in raw_context.get("evaluation_categories", [])]
-            spatial_superresolution = "spatial_superresolution" in categories
-            if spatial_superresolution:
-                # Score every native high-resolution node; the input remains the
-                # corresponding test-case particle state from this same frame.
-                xyz, truth, vorticity_truth = native_xyz, native_truth, native_vorticity
-            else:
-                # Match the processed training-resolution query nodes exactly.
-                xyz = batch["query_xyz_phys"][0].cpu().numpy()
-                native_lookup = {tuple(point.tolist()): i for i, point in enumerate(native_xyz)}
-                matched = [(j, native_lookup.get(tuple(point.tolist()))) for j, point in enumerate(xyz)]
-                matched = [(j, i) for j, i in matched if i is not None]
-                if not matched:
-                    raise ValueError(f"No preprocessed query coordinates match finite native nodes in {path}")
-                query_indices, native_indices = map(np.asarray, zip(*matched))
-                xyz, truth = xyz[query_indices], native_truth[native_indices]
-                vorticity_truth = native_vorticity[native_indices]
+            xyz, truth = native_xyz, native_truth
             normalized_native_xyz = (native_xyz - stats.coord_min) / np.maximum(stats.coord_span, 1e-8)
             outside_fraction = float(np.mean(np.any((normalized_native_xyz < 0.0) |
                                                      (normalized_native_xyz > 1.0), axis=1)))
             with torch.inference_mode():
                 predicted = predict_field_at_xyz(model, batch, xyz, latent, stats, device)
-            predicted_velocity = predicted[:, :3]
-            omega_indices = [field_names.index(name) for name in ("omega_x", "omega_y", "omega_z")
-                             if name in field_names]
-            predicted_vorticity = (predicted[:, omega_indices] if len(omega_indices) == 3 else
-                                   np.zeros_like(vorticity_truth))
+            predicted_velocity, vorticity_truth = predicted[:, :3], truth[:, 12:15]
+            predicted_vorticity = predicted[:, 12:15]
+            native_velocity = truth[:, :3]
+            from gino.evaluation.vortex_geometry import detect_ring_geometry, smooth_axis, track_axial_peaks
+            geometry_cfg = cfg["evaluation"].get("vortex_geometry", {})
+            ring_geometry = (detect_ring_geometry(xyz, vorticity_truth, geometry_cfg)
+                             if "ring" in str(context.get("case", "")).lower()
+                             else {"valid": False, "reason": "non_ring_case"})
+            case_key = str(context.get("case", "unknown"))
+            if ring_geometry.get("valid"):
+                instantaneous = np.asarray(ring_geometry["axis_center_instantaneous"])
+                smoothed = smooth_axis(axis_smooth_by_case.get(case_key), instantaneous,
+                                       geometry_cfg.get("axis_smoothing_alpha", 0.25))
+                axis_smooth_by_case[case_key] = smoothed
+                ring_geometry["axis_center_smoothed"] = smoothed.tolist()
+                ring_geometry["ring_axial_locations_used_for_planes"] = track_axial_peaks(
+                    ring_peaks_by_case.get(case_key), ring_geometry.get("ring_axial_locations", []),
+                    geometry_cfg.get("axis_smoothing_alpha", 0.25))
+                ring_peaks_by_case[case_key] = ring_geometry["ring_axial_locations_used_for_planes"]
+            from gino.data.spatial_sampling import analyze_vorticity_cores
+            core_mask, core_diagnostics = analyze_vorticity_cores(xyz, truth, geometry_cfg)
+            normalized_pred = (predicted - stats.field_mean) / stats.field_std
+            normalized_truth = (truth - stats.field_mean) / stats.field_std
+            group_slices = {"velocity": slice(0, 3), "gradient": slice(3, 12), "vorticity": slice(12, 15)}
+            group_metrics = {}
+            for group, sl in group_slices.items():
+                err = predicted[:, sl] - truth[:, sl]
+                group_metrics[f"{group}_physical_rmse"] = float(np.sqrt(np.mean(err ** 2)))
+                group_metrics[f"{group}_physical_relative_l2"] = relative_l2(predicted[:, sl], truth[:, sl])
+                group_metrics[f"{group}_normalized_mse"] = mse(normalized_pred[:, sl], normalized_truth[:, sl])
+            trajectory_mask = np.zeros(len(xyz), dtype=bool)
+            if "trajectory_envelope_cases" in data and "trajectory_envelope_bounds" in data:
+                env_cases = [str(x) for x in data["trajectory_envelope_cases"]]
+                if case_key in env_cases:
+                    bounds = data["trajectory_envelope_bounds"][env_cases.index(case_key)]
+                    trajectory_mask = np.all((xyz >= bounds[:3]) & (xyz <= bounds[3:]), axis=1)
+                elif "training_trajectory_envelope_bounds" in data and len(data["training_trajectory_envelope_bounds"]) == 6:
+                    bounds = np.asarray(data["training_trajectory_envelope_bounds"])
+                    trajectory_mask = np.all((xyz >= bounds[:3]) & (xyz <= bounds[3:]), axis=1)
+            region_metrics = {}
+            for region, mask in (("core", core_mask), ("trajectory", trajectory_mask)):
+                if np.any(mask):
+                    for group, sl in group_slices.items():
+                        region_metrics[f"{region}_{group}_physical_rmse"] = float(np.sqrt(np.mean((predicted[mask, sl] - truth[mask, sl]) ** 2)))
+                        region_metrics[f"{region}_{group}_physical_relative_l2"] = relative_l2(predicted[mask, sl], truth[mask, sl])
             record = {"pair_id": pair_id, "case": context.get("case", "unknown"),
                 "evaluation_role": "field_superresolution" if pair_id in field_superres_set else split,
                 "frame": context.get("frame_t", ""), "phase": float(context.get("phase_t", 0.0)), "hdf5": str(path),
@@ -469,12 +503,15 @@ def main():
                 "task2_frame_id": raw_context.get("task2_frame_id"),
                 "evaluation_categories": categories,
                 "native_grid_points": int(round(len(native_xyz) ** (1.0 / 3.0))),
-                "velocity_mse": mse(predicted_velocity, truth),
-                "velocity_relative_l2": relative_l2(predicted_velocity, truth),
+                "velocity_mse": mse(predicted_velocity, truth[:, :3]),
+                "velocity_relative_l2": relative_l2(predicted_velocity, truth[:, :3]),
                 "vorticity_mse": mse(predicted_vorticity, vorticity_truth),
                 "vorticity_relative_l2": relative_l2(predicted_vorticity, vorticity_truth),
-                "field_mse": mse(predicted_velocity, truth),
-                "field_relative_l2": relative_l2(predicted_velocity, truth),
+                "field_mse": mse(predicted_velocity, truth[:, :3]),
+                "field_relative_l2": relative_l2(predicted_velocity, truth[:, :3]),
+                "whole_domain_normalized_mse": mse(normalized_pred, normalized_truth),
+                "vortex_geometry": ring_geometry, "core_diagnostics": core_diagnostics,
+                **group_metrics, **region_metrics,
                 "outside_train_domain_fraction": outside_fraction,
                 "n_points": int(len(truth))}
             native_records.append(record)
@@ -483,7 +520,8 @@ def main():
                 case_dir.mkdir(parents=True, exist_ok=True)
                 frame_name = str(context.get("frame_t", pair_id)).replace("/", "_")
                 np.savez_compressed(case_dir / f"frame_{frame_name}.npz",
-                    coordinates=xyz.astype(np.float32), velocity_truth=truth.astype(np.float32),
+                    coordinates=xyz.astype(np.float32), field_truth=truth.astype(np.float32),
+                    field_prediction=predicted.astype(np.float32), velocity_truth=native_velocity.astype(np.float32),
                     velocity_prediction=predicted_velocity.astype(np.float32),
                     vorticity_truth=vorticity_truth.astype(np.float32),
                     vorticity_prediction=predicted_vorticity.astype(np.float32),
@@ -491,18 +529,21 @@ def main():
                     case=np.asarray(str(context.get("case", "unknown"))),
                     frame=np.asarray(frame_name), phase=np.asarray(float(context.get("phase_t", 0.0))))
             plane_mode = str(cfg["evaluation"].get("field_plane_mode", "highest_energy"))
-            requested_y = (highest_energy_y_plane(native_xyz, native_truth)
-                           if plane_mode == "highest_energy"
-                           else float(cfg["evaluation"].get("field_y_plane", 0.0)))
+            is_ring_case = "ring" in str(context.get("case", "")).lower()
+            requested_y = (float(np.unique(native_xyz[:, 1])[len(np.unique(native_xyz[:, 1])) // 2])
+                           if is_ring_case else
+                           (highest_energy_y_plane(native_xyz, native_velocity)
+                            if plane_mode == "highest_energy"
+                            else float(cfg["evaluation"].get("field_y_plane", 0.0))))
             if plane_mode not in ("highest_energy", "mid"):
                 raise ValueError("evaluation.field_plane_mode must be 'highest_energy' or 'mid'")
             if plane_mode == "mid":
                 requested_y = float(np.unique(native_xyz[:, 1])[len(np.unique(native_xyz[:, 1])) // 2])
             x_axis, z_axis, _, plane_xyz, _ = native_field_plane(
-                native_xyz, native_truth, y_plane=requested_y, component=0)
+                native_xyz, native_velocity, y_plane=requested_y, component=0)
             true_components = []
             for component in range(3):
-                _, _, _, _, values = native_field_plane(native_xyz, native_truth,
+                _, _, _, _, values = native_field_plane(native_xyz, native_velocity,
                     y_plane=requested_y, component=component)
                 true_components.append(values.reshape(len(z_axis), len(x_axis)))
             true_velocity_slice = np.stack(true_components, axis=-1)
@@ -526,11 +567,12 @@ def main():
                 "true_velocity": true_velocity_slice, "predicted_velocity": predicted_velocity_slice})
             # Save several fixed, domain-relative planes per frame. A single batched
             # query keeps the added visualization inference cost low.
-            plane_specs = field_visual_plane_specs(case_name, native_xyz, native_truth)
+            plane_specs = field_visual_plane_specs(case_name, native_xyz, native_velocity,
+                ring_geometry=ring_geometry, smoothed_center=ring_geometry.get("axis_center_smoothed"))
             plane_queries, plane_records = [], []
             for normal_axis, location, plane_name in plane_specs:
                 first, second, truth_plane, query_xyz, actual_location, first_i, second_i = native_coordinate_plane(
-                    native_xyz, native_truth, normal_axis, location)
+                    native_xyz, native_velocity, normal_axis, location)
                 plane_queries.append(query_xyz)
                 plane_records.append({
                     "name": plane_name,
@@ -554,6 +596,7 @@ def main():
                 plane_record["prediction"] = all_plane_prediction[start:start + count].reshape(
                     plane_record["truth"].shape)
                 start += count
+                record["plane_specs"].append({"name": plane_record["name"], "label": plane_record["label"]})
                 plane_visual_candidates.setdefault(
                     (case_name, evaluation_role, plane_record["name"]), []).append({
                         "phase": float(context.get("phase_t", 0.0)),

@@ -14,6 +14,23 @@ data:
   max_particles: 2048
   # Supervise every node of the native 32^3 Eulerian field grid.
   max_queries: 32768
+  field_domain_mode: full_native_grid
+  field_sampling:
+    mode: vorticity_trajectory_mixture
+    uniform_fraction: 0.40
+    vortex_fraction: 0.40
+    trajectory_fraction: 0.20
+    vorticity_percentile: 95
+    vorticity_power: 1.0
+    minimum_core_nodes: 8
+    maximum_core_components: 8
+    core_dilation_physical: null
+    trajectory_envelope_enabled: true
+    trajectory_envelope_margin: null
+    random_seed: 42
+    deterministic: true
+    validation_sampling: uniform
+    test_sampling: uniform
 
 preprocessing:
   max_rss_gb: 32
@@ -36,7 +53,7 @@ model:
 
 training:
   # Residual channels 7:10 supervise delta-u as an auxiliary output; they do not propagate state.
-  run_dir: runs/leapfrogging_pretrain_stateonly_mse_uncertainty
+  run_dir: runs/leapfrogging_pretrain_adaptive_stateonly_mse_uncertainty
   epochs: 120
   batch_size: 1
   gradient_accumulation_steps: 1
@@ -53,6 +70,7 @@ training:
   use_state_loss: true
   use_field_loss: true
   use_homoscedastic_weighting: true
+  field_category_loss_weights: [0.40, 0.40, 0.20]
   # Field target channels are [u(0:3), grad(u)(3:12), omega(12:15)].
   use_rollout_loss: false
   use_pushforward: false
@@ -76,6 +94,15 @@ evaluation:
   field_visual_phase: 0.5
   field_visual_phases: [0.1, 0.3, 0.5, 0.7, 0.9]
   field_plane_mode: highest_energy
+  vortex_geometry:
+    propagation_axis: 2
+    vorticity_percentile: 95
+    minimum_core_nodes: 8
+    maximum_core_components: 8
+    minimum_peak_separation_physical: 0.0
+    peak_prominence_fraction: 0.10
+    maximum_ring_planes: 8
+    axis_smoothing_alpha: 0.25
   save_parity_plots: true
   field_y_plane: 0.0
   reference_chord: null

@@ -24,6 +24,10 @@ ROLLOUT_MEMORY_CAP_GB = float(os.environ.get("ROLLOUT_MEMORY_CAP_GB", "2.0"))
 MAX_PREPROCESS_PARTICLES = max(1, int(os.environ.get("MAX_PREPROCESS_PARTICLES", "2048")))
 PREPROCESS_DEVICE = "cpu"
 FIELD_SOURCE_DIAGNOSTICS: List[Dict[str, Any]] = []
+FIELD_SAMPLING_CONFIG: Dict[str, Any] = {"mode": "regular_grid"}
+FIELD_DOMAIN_MODE = "full_native_grid"
+TRAJECTORY_BOUNDS_BY_CASE: Dict[str, Any] = {}
+FIELD_MESH_BOUNDS_DIAGNOSTICS: Dict[str, Any] = {}
 
 
 def _to_s32(values) -> np.ndarray:
@@ -734,7 +738,7 @@ def _infer_training_field_bounds(
     lows, highs = [], []
     for case in TRAIN_CASES:
         case_fields = field_files_by_case.get(str(case), [])
-        for _, path in case_fields[:1]:
+        for _, path in case_fields:
             with h5py.File(path, "r") as handle:
                 coords = as_xyz(np.asarray(handle["nodes"]))
             coords = coords[np.isfinite(coords).all(axis=1)]
@@ -757,6 +761,57 @@ def _infer_training_field_bounds(
     if not np.all(upper > lower):
         raise ValueError(f"Inferred training Task-2 domain has degenerate bounds: {lower}, {upper}")
     return field_bounds
+
+
+def _scan_native_mesh_bounds(field_files_by_case):
+    lows, highs = [], []
+    case_bounds = defaultdict(lambda: ([], []))
+    per_frame = []
+    for case, entries in field_files_by_case.items():
+        for time, path in entries:
+            with h5py.File(path, "r") as handle:
+                coords = as_xyz(np.asarray(handle["nodes"]))
+            coords = coords[np.isfinite(coords).all(axis=1)]
+            if len(coords):
+                lo, hi = coords.min(0), coords.max(0)
+                lows.append(lo); highs.append(hi)
+                case_bounds[str(case)][0].append(lo); case_bounds[str(case)][1].append(hi)
+                per_frame.append((str(case), float(time), lo, hi))
+    if not lows:
+        return {"frame_count": 0, "mesh_moves_or_changes_extent": False}
+    lo, hi = np.asarray(lows), np.asarray(highs)
+    changes = {case: bool(np.ptp(np.asarray(bounds[0]), axis=0).max() > 1e-8
+                          or np.ptp(np.asarray(bounds[1]), axis=0).max() > 1e-8)
+               for case, bounds in case_bounds.items()}
+    return {"frame_count": len(per_frame), "global_bounds": [*lo.min(0).tolist(), *hi.max(0).tolist()],
+            "minimum_frame_bounds": [*lo.min(0).tolist(), *hi.min(0).tolist()],
+            "maximum_frame_bounds": [*lo.max(0).tolist(), *hi.max(0).tolist()],
+            "mesh_moves_or_changes_extent": any(changes.values()), "per_case_changes": changes}
+
+
+def _training_trajectory_envelopes(field_files_by_case):
+    """Two-pass friendly AABB union of dilated cores; each frame is discarded immediately."""
+    from .spatial_sampling import analyze_vorticity_cores
+    envelopes = {}
+    for case in TRAIN_CASES:
+        lows, highs, cell_spacings = [], [], []
+        for _, path in field_files_by_case.get(str(case), []):
+            coords, values = read_field_grid_h5(path, device=PREPROCESS_DEVICE)
+            mask, diagnostics = analyze_vorticity_cores(coords, values, FIELD_SAMPLING_CONFIG)
+            if mask.any():
+                support = coords[mask]
+                lows.append(support.min(axis=0)); highs.append(support.max(axis=0))
+                if diagnostics.get("spacing"):
+                    cell_spacings.append(diagnostics["spacing"])
+            del coords, values
+        if lows:
+            margin = FIELD_SAMPLING_CONFIG.get("trajectory_envelope_margin")
+            if margin is None:
+                # Use two native cells in the most widely spaced direction.
+                margin = 2.0 * max(cell_spacings[0]) if cell_spacings else 0.0
+            margin = float(margin)
+            envelopes[str(case)] = (np.min(lows, axis=0) - margin, np.max(highs, axis=0) + margin)
+    return envelopes
 
 
 # These helpers deal with small shape and indexing issues that occur repeatedly when the frame-level arrays are converted into the final flattened dataset.
@@ -1901,7 +1956,7 @@ def _scan_pairs(by_case, meta_by_case, field_files_by_case=None):
 
 def _fill_one_case(case, case_plist, case_meta, case_pairs, field_entries,
                    out_arrays, field_query_coords, targets_velocity_field,
-                   field_query_mask, ids_concat, pair_contexts, field_bounds):
+                   field_query_mask, field_query_categories, ids_concat, pair_contexts, field_bounds, sampling_diagnostics):
     """Build one case and write each transition directly into its global slices."""
     frames = _load_and_track_case(case, case_plist, case_meta)
     try:
@@ -1976,13 +2031,23 @@ def _fill_one_case(case, case_plist, case_meta, case_pairs, field_entries,
             if field_path is not None:
                 coords, values = read_field_grid_h5(field_path, device=PREPROCESS_DEVICE)
                 n_query = min(len(coords), int(MAX_FIELD_QUERY_POINTS))
-                selected = _field_query_indices(len(coords), n_query)
+                from .spatial_sampling import sample_field_queries
+                sampling_config = FIELD_SAMPLING_CONFIG
+                if _case_split_label(case) != "train":
+                    sampling_config = {"mode": str(FIELD_SAMPLING_CONFIG.get(
+                        "validation_sampling" if _case_split_label(case) == "val" else "test_sampling", "uniform")),
+                        "random_seed": FIELD_SAMPLING_CONFIG.get("random_seed", 42)}
+                selected, categories, diagnostics = sample_field_queries(
+                    coords, values, n_query, sampling_config, case=case,
+                    frame=current["frame_id"], trajectory_bounds=TRAJECTORY_BOUNDS_BY_CASE.get(case))
                 if n_query:
                     field_query_coords[pair_id, :n_query] = coords[selected].astype(np.float32)
                     targets_velocity_field[pair_id, :n_query] = values[selected].astype(np.float32)
                     field_query_mask[pair_id, :n_query] = True
+                    field_query_categories[pair_id, :n_query] = categories
                     field_bounds[pair_id, 0] = np.min(coords, axis=0)
                     field_bounds[pair_id, 1] = np.max(coords, axis=0)
+                    sampling_diagnostics[pair_id] = diagnostics
             pair_contexts[pair_id] = {
                 "case": case, "frame_t": current["frame_id"], "frame_tp1": following["frame_id"],
                 "xmf_time_t": float(current["xmf_time"]), "xmf_time_tp1": float(following["xmf_time"]),
@@ -2009,8 +2074,8 @@ def _fill_one_case(case, case_plist, case_meta, case_pairs, field_entries,
 
 
 def _fill_pairs(by_case, pair_ranges, field_available, out_arrays, field_query_coords,
-                targets_velocity_field, field_query_mask, ids_concat, meta_by_case,
-                field_files_by_case, pair_contexts, field_bounds):
+                targets_velocity_field, field_query_mask, field_query_categories, ids_concat, meta_by_case,
+                field_files_by_case, pair_contexts, field_bounds, sampling_diagnostics):
     """Fill preallocated arrays serially, releasing each case before continuing."""
     pairs_by_case = defaultdict(list)
     for pair_id, row in enumerate(pair_ranges):
@@ -2020,7 +2085,7 @@ def _fill_pairs(by_case, pair_ranges, field_available, out_arrays, field_query_c
         _fill_one_case(
             case, by_case[case], meta_by_case[case], pairs_by_case[case],
             field_files_by_case.get(case, []), out_arrays, field_query_coords,
-            targets_velocity_field, field_query_mask, ids_concat, pair_contexts, field_bounds)
+            targets_velocity_field, field_query_mask, field_query_categories, ids_concat, pair_contexts, field_bounds, sampling_diagnostics)
         _release_process_memory()
         print(f"[mem] after case={case}: RSS={_rss_gb():.2f} GB", flush=True)
         _check_rss_limit(case)
@@ -2428,6 +2493,9 @@ def _build_particle_evolution_dataset_legacy(merged: List[Path]) -> Path:
         field_query_source=np.asarray("generated_vpm_velocity_vorticity_grid", dtype=object),
         preprocessing_schema_version=np.asarray(3, dtype=np.int64),
         field_query_bounds=np.asarray(_field_query_bounds() if _field_query_bounds() is not None else (), dtype=np.float32),
+        field_native_domain_bounds=np.asarray([
+            *np.nanmin(field_bounds[:, 0, :], axis=0), *np.nanmax(field_bounds[:, 1, :], axis=0)
+        ], dtype=np.float32),
         field_std_floor=np.asarray(FIELD_STD_FLOOR, dtype=np.float32),
         field_root=np.asarray(str(field_root), dtype=object),
         targets_next_state=Y_next,
@@ -2506,7 +2574,7 @@ def _build_particle_evolution_dataset_legacy(merged: List[Path]) -> Path:
 
 def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     """Build the final dataset with a count pass and bounded per-case fill pass."""
-    global ACTIVE_FIELD_QUERY_BOUNDS
+    global ACTIVE_FIELD_QUERY_BOUNDS, TRAJECTORY_BOUNDS_BY_CASE, FIELD_MESH_BOUNDS_DIAGNOSTICS
     if os.environ.get("PREPROC_STREAMING", "1") == "0":
         return _build_particle_evolution_dataset_legacy(merged)
 
@@ -2537,8 +2605,23 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         field_files_by_case[case] = entries
         print(f"[field] {case}: fdom frames={len(entries)}; XMF times={[t for t, _ in entries][:8]}")
     particle_support_bounds = _particle_support_bounds_for_training_cases(by_case)
-    if not os.environ.get("FIELD_QUERY_BOUNDS", "").strip():
+    FIELD_MESH_BOUNDS_DIAGNOSTICS = _scan_native_mesh_bounds(field_files_by_case)
+    TRAJECTORY_BOUNDS_BY_CASE = _training_trajectory_envelopes(field_files_by_case) if FIELD_SAMPLING_CONFIG.get("mode") == "vorticity_trajectory_mixture" else {}
+    if os.environ.get("FIELD_QUERY_BOUNDS", "").strip():
+        ACTIVE_FIELD_QUERY_BOUNDS = _field_query_bounds()
+    elif FIELD_DOMAIN_MODE == "full_native_grid":
+        ACTIVE_FIELD_QUERY_BOUNDS = None
+    elif FIELD_DOMAIN_MODE == "training_trajectory_envelope":
+        valid = list(TRAJECTORY_BOUNDS_BY_CASE.values())
+        if valid:
+            low = np.min([item[0] for item in valid], axis=0); high = np.max([item[1] for item in valid], axis=0)
+            ACTIVE_FIELD_QUERY_BOUNDS = (low[0], high[0], low[1], high[1], low[2], high[2])
+        else:
+            ACTIVE_FIELD_QUERY_BOUNDS = _infer_training_field_bounds(field_files_by_case, None)
+    elif FIELD_DOMAIN_MODE == "particle_support_overlap":
         ACTIVE_FIELD_QUERY_BOUNDS = _infer_training_field_bounds(field_files_by_case, particle_support_bounds)
+    else:
+        raise ValueError(f"Unknown data.field_domain_mode: {FIELD_DOMAIN_MODE}")
 
     pair_ranges, field_available, chain_lengths = _scan_pairs(by_case, meta_by_case, field_files_by_case)
     if not pair_ranges:
@@ -2559,14 +2642,16 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     field_query_coords = np.zeros((n_pairs, MAX_FIELD_QUERY_POINTS, 3), dtype=np.float32)
     targets_velocity_field = np.zeros((n_pairs, MAX_FIELD_QUERY_POINTS, len(FIELD_TARGET_NAMES)), dtype=np.float32)
     field_query_mask = np.zeros((n_pairs, MAX_FIELD_QUERY_POINTS), dtype=bool)
+    field_query_categories = np.zeros((n_pairs, MAX_FIELD_QUERY_POINTS), dtype=np.int8)
+    sampling_diagnostics = [None] * n_pairs
     field_bounds = np.full((n_pairs, 2, 3), np.nan, dtype=np.float32)
     pair_contexts: List[Dict[str, object]] = [None] * n_pairs
     out_arrays = {"X": X, "Y_delta": Y_delta, "Y_residual": Y_residual, "Y_next": Y_next}
     _check_rss_limit("global array allocation")
     _fill_pairs(
         by_case, pair_ranges, field_available, out_arrays, field_query_coords,
-        targets_velocity_field, field_query_mask, ids_concat, meta_by_case,
-        field_files_by_case, pair_contexts, field_bounds)
+        targets_velocity_field, field_query_mask, field_query_categories, ids_concat, meta_by_case,
+        field_files_by_case, pair_contexts, field_bounds, sampling_diagnostics)
 
     pair_split_train_case = np.asarray([i for i, row in enumerate(pair_ranges)
                                         if _case_split_label(row[0]) == "train"], dtype=np.int64)
@@ -2632,8 +2717,20 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         out_path, inputs_t=X, particle_ids_t=ids_concat, particle_ids_tp1=ids_concat,
         targets_delta=Y_delta, targets_residual=Y_residual, query_coords=field_query_coords,
         targets_velocity_field=targets_velocity_field, field_query_mask=field_query_mask,
+        field_query_categories=field_query_categories,
         field_query_source=np.asarray("generated_vpm_velocity_vorticity_grid", dtype=object),
-        preprocessing_schema_version=np.asarray(3, dtype=np.int64),
+        preprocessing_schema_version=np.asarray(4, dtype=np.int64),
+        field_sampling_mode=np.asarray(FIELD_SAMPLING_CONFIG.get("mode", "regular_grid"), dtype=object),
+        field_sampling_config_json=np.asarray(json.dumps(FIELD_SAMPLING_CONFIG, sort_keys=True), dtype=object),
+        field_domain_mode=np.asarray(FIELD_DOMAIN_MODE, dtype=object),
+        field_sampling_diagnostics=np.asarray(sampling_diagnostics, dtype=object),
+        field_mesh_bounds_diagnostics=np.asarray(json.dumps(FIELD_MESH_BOUNDS_DIAGNOSTICS, sort_keys=True), dtype=object),
+        trajectory_envelope_cases=np.asarray(list(TRAJECTORY_BOUNDS_BY_CASE), dtype=object),
+        trajectory_envelope_bounds=np.asarray([[*TRAJECTORY_BOUNDS_BY_CASE[k][0], *TRAJECTORY_BOUNDS_BY_CASE[k][1]]
+                                               for k in TRAJECTORY_BOUNDS_BY_CASE], dtype=np.float32).reshape(-1, 6),
+        training_trajectory_envelope_bounds=(np.asarray([*np.min([v[0] for v in TRAJECTORY_BOUNDS_BY_CASE.values()], axis=0),
+                                                         *np.max([v[1] for v in TRAJECTORY_BOUNDS_BY_CASE.values()], axis=0)], dtype=np.float32)
+                                             if TRAJECTORY_BOUNDS_BY_CASE else np.asarray([], dtype=np.float32)),
         field_query_bounds=np.asarray(_field_query_bounds() if _field_query_bounds() is not None else (), dtype=np.float32),
         field_std_floor=np.asarray(FIELD_STD_FLOOR, dtype=np.float32), field_root=np.asarray(str(field_root), dtype=object),
         targets_next_state=Y_next, feature_names=np.asarray(PARTICLE_INPUT_FEATURES, dtype=object),
@@ -2953,15 +3050,21 @@ def preprocess_generated_vpm_cases(source_root: Path, output_root: Path, *,
 
 # The script starts here when executed directly. It resolves the source roots, discovers and splits the cases, validates the metadata, creates the intermediate merged frames, and then builds the final particle-evolution dataset.
 def preprocess_vpm_merged_frames(merged_root: Path, output_root: Optional[Path] = None, *,
-                                 raw_root: Optional[Path] = None, device="auto") -> Path:
+                                 raw_root: Optional[Path] = None, device="auto",
+                                 field_sampling=None, field_domain_mode="full_native_grid", max_queries=None) -> Path:
     """Rebuild the trainable archive from the existing case/frame NPZ hierarchy."""
     global RAW_ROOT, FIELD_ROOT, RAW_ROOT_CANDIDATES, FIELD_ROOT_CANDIDATES
     global OUT_ROOT, MERGED_ROOT, FIELD_H5_PATTERN, TRAIN_CASES, VAL_CASES, TEST_CASES
     global CASE_METADATA, ACTIVE_CASE_METADATA, VPM_CASE_PATHS, ACTIVE_FIELD_QUERY_BOUNDS
     global CONDITIONING_CHANNEL_NAMES, ACTIVE_CONDITIONING_CHANNEL_NAMES, PARTICLE_INPUT_FEATURES
     global USE_GEOMETRY_CHANNELS, GEOMETRY_CHANNEL_NAMES, PREPROCESS_DEVICE
+    global FIELD_SAMPLING_CONFIG, FIELD_DOMAIN_MODE, MAX_FIELD_QUERY_POINTS
 
     merged_root = Path(merged_root).expanduser().resolve()
+    FIELD_SAMPLING_CONFIG = dict(field_sampling or {"mode": "regular_grid"})
+    FIELD_DOMAIN_MODE = str(field_domain_mode)
+    if max_queries is not None:
+        MAX_FIELD_QUERY_POINTS = int(max_queries)
     if not merged_root.is_dir():
         raise FileNotFoundError(f"Merged-frame directory does not exist: {merged_root}")
     merged = sorted(merged_root.glob("*/*.npz"), key=lambda p: (p.parent.name, frame_id(p)))
@@ -3095,6 +3198,12 @@ def preprocess_vpm_merged_frames(merged_root: Path, output_root: Optional[Path] 
             "test_cases": TEST_CASES, "train_pairs": int(len(archive["train_pair_ids"])),
             "val_pairs": int(len(archive["val_pair_ids"])), "test_pairs": int(len(archive["test_pair_ids"])),
             "field_target_names": [str(value) for value in archive["field_target_names"]],
+            "field_sampling_mode": FIELD_SAMPLING_CONFIG.get("mode", "regular_grid"),
+            "field_domain_mode": FIELD_DOMAIN_MODE,
+            "field_query_bounds": _field_query_bounds(),
+            "field_native_domain_bounds": np.asarray(archive["field_native_domain_bounds"]).reshape(-1).tolist(),
+            "field_mesh_bounds_diagnostics": json.loads(str(np.asarray(archive["field_mesh_bounds_diagnostics"]).reshape(-1)[0])),
+            "field_sampling_category_counts": np.bincount(archive["field_query_categories"][archive["field_query_mask"]].astype(int), minlength=3).tolist(),
         }
     (OUT_ROOT / "preprocess_summary.json").write_text(json.dumps(summary, indent=2))
     return dataset_path

@@ -1,0 +1,93 @@
+seed: 42
+device: auto
+data:
+  dataset: processed_data/leapfrogging/particle_evolution_dataset.npz
+  merged_frames: processed_data/leapfrogging/merged_frames
+  native_task2_root: datagen_code/training_data
+  allow_missing_native_task2: false
+  input_features: [Gamma_x, Gamma_y, Gamma_z, sigma]
+  global_condition_channels: [freestream_magnitude, phase]
+  max_particles: 2048
+  max_queries: 32768
+  field_domain_mode: full_native_grid
+  field_sampling:
+    mode: regular_grid
+    uniform_fraction: 0.40
+    vortex_fraction: 0.40
+    trajectory_fraction: 0.20
+    vorticity_percentile: 95
+    vorticity_power: 1.0
+    minimum_core_nodes: 8
+    maximum_core_components: 8
+    core_dilation_physical: null
+    trajectory_envelope_enabled: true
+    trajectory_envelope_margin: null
+    random_seed: 42
+    deterministic: true
+    validation_sampling: uniform
+    test_sampling: uniform
+preprocessing:
+  max_rss_gb: 32
+model:
+  latent_res: 16
+  hidden_channels: 128
+  fno_layers: 6
+  fno_modes: 6
+  gno_radius: 0.15
+  mlp_layers: 3
+  mlp_hidden: 128
+  query_pos_encoding_frequencies: 4
+  use_attention: true
+  use_skip: true
+  use_global_conditioning: true
+  use_task_adapters: true
+  predict_delta_u: true
+training:
+  # Residual channels 7:10 supervise delta-u as an auxiliary output; they do not propagate state.
+  run_dir: runs/leapfrogging_pretrain_regular_stateonly_mse_uncertainty
+  epochs: 120
+  gradient_accumulation_steps: 1
+  dataloader_num_workers: 8
+  validation_every_n_epochs: 1
+  learning_rate: 0.00005
+  weight_decay: 0.00003
+  scheduler: plateau
+  grad_clip_norm: 5.0
+  early_stopping_patience: 30
+  mixed_precision: false
+  use_state_loss: true
+  use_field_loss: true
+  use_rollout_loss: false
+  use_pushforward: false
+  use_scheduled_sampling: false
+  use_gns_noise: false
+  use_homoscedastic_weighting: true
+  field_category_loss_weights: [0.40, 0.40, 0.20]
+  rollout_horizon_max: 1
+  rollout_horizon_schedule: [1]
+  rollout_weight: 0.0
+  pushforward_weight: 0.0
+evaluation:
+  checkpoint: ""
+  split: test
+  rollout_horizons: [1, 4, 8, 16, 32, 64, 180]
+  rollout_starts_per_case: 5
+  max_batches: 0
+  allow_missing_native_task2: true
+  save_plots: true
+  save_full_fields: true
+  save_full_rollout_fields: true
+  field_visual_phase: 0.5
+  field_visual_phases: [0.1, 0.3, 0.5, 0.7, 0.9]
+  field_plane_mode: highest_energy
+  vortex_geometry:
+    propagation_axis: 2
+    vorticity_percentile: 95
+    minimum_core_nodes: 8
+    maximum_core_components: 8
+    minimum_peak_separation_physical: 0.0
+    peak_prominence_fraction: 0.10
+    maximum_ring_planes: 8
+    axis_smoothing_alpha: 0.25
+  save_parity_plots: true
+  save_field_groups: true

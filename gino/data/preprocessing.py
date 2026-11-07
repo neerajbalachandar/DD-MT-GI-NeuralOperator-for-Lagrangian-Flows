@@ -23,12 +23,14 @@ def run_preprocessing(source_root=None, output_dir=None, *, max_pairs_per_case=N
     )
 
 
-def run_preprocessing_from_merged_frames(merged_frames, output_dir=None, *, raw_root=None, device="auto"):
+def run_preprocessing_from_merged_frames(merged_frames, output_dir=None, *, raw_root=None, device="auto",
+                                       field_sampling=None, field_domain_mode="full_native_grid", max_queries=None):
     """Build the final train archive from an existing merged_frames tree."""
     merged_path = Path(merged_frames).expanduser().resolve()
     output_path = Path(output_dir or merged_path.parent).expanduser().resolve()
     return preprocessing_pipeline.preprocess_vpm_merged_frames(
-        merged_path, output_path, raw_root=raw_root, device=device)
+        merged_path, output_path, raw_root=raw_root, device=device,
+        field_sampling=field_sampling, field_domain_mode=field_domain_mode, max_queries=max_queries)
 
 
 def run_legacy_preprocessing(source_root=None, output_dir=None, field_root=None):
