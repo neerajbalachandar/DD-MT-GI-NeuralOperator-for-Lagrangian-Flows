@@ -1880,6 +1880,8 @@ def _scan_pairs(by_case, meta_by_case, field_files_by_case=None):
                     end = start + count
                     pair_ranges.append((case, current["frame_id"], following["frame_id"], start, end, count))
                     entries = [] if field_files_by_case is None else field_files_by_case.get(case, [])
+                    # Eulerian supervision describes the same particle frame that
+                    # enters the model (t); the paired state target is t+1.
                     matched_field = match_task2_xmf_time(entries, float(current["xmf_time"]))
                     field_available.append(matched_field is not None)
                     start = end
@@ -1967,6 +1969,8 @@ def _fill_one_case(case, case_plist, case_meta, case_pairs, field_entries,
             else:
                 correspondence = "tagged_source_row_index_fallback"
 
+            # Keep field targets synchronized with the input particle frame t,
+            # never with `following` (the state-transition target at t+1).
             field_match = match_task2_xmf_time(field_entries, float(current["xmf_time"])) if has_field else None
             field_time, field_path = field_match if field_match is not None else (None, None)
             if field_path is not None:

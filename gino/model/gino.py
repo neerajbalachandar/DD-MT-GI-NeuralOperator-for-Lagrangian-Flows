@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+import warnings
 from collections import OrderedDict
 from torch import nn
 
@@ -49,8 +50,11 @@ class GINOSharedLatent(nn.Module):
         self.attn_norm = nn.LayerNorm(hidden)
         self.delta_fusion = nn.Sequential(nn.Linear(2 * hidden, hidden), nn.GELU(), nn.Linear(hidden, hidden))
         self.delta_head = make_particle_decoder(hidden, delta_channels)
-        self.log_delta_var = nn.Parameter(torch.zeros(()))
-        self.log_field_var = nn.Parameter(torch.zeros(()))
+        self.log_physical_state_var = nn.Parameter(torch.zeros(()))
+        self.log_residual_var = nn.Parameter(torch.zeros(()))
+        self.log_velocity_var = nn.Parameter(torch.zeros(()))
+        self.log_gradient_var = nn.Parameter(torch.zeros(()))
+        self.log_vorticity_var = nn.Parameter(torch.zeros(()))
         if self.use_task_adapters:
             self.task_adapters = TaskAdapters(hidden)
 
@@ -58,6 +62,29 @@ class GINOSharedLatent(nn.Module):
         # neuralop stores constructor metadata as a plain state-dict key; it is
         # configuration, not a learned tensor, and the checkpoint stores config separately.
         weights = OrderedDict((key, value) for key, value in state_dict.items() if key != "_metadata")
+        legacy = {"log_delta_var": "log_residual_var", "log_field_var": None}
+        migrated = []
+        initialized = []
+        for old, new in legacy.items():
+            if old in weights:
+                value = weights.pop(old)
+                if new and new not in weights:
+                    weights[new] = value
+                migrated.append(old)
+        for key in ("log_physical_state_var", "log_residual_var", "log_velocity_var",
+                    "log_gradient_var", "log_vorticity_var"):
+            if key not in weights:
+                if key in ("log_velocity_var", "log_gradient_var", "log_vorticity_var") and "log_field_var" in state_dict:
+                    weights[key] = state_dict["log_field_var"]
+                else:
+                    weights[key] = torch.zeros_like(getattr(self, key))
+                    initialized.append(key)
+        if migrated:
+            warnings.warn("Migrated legacy uncertainty parameters " + ", ".join(migrated) +
+                          ".", RuntimeWarning)
+        if initialized:
+            warnings.warn("Initialized missing uncertainty parameters from zero: " + ", ".join(initialized),
+                          RuntimeWarning)
         return super().load_state_dict(weights, strict=strict, assign=assign)
 
     def apply_gno(self, block, source_coords, query_coords, source_features):

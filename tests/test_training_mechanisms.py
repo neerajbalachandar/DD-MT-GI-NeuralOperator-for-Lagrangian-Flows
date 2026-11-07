@@ -1,10 +1,14 @@
 import torch
 import pytest
 
-from gino.training.losses import normalized_rollout_loss, grouped_field_loss
+from gino.training.losses import (normalized_rollout_loss, grouped_field_loss,
+                                  uncertainty_weighted_mse, uncertainty_weighted_sum)
 from gino.training.noise import perturb_flow_inputs, random_walk_noise, noise_for_rollout_input
 from gino.training.scheduled_sampling import (choose_predicted_flow_inputs,
     scheduled_sampling_probability, teacher_input_at)
+from scripts.train import select_configured_input_features
+import numpy as np
+from gino.training.losses import normalized_physical_state_loss
 
 
 def test_random_walk_noise_shape_and_zero_variance():
@@ -77,7 +81,7 @@ def test_normalized_rollout_loss_scales_each_state_component():
     torch.testing.assert_close(loss, torch.tensor(1.0))
 
 
-def test_grouped_field_loss_slices_canonical_channels_and_weights_groups():
+def test_grouped_field_loss_slices_canonical_channels_with_independent_mse():
     target = torch.ones((1, 4, 15))
     prediction = target.clone()
     prediction[..., :3] += 1.0
@@ -85,9 +89,53 @@ def test_grouped_field_loss_slices_canonical_channels_and_weights_groups():
     prediction[..., 12:15] += 3.0
     aggregate, groups = grouped_field_loss(prediction, target)
     torch.testing.assert_close(groups["velocity"], torch.tensor(1.0))
-    torch.testing.assert_close(groups["gradient"], torch.tensor(2.0))
-    torch.testing.assert_close(groups["vorticity"], torch.tensor(3.0))
-    torch.testing.assert_close(aggregate, torch.tensor(2.3))
+    torch.testing.assert_close(groups["gradient"], torch.tensor(4.0))
+    torch.testing.assert_close(groups["vorticity"], torch.tensor(9.0))
+    torch.testing.assert_close(aggregate, torch.tensor(14.0))
+
+
+def test_grouped_field_mse_exact_constant_and_query_count_independent():
+    target = torch.arange(30, dtype=torch.float32).reshape(1, 2, 15)
+    aggregate, groups = grouped_field_loss(target, target)
+    assert aggregate.item() == 0.0
+    assert all(value.item() == 0.0 for value in groups.values())
+    for n_queries in (1, 4, 19):
+        prediction = torch.ones((2, n_queries, 15))
+        reference = torch.zeros_like(prediction)
+        total, pieces = grouped_field_loss(prediction, reference)
+        assert set(pieces) == {"velocity", "gradient", "vorticity"}
+        assert all(value.item() == 1.0 for value in pieces.values())
+        assert total.item() == 3.0
+
+
+def test_uncertainty_weighted_losses_have_gradients_for_every_task_variance():
+    names = ("physical_state", "residual", "field_velocity", "field_gradient", "field_vorticity")
+    variances = {name: torch.nn.Parameter(torch.zeros(())) for name in names}
+    losses = {name: torch.tensor(2.0, requires_grad=True) for name in names}
+    result = uncertainty_weighted_sum(losses, variances)
+    result.backward()
+    for parameter in variances.values():
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad)
+    torch.testing.assert_close(uncertainty_weighted_mse(torch.tensor(2.), torch.tensor(0.)), torch.tensor(1.))
+
+
+def test_training_preserves_explicit_state_only_feature_selection():
+    available = np.asarray(["x", "y", "z", "u_x", "gradU_xx", "Gamma_x", "Gamma_y", "Gamma_z", "sigma"])
+    requested = ["Gamma_x", "Gamma_y", "Gamma_z", "sigma"]
+    assert select_configured_input_features({"feature_names": available}, requested) == requested
+    with pytest.raises(ValueError, match="missing"):
+        select_configured_input_features({"feature_names": available}, ["Gamma_x", "u_z"])
+
+
+def test_physical_state_loss_normalizes_both_prediction_and_target():
+    mean = torch.tensor([1., 2., 3., 4., 5., 6., 7.])
+    std = torch.tensor([1., 2., 3., 4., 5., 6., 7.])
+    target = mean.view(1, 1, 7).clone()
+    predicted = target.clone()
+    predicted[..., 0] += 1.0
+    loss = normalized_physical_state_loss(predicted, target, mean, std)
+    torch.testing.assert_close(loss, torch.tensor(1.0 / 7.0))
 
 
 def test_grouped_field_loss_rejects_invalid_targets_instead_of_masking():

@@ -1,6 +1,6 @@
 import numpy as np
 
-from gino.data.preprocessing_pipeline import read_xmf_time
+from gino.data.preprocessing_pipeline import read_xmf_time, match_task2_xmf_time
 
 
 def test_read_xmf_time_accepts_integer_and_decimal_values(tmp_path):
@@ -35,3 +35,12 @@ def test_xmf_step_delta_converts_to_physical_dt():
     xmf_times = np.asarray([25.0, 26.0, 28.0])
     physical_times = (xmf_times - xmf_times[0]) * 0.0034
     np.testing.assert_allclose(np.diff(physical_times), [0.0034, 0.0068])
+
+
+def test_task2_field_matches_current_particle_frame_not_following_frame(tmp_path):
+    current = tmp_path / "field_t.h5"
+    following = tmp_path / "field_tp1.h5"
+    entries = [(12.0, current), (13.0, following)]
+    # The transition target is t+1, but field supervision for the input state is t.
+    assert match_task2_xmf_time(entries, 12.0) == (12.0, current)
+    assert match_task2_xmf_time(entries, 13.0) == (13.0, following)

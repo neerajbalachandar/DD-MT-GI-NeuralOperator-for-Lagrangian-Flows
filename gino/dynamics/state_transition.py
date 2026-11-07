@@ -8,7 +8,8 @@ def predict_next_state(model, batch, latent_grid, normalization, dt=None, decode
     residual_norm = model.decode_particle(encoded)
     particle_field_norm = model.decode_field(encoded, batch.get("particle_queries", batch["input_geom"]))
     field_norm = model.decode_field(encoded, batch["output_queries"]) if decode_output_field else None
-    residual = normalization.denormalize_residual(residual_norm)[..., :7]
+    residual_all = normalization.denormalize_residual(residual_norm)
+    residual = residual_all[..., :7]
     field = normalization.denormalize_field(particle_field_norm)
     velocity, grad = field[..., :3], field[..., 3:12].reshape(*field.shape[:-1], 3, 3)
     state = batch["state_phys"]
@@ -16,7 +17,14 @@ def predict_next_state(model, batch, latent_grid, normalization, dt=None, decode
     while torch.is_tensor(step) and step.ndim < state.ndim:
         step = step.unsqueeze(-1)
     base = physical_transition(state, velocity, grad, step)
+    target_state = batch.get("next_state_phys")
+    if residual.shape != state.shape or (target_state is not None and target_state.shape != state.shape):
+        raise ValueError(f"Physical state shape mismatch: input={state.shape}, residual={residual.shape}, "
+                         f"target={None if target_state is None else target_state.shape}")
+    if field.shape[-1] < 12 or not torch.isfinite(field[..., :12]).all():
+        raise ValueError("Particle-query physical velocity/gradient is missing or non-finite")
     return {"predicted_state": base + residual, "base_state": base, "residual": residual,
+            "residual_phys_all": residual_all, "residual_norm": residual_norm,
             "field_norm": field_norm, "field_phys": (normalization.denormalize_field(field_norm)
                                                          if field_norm is not None else None),
             "particle_field_norm": particle_field_norm, "particle_field_phys": field}

@@ -4,7 +4,7 @@ from .geometry import particle_geometry_features
 from .context import RolloutContext
 
 def rebuild_next_batch(batch, state_phys, particle_field_phys, normalization, differentiable=False):
-    """Rebuild every model input channel from a predicted physical state and field."""
+    """Rebuild future inputs from predicted state; never attach a stale time-t field to t+1."""
     out = dict(batch)
     full = batch["particle_features_phys"].clone()
     names = batch["all_feature_names"]
@@ -13,12 +13,12 @@ def rebuild_next_batch(batch, state_phys, particle_field_phys, normalization, di
     state_names = ("x", "y", "z", "Gamma_x", "Gamma_y", "Gamma_z", "sigma")
     for channel, name in enumerate(state_names):
         full[..., idx[name]] = state_phys[..., channel]
-    for channel, name in enumerate(("u_x", "u_y", "u_z")):
-        full[..., idx[name]] = particle_field_phys[..., channel]
-    grad = particle_field_phys[..., 3:12].reshape(*particle_field_phys.shape[:-1], 3, 3)
-    grad_names = [f"gradU_{i}{j}" for i in "xyz" for j in "xyz"]
-    for channel, name in enumerate(grad_names):
-        full[..., idx[name]] = grad.flatten(-2)[..., channel]
+    stale_flow_features = {"u_x", "u_y", "u_z", *(f"gradU_{i}{j}" for i in "xyz" for j in "xyz")}
+    requested_stale = stale_flow_features.intersection(active)
+    if requested_stale:
+        raise ValueError("Rollout input reconstruction cannot reuse a time-t particle field at predicted "
+                         "time-t+1 coordinates; use state-only inputs or implement a same-time future field query. "
+                         f"Requested stale flow channels: {sorted(requested_stale)}")
 
     # VTK/NumPy geometry is an external non-differentiable boundary. Other
     # reconstructed features and normalized particle coordinates retain their graph.

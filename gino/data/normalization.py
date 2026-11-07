@@ -87,6 +87,9 @@ class NormalizationStats:
     def denormalize_field(self, value):
         return value * self._tensor(self.field_std, value) + self._tensor(self.field_mean, value)
 
+    def normalize_field(self, value):
+        return (value - self._tensor(self.field_mean, value)) / self._tensor(self.field_std, value).clamp_min(1e-8)
+
     def normalize_input(self, value):
         return (value - self._tensor(self.input_mean, value)) / self._tensor(self.input_std, value).clamp_min(1e-8)
 

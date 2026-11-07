@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 from gino.data.dataset import EvolutionDataset, load_processed_dataset, collate_one
 from gino.data.normalization import NormalizationStats
 from gino.evaluation.one_step import evaluate_one_step
+from gino.evaluation.field import evaluate_teacher_forced_field, field_group_metrics_torch
 from gino.data.reconstruction import rebuild_next_batch_inference
 from gino.data.hdf5 import (read_task2_velocity, read_task2_vorticity, native_field_plane, native_coordinate_plane,
                             highest_energy_y_plane)
@@ -124,28 +125,9 @@ def main():
     target_names = checkpoint.get("target_names", data["target_names"])
     state = {key: value for key, value in checkpoint["model_state_dict"].items() if key != "_metadata"}
     model = GINOSharedLatent(len(features), len(target_names), len(field_names), len(global_names), model_cfg).to(device)
-    checkpoint_parameter_count = sum(value.numel() for value in state.values() if torch.is_tensor(value))
-    model_parameter_count = sum(value.numel() for value in model.state_dict().values() if torch.is_tensor(value))
-    print(f"Checkpoint parameters: {checkpoint_parameter_count}; configured model parameters: {model_parameter_count}")
-    model_state = {key: value for key, value in model.state_dict().items() if key != "_metadata"}
-    model_keys, checkpoint_keys = set(model_state), set(state)
-    missing_keys, unexpected_keys = sorted(model_keys - checkpoint_keys), sorted(checkpoint_keys - model_keys)
-    shape_mismatches = {key: (tuple(state[key].shape), tuple(model.state_dict()[key].shape))
-                        for key in model_keys & checkpoint_keys
-                        if torch.is_tensor(state[key]) and state[key].shape != model_state[key].shape}
-    print(f"Checkpoint missing keys: {missing_keys}")
-    print(f"Checkpoint unexpected keys: {unexpected_keys}")
-    print(f"Checkpoint tensor shape mismatches: {shape_mismatches}")
-    if checkpoint_parameter_count != model_parameter_count:
-        print("Checkpoint parameter-count mismatch")
-    if not shape_mismatches:
-        missing, unexpected = model.load_state_dict(state, strict=False)
-        if missing or unexpected:
-            missing_keys, unexpected_keys = missing, unexpected
-    if checkpoint_parameter_count != model_parameter_count or missing_keys or unexpected_keys or shape_mismatches:
-        raise RuntimeError(f"Checkpoint incompatibility: parameter_count="
-                           f"{checkpoint_parameter_count}/{model_parameter_count}, missing={missing_keys}, "
-                           f"unexpected={unexpected_keys}, shapes={shape_mismatches}")
+    # Strict loading allows only the explicitly migrated legacy uncertainty keys;
+    # unrelated missing/unexpected keys still fail in GINOSharedLatent.load_state_dict.
+    model.load_state_dict(state, strict=True)
     print("Checkpoint architecture/configuration: compatible")
     stats = NormalizationStats.from_checkpoint(checkpoint)
     split = str(cfg["evaluation"].get("split", "test"))
@@ -172,6 +154,7 @@ def main():
     latent = build_latent_grid(model_cfg["latent_res"], device)
     one_step_visuals = {}
     records = evaluate_one_step(model, loader, latent, stats, device, visual_samples=one_step_visuals)
+    teacher_field_records = evaluate_teacher_forced_field(model, loader, latent, stats, device)
     cases = sorted({record.get("case", "unknown") for record in records})
     for case in cases:
         case_records = [record for record in records if record.get("case", "unknown") == case]
@@ -240,6 +223,19 @@ def main():
         rollout_loader = islice(rollout_loader, max_batches)
     out_dir = checkpoint_path.parent / "evaluation"
     out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "teacher_forced_field_reconstruction.json").write_text(
+        json.dumps(teacher_field_records, indent=2, default=str))
+    teacher_summary = {}
+    for group in ("velocity", "gradient", "vorticity"):
+        for metric in ("normalized_mse", "physical_rmse", "physical_relative_l2"):
+            key = f"{group}_{metric}"
+            values = [row[key] for row in teacher_field_records if key in row]
+            teacher_summary[key] = float(np.mean(values)) if values else None
+    (out_dir / "teacher_forced_field_reconstruction_summary.json").write_text(
+        json.dumps({"mode": "teacher_forced_field_reconstruction", "n_samples": len(teacher_field_records),
+                    "metrics": teacher_summary}, indent=2))
+    print(f"[field evaluation] teacher_forced_field_reconstruction n={len(teacher_field_records)} "
+          f"metrics={teacher_summary}")
     model.eval()
     skipped_horizons = {horizon: 0 for horizon in horizons}
     export_rollout_fields = bool(cfg["evaluation"].get("save_full_rollout_fields", True))
@@ -309,6 +305,13 @@ def main():
                                        "field_relative_l2": relative_l2(field_prediction[..., :3], field_target[..., :3]),
                                        "field_all_channel_mse": mse(field_prediction, field_target),
                                        **field_group_metrics(field_prediction, field_target)})
+                        pred_phys_tensor = torch.as_tensor(field_prediction, dtype=torch.float32)
+                        target_phys_tensor = torch.as_tensor(field_target, dtype=torch.float32)
+                        pred_norm_at_step = stats.normalize_field(pred_phys_tensor)
+                        target_norm_at_step = batch["rollout_field_targets"][:, h - 1].cpu()
+                        record.update({f"rollout_conditioned_{key}": value for key, value in
+                                       field_group_metrics_torch(pred_norm_at_step, target_norm_at_step,
+                                           pred_phys_tensor, target_phys_tensor).items()})
                         if field_prediction.shape[-1] >= 15:
                             record.update({"vorticity_mse": mse(field_prediction[..., 12:15], field_target[..., 12:15]),
                                            "vorticity_relative_l2": relative_l2(field_prediction[..., 12:15],
@@ -595,6 +598,18 @@ def main():
         } for category, rows in sorted(one_step_by_category.items())
     })
     write_json(out_dir / "autoregressive.json", {"checkpoint": str(checkpoint_path), "split": split, "records": rollout_records})
+    rollout_field_records = [{"mode": "rollout_conditioned_field_reconstruction", **record}
+                             for record in rollout_records if "rollout_conditioned_velocity_normalized_mse" in record]
+    rollout_field_metrics = {}
+    for group in ("velocity", "gradient", "vorticity"):
+        for metric in ("normalized_mse", "physical_rmse", "physical_relative_l2"):
+            key = f"rollout_conditioned_{group}_{metric}"
+            values = [row[key] for row in rollout_field_records if key in row]
+            rollout_field_metrics[key] = float(np.mean(values)) if values else None
+    write_json(out_dir / "rollout_conditioned_field_reconstruction.json", {
+        "checkpoint": str(checkpoint_path), "split": split,
+        "n_samples": len(rollout_field_records), "metrics": rollout_field_metrics,
+        "records": rollout_field_records})
     write_json(out_dir / "native_task2_field.json", {"root": native_root, "records": native_records})
     if save_full_fields:
         print(f"[field export] full velocity/vorticity grids saved under {out_dir / 'full_field_reconstruction'}")

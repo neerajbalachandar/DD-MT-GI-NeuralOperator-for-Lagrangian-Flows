@@ -9,11 +9,13 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from .losses import combined_loss, grouped_field_loss, state_loss, normalized_rollout_loss
+from .losses import (grouped_field_loss, normalized_rollout_loss, uncertainty_weighted_sum,
+                     normalized_physical_state_loss)
 from .noise import perturb_flow_inputs, random_walk_noise, noise_for_rollout_input
 from .scheduled_sampling import scheduled_sampling_probability, choose_predicted_flow_inputs, teacher_input_at
 from gino.data.reconstruction import rebuild_next_batch_training
 from gino.dynamics.rollout import training_rollout, pushforward_rollout
+from gino.dynamics.state_transition import predict_next_state
 
 
 def set_deterministic_seed(seed):
@@ -49,7 +51,15 @@ class Trainer:
         self.normalization, self.config = normalization, config
         self.run_dir, self.device = Path(run_dir), device
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.optimizer = torch.optim.AdamW(model.parameters(), lr=float(config["learning_rate"]), weight_decay=float(config["weight_decay"]))
+        uncertainty_names = {"log_physical_state_var", "log_residual_var", "log_velocity_var",
+                             "log_gradient_var", "log_vorticity_var"}
+        regularized, unregularized = [], []
+        for name, parameter in model.named_parameters():
+            (unregularized if name in uncertainty_names else regularized).append(parameter)
+        self.optimizer = torch.optim.AdamW([
+            {"params": regularized, "weight_decay": float(config["weight_decay"])},
+            {"params": unregularized, "weight_decay": 0.0},
+        ], lr=float(config["learning_rate"]))
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode="min", patience=5) if config.get("scheduler") == "plateau" else None
         self.mixed_precision = bool(config.get("mixed_precision")) and str(device).startswith("cuda")
         self.history = []
@@ -65,7 +75,7 @@ class Trainer:
 
     def _epoch(self, loader, train, epoch=1):
         self.model.train(train)
-        totals = {k: [] for k in ("total_loss", "state_loss", "field_loss", "field_velocity_loss",
+        totals = {k: [] for k in ("total_loss", "state_loss", "residual_loss", "field_loss", "field_velocity_loss",
                                   "field_gradient_loss", "field_vorticity_loss", "rollout_loss",
                                   "pushforward_loss", "gradient_norm", "effective_horizon",
                                   "field_supervision_fraction")}
@@ -124,24 +134,39 @@ class Trainer:
                 batch["x"], _ = perturb_flow_inputs(batch, noise_for_rollout_input(noise, 0), flow_indices)
             with torch.set_grad_enabled(train), torch.autocast(
                     device_type="cuda", enabled=self.mixed_precision, dtype=torch.bfloat16):
-                pred, field = self.model(batch["input_geom"], self.latent_grid, batch["output_queries"], batch["x"], batch["global_params"], batch_dict=batch)
-                state_term = state_loss(pred[..., :batch["delta_target"].shape[-1]], batch["delta_target"])
+                prediction = predict_next_state(self.model, batch, self.latent_grid, self.normalization)
+                field = prediction["field_norm"]
+                residual_target = batch["delta_target"]
+                residual_pred = prediction["residual_norm"]
+                if residual_pred.shape != residual_target.shape:
+                    raise ValueError(f"Residual prediction/target shape mismatch: {residual_pred.shape} vs {residual_target.shape}")
+                # The first seven channels correct the physical baseline; the
+                # final three are supervised delta-u auxiliaries and are not propagated.
+                residual_term = torch.nn.functional.mse_loss(residual_pred, residual_target)
+                state_term = normalized_physical_state_loss(prediction["predicted_state"], batch["next_state_phys"],
+                    self.normalization.state_mean[:7], self.normalization.state_std[:7])
                 has_field_target = bool(batch.get("field_available", True))
                 totals["field_supervision_fraction"].append(float(has_field_target))
                 if has_field_target:
-                    field_term, field_groups = grouped_field_loss(
-                        field, batch["field_target"],
-                        {"velocity": self.config.get("field_velocity_weight", 1.0),
-                         "gradient": self.config.get("field_gradient_weight", 0.5),
-                         "vorticity": self.config.get("field_vorticity_weight", 0.1)},
-                        relative=bool(self.config.get("use_relative_l2_field_loss", True)))
+                    _, field_groups = grouped_field_loss(field, batch["field_target"])
+                    field_term = sum(field_groups.values())
                 else:
                     field_term, field_groups = None, {}
-                one_step = combined_loss(state_term if self.config.get("use_state_loss", True) else None,
-                                      field_term if self.config.get("use_field_loss", True) else None,
-                                      weights={"state": self.config.get("state_loss_weight", 1.0), "field": self.config.get("field_loss_weight", 1.0)},
-                                      log_state_var=self.model.log_delta_var, log_field_var=self.model.log_field_var,
-                                      homoscedastic=bool(self.config.get("use_homoscedastic_weighting", True)))
+                task_losses = {}
+                if self.config.get("use_state_loss", True):
+                    task_losses["physical_state"] = state_term
+                    task_losses["residual"] = residual_term
+                if self.config.get("use_field_loss", True) and has_field_target:
+                    task_losses.update({f"field_{key}": value for key, value in field_groups.items()})
+                variances = {"physical_state": self.model.log_physical_state_var,
+                             "residual": self.model.log_residual_var,
+                             "field_velocity": self.model.log_velocity_var,
+                             "field_gradient": self.model.log_gradient_var,
+                             "field_vorticity": self.model.log_vorticity_var}
+                if self.config.get("use_homoscedastic_weighting", True):
+                    one_step = uncertainty_weighted_sum(task_losses, variances)
+                else:
+                    one_step = sum(task_losses.values())
                 rollout_term = pushforward_term = None
                 if do_sequence:
                     horizon = min(active_horizon, batch["rollout_state_targets"].shape[1])
@@ -208,6 +233,7 @@ class Trainer:
                 grad_norm = None
             totals["total_loss"].append(total.detach())
             totals["state_loss"].append(state_term.detach())
+            totals["residual_loss"].append(residual_term.detach())
             if field_term is not None:
                 totals["field_loss"].append(field_term.detach())
                 for name, metric in (("velocity", "field_velocity_loss"),
@@ -278,9 +304,21 @@ class Trainer:
             max_probability = float(self.config.get("scheduled_sampling_max_probability", 0.3))
             if self.scheduler and did_validate:
                 self.scheduler.step(val_loss)
+            uncertainty_names = ("physical_state", "residual", "velocity", "gradient", "vorticity")
+            uncertainty_values = {}
+            for name in uncertainty_names:
+                parameter = getattr(self.model, f"log_{name}_var")
+                value = float(parameter.detach().cpu())
+                if not np.isfinite(value):
+                    raise FloatingPointError(f"Non-finite learned log variance for {name}: {value}")
+                if abs(value) > float(self.config.get("uncertainty_log_variance_warning", 10.0)):
+                    print(f"[uncertainty warning] log variance for {name}={value:.4g}; effective precision may have collapsed")
+                uncertainty_values[f"log_variance_{name}"] = value
+                uncertainty_values[f"precision_{name}"] = float(np.exp(np.clip(-value, -80.0, 80.0)))
             row = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss,
                    **{f"train_{k}": v for k, v in train_metrics.items()},
                    **{f"val_{k}": v for k, v in val_metrics.items()},
+                   **uncertainty_values,
                    "learning_rate": float(self.optimizer.param_groups[0]["lr"]),
                    "train_effective_rollout_horizon": train_metrics["effective_horizon"],
                    "rollout_horizon": active_horizon if self.config.get("use_rollout_loss") or self.config.get("use_pushforward") else 1,
@@ -290,12 +328,16 @@ class Trainer:
                    ) if self.config.get("use_scheduled_sampling") else 0.0,
                    "noise_initial_std": float(self.config.get("gns_initial_std", 0.0)) if self.config.get("use_gns_noise") else 0.0,
                    "noise_walk_std": float(self.config.get("gns_walk_std", 0.0)) if self.config.get("use_gns_noise") else 0.0,
-                   "log_state_variance": float(self.model.log_delta_var.detach().cpu()),
-                   "log_field_variance": float(self.model.log_field_var.detach().cpu()),
-                   "state_task_weight": (float(torch.exp(-self.model.log_delta_var.detach()).cpu())
-                       if self.config.get("use_homoscedastic_weighting", True) else float(self.config.get("state_loss_weight", 1.0))),
-                   "field_task_weight": (float(torch.exp(-self.model.log_field_var.detach()).cpu())
-                       if self.config.get("use_homoscedastic_weighting", True) else float(self.config.get("field_loss_weight", 1.0)))}
+                   "checkpoint_selection_objective": (
+                       "fixed validation horizon total objective: uncertainty-weighted physical-state and residual "
+                       "MSE plus available Eulerian group MSEs"
+                       + (f" plus rollout loss (weight={float(self.config.get('rollout_weight', 0.0))})"
+                          if self.config.get("use_rollout_loss", False) and int(self.config.get("validation_rollout_horizon", 1)) > 1
+                          else "")
+                       + "; pushforward is training-only and does not affect checkpoint selection"
+                   ),
+                   "rollout_weight": float(self.config.get("rollout_weight", 0.0)),
+                   "pushforward_weight": float(self.config.get("pushforward_weight", 0.0))}
             self.history.append(row)
             print(
                 f"epoch {epoch:03d} | train {train_loss:.6g} | val {val_loss:.6g} | "

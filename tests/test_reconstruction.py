@@ -8,11 +8,11 @@ from gino.dynamics.rollout import inference_rollout
 
 def test_rebuild_updates_physical_features_geometry_and_phase(monkeypatch):
     monkeypatch.setattr("gino.data.reconstruction.particle_geometry_features",
-                        lambda xyz, path: {"geom_dist": np.full(len(xyz), 0.25, dtype=np.float32)})
+                        lambda xyz, path, case=None: {"geom_dist": np.full(len(xyz), 0.25, dtype=np.float32)})
     names = ["x", "y", "z", "Gamma_x", "Gamma_y", "Gamma_z", "sigma", "u_x", "u_y", "u_z",
              "gradU_xx", "gradU_xy", "gradU_xz", "gradU_yx", "gradU_yy", "gradU_yz",
              "gradU_zx", "gradU_zy", "gradU_zz", "geom_dist", "phase"]
-    active = ["u_x", "sigma", "geom_dist", "Gamma_x", "gradU_xx", "phase"]
+    active = ["sigma", "geom_dist", "Gamma_x", "phase"]
     full = torch.zeros(1, 2, len(names))
     batch = {"particle_features_phys": full, "all_feature_names": names, "feature_names": active,
              "global_feature_names": ["phase"], "global_params": torch.zeros(1, 1),
@@ -20,7 +20,7 @@ def test_rebuild_updates_physical_features_geometry_and_phase(monkeypatch):
                               "phase_t": 0.3, "phase_tp1": 0.4, "phase_delta": 0.1}, "phase_next": 0.4, "phase_delta": 0.1,
              "rollout_queries": torch.zeros(1, 1, 2, 3), "rollout_field_targets": torch.zeros(1, 2, 2, 12),
              "rollout_contexts": [], "rollout_pair_ids": [], "rollout_phases": torch.tensor([[0.4]])}
-    stats = NormalizationStats(np.zeros(6), np.ones(6), np.zeros(7), np.ones(7),
+    stats = NormalizationStats(np.zeros(4), np.ones(4), np.zeros(7), np.ones(7),
                                np.zeros(12), np.ones(12), np.zeros(3), np.ones(3))
     state = torch.tensor([[[0.2, 0.3, 0.4, 1., 2., 3., 0.7],
                            [0.5, 0.6, 0.7, 4., 5., 6., 0.8]]])
@@ -30,22 +30,21 @@ def test_rebuild_updates_physical_features_geometry_and_phase(monkeypatch):
     rebuilt = rebuild_next_batch(batch, state, field, stats)
     assert rebuilt["geometry_differentiable"] is False
     assert "VTK/NumPy" in rebuilt["geometry_gradient_boundary"]
-    torch.testing.assert_close(rebuilt["x"][..., 0], torch.full((1, 2), 2.0))
-    torch.testing.assert_close(rebuilt["x"][..., 1], state[..., 6])
-    torch.testing.assert_close(rebuilt["x"][..., 2], torch.full((1, 2), 0.25))
-    torch.testing.assert_close(rebuilt["x"][..., 3], state[..., 3])
-    torch.testing.assert_close(rebuilt["x"][..., 4], torch.full((1, 2), 3.0))
-    torch.testing.assert_close(rebuilt["x"][..., 5], torch.full((1, 2), 0.4))
+    torch.testing.assert_close(rebuilt["x"][..., 0], state[..., 6])
+    torch.testing.assert_close(rebuilt["x"][..., 1], torch.full((1, 2), 0.25))
+    torch.testing.assert_close(rebuilt["x"][..., 2], state[..., 3])
+    torch.testing.assert_close(rebuilt["x"][..., 3], torch.full((1, 2), 0.4))
     torch.testing.assert_close(rebuilt["global_params"], torch.tensor([[0.4]]))
+    torch.testing.assert_close(rebuilt["input_geom"], state[..., :3])
     torch.testing.assert_close(rebuilt["output_queries"], torch.zeros(1, 2, 3))
 
 
 def test_h2_rollout_uses_generated_state_and_advancing_context(monkeypatch):
     monkeypatch.setattr("gino.data.reconstruction.particle_geometry_features",
-                        lambda xyz, path: {"geom_dist": np.full(len(xyz), 0.1, dtype=np.float32)})
+                        lambda xyz, path, case=None: {"geom_dist": np.full(len(xyz), 0.1, dtype=np.float32)})
     names = ["x", "y", "z", "Gamma_x", "Gamma_y", "Gamma_z", "sigma", "u_x", "u_y", "u_z",
              *[f"gradU_{i}{j}" for i in "xyz" for j in "xyz"], "geom_dist", "phase"]
-    active = ["u_x", "sigma", "geom_dist", "Gamma_x", "phase"]
+    active = ["sigma", "geom_dist", "Gamma_x", "phase"]
     context0 = {"case": "c", "frame_t": "0", "frame_tp1": "1", "phase_t": 0., "phase_tp1": .5,
                 "phase_delta": .5, "vtk_path": "v0", "vtk_path_tp1": "v1", "dt": .1}
     context1 = {"case": "c", "frame_t": "1", "frame_tp1": "2", "phase_t": .5, "phase_tp1": 1.,
@@ -63,7 +62,7 @@ def test_h2_rollout_uses_generated_state_and_advancing_context(monkeypatch):
              "rollout_field_targets": torch.zeros(1, 2, 2, 12),
              "rollout_phases": torch.tensor([[.5, 1.]]),
              "particle_correspondence": "canonical row ordering"}
-    stats = NormalizationStats(np.zeros(len(active)), np.ones(len(active)), np.zeros(7), np.ones(7),
+    stats = NormalizationStats(np.zeros(len(active)), np.ones(len(active)), np.zeros(10), np.ones(10),
                                np.zeros(12), np.ones(12), np.zeros(3), np.ones(3))
 
     class ConstantStep(torch.nn.Module):
@@ -88,3 +87,15 @@ def test_h2_rollout_uses_generated_state_and_advancing_context(monkeypatch):
     assert rebuilt["pair_context"]["frame_t"] == "1"
     assert rebuilt["pair_context"]["vtk_path"] == "v1"
     assert rebuilt["global_params"][0, 0].item() == .5
+
+
+def test_reconstruction_rejects_time_t_flow_features_for_future_input():
+    names = ["x", "y", "z", "Gamma_x", "Gamma_y", "Gamma_z", "sigma", "u_x"]
+    batch = {"particle_features_phys": torch.zeros(1, 1, len(names)),
+             "all_feature_names": names, "feature_names": ["u_x"],
+             "pair_context": {"phase_t": 0.0}, "global_feature_names": [],
+             "global_params": torch.zeros(1, 0)}
+    stats = NormalizationStats(np.zeros(1), np.ones(1), np.zeros(10), np.ones(10),
+                               np.zeros(15), np.ones(15), np.zeros(3), np.ones(3))
+    with np.testing.assert_raises_regex(ValueError, "time-t particle field"):
+        rebuild_next_batch(batch, torch.zeros(1, 1, 7), torch.zeros(1, 1, 15), stats)

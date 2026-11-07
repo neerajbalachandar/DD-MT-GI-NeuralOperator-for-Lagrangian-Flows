@@ -116,6 +116,16 @@ def validate_warm_start_checkpoint(checkpoint, model_config, feature_names, targ
     return checkpoint["model_state_dict"]
 
 
+def select_configured_input_features(data, requested_features):
+    """Keep YAML channel order and reject channels absent from the processed archive."""
+    requested = [str(value) for value in requested_features]
+    available = [str(value) for value in data["feature_names"].tolist()]
+    missing = [name for name in requested if name not in available]
+    if not requested or len(set(requested)) != len(requested) or missing:
+        raise ValueError(f"Invalid configured input features: requested={requested}, missing={missing}")
+    return requested
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train the shared latent VPM GINO.")
     parser.add_argument("--config", default=str(HERE / "configs/default.yaml"))
@@ -193,8 +203,9 @@ def main():
     if not dataset_path.is_file():
         raise FileNotFoundError(f"Processed training archive not found: {dataset_path}")
     print(f"[dataset] training archive: {dataset_path}", flush=True)
-    data = ensure_legacy_input_feature_columns(load_processed_dataset(dataset_path), cfg["data"]["input_features"])
-    cfg["data"]["input_features"] = [str(x) for x in data["feature_names"].tolist()]
+    configured_features = [str(x) for x in cfg["data"]["input_features"]]
+    data = ensure_legacy_input_feature_columns(load_processed_dataset(dataset_path), configured_features)
+    cfg["data"]["input_features"] = select_configured_input_features(data, configured_features)
     split = {
         "train_pair_ids": np.asarray(data["train_pair_ids"], dtype=np.int64),
         "val_pair_ids": np.asarray(data.get("val_pair_ids", []), dtype=np.int64),

@@ -1,5 +1,6 @@
 import pytest
 import torch
+import numpy as np
 
 
 def test_positional_encoding_shape():
@@ -44,6 +45,55 @@ def test_different_particle_and_field_queries_share_single_encoding():
     assert result["predicted_state"].shape == (1, 5, 7)
     assert result["field_phys"].shape == (1, 7, 12)
     assert calls == {"encoder": 1, "fno": 1}
+
+
+def test_canonical_next_state_uses_decoded_particle_velocity_gradient_and_residual():
+    from gino.data.normalization import NormalizationStats
+    from gino.dynamics.state_transition import predict_next_state
+
+    class FixedDecoder(torch.nn.Module):
+        def encode_process(self, *args):
+            return None
+        def decode_particle(self, _):
+            residual = torch.zeros(1, 1, 10)
+            residual[..., 0] = 0.5
+            residual[..., 3] = 1.0
+            return residual
+        def decode_field(self, _, query):
+            field = torch.zeros(query.shape[0], query.shape[1], 15)
+            field[..., 0] = 2.0
+            field[..., 3] = 1.0  # dUx/dx
+            return field
+
+    state = torch.tensor([[[1., 2., 3., 2., 0., 0., 0.4]]])
+    batch = {"input_geom": torch.zeros(1, 1, 3), "particle_queries": torch.zeros(1, 1, 3),
+             "output_queries": torch.zeros(1, 2, 3), "x": torch.zeros(1, 1, 4),
+             "global_params": torch.zeros(1, 1), "state_phys": state, "next_state_phys": state.clone(), "dt": 0.1}
+    stats = NormalizationStats(np.zeros(4), np.ones(4), np.zeros(10), np.ones(10),
+                               np.zeros(15), np.ones(15), np.zeros(3), np.ones(3))
+    result = predict_next_state(FixedDecoder(), batch, torch.zeros(1, 1, 3), stats)
+    torch.testing.assert_close(result["predicted_state"][..., 0], torch.tensor([[1.7]]))
+    torch.testing.assert_close(result["predicted_state"][..., 3], torch.tensor([[3.2]]))
+    torch.testing.assert_close(result["predicted_state"][..., 6], torch.tensor([[0.4]]))
+    assert result["residual_phys_all"].shape[-1] == 10
+
+
+def test_legacy_checkpoint_uncertainty_keys_migrate_only_expected_parameters():
+    pytest.importorskip("neuralop")
+    from gino.model.gino import GINOSharedLatent
+    cfg = {"hidden_channels": 8, "latent_res": 4, "query_pos_encoding_frequencies": 1,
+           "gno_radius": 2., "fno_modes": 2, "fno_layers": 1, "mlp_hidden": 8, "mlp_layers": 1}
+    source = GINOSharedLatent(4, 10, 15, 1, cfg)
+    legacy = {key: value.clone() for key, value in source.state_dict().items()
+              if not key.startswith("log_") and torch.is_tensor(value)}
+    legacy["log_delta_var"] = torch.tensor(0.2)
+    legacy["log_field_var"] = torch.tensor(0.3)
+    target = GINOSharedLatent(4, 10, 15, 1, cfg)
+    with pytest.warns(RuntimeWarning, match="Migrated legacy uncertainty"):
+        target.load_state_dict(legacy, strict=True)
+    assert target.log_residual_var.item() == pytest.approx(0.2)
+    assert target.log_velocity_var.item() == pytest.approx(0.3)
+    assert target.log_physical_state_var.item() == 0.0
 
 
 def test_m0_forward_matches_explicit_shared_latent_decoders():
