@@ -54,7 +54,6 @@ class GINOSharedLatent(nn.Module):
         self.log_residual_var = nn.Parameter(torch.zeros(()))
         self.log_velocity_var = nn.Parameter(torch.zeros(()))
         self.log_gradient_var = nn.Parameter(torch.zeros(()))
-        self.log_vorticity_var = nn.Parameter(torch.zeros(()))
         if self.use_task_adapters:
             self.task_adapters = TaskAdapters(hidden)
 
@@ -72,9 +71,9 @@ class GINOSharedLatent(nn.Module):
                     weights[new] = value
                 migrated.append(old)
         for key in ("log_physical_state_var", "log_residual_var", "log_velocity_var",
-                    "log_gradient_var", "log_vorticity_var"):
+                    "log_gradient_var"):
             if key not in weights:
-                if key in ("log_velocity_var", "log_gradient_var", "log_vorticity_var") and "log_field_var" in state_dict:
+                if key in ("log_velocity_var", "log_gradient_var") and "log_field_var" in state_dict:
                     weights[key] = state_dict["log_field_var"]
                 else:
                     weights[key] = torch.zeros_like(getattr(self, key))
@@ -86,7 +85,6 @@ class GINOSharedLatent(nn.Module):
             warnings.warn("Initialized missing uncertainty parameters from zero: " + ", ".join(initialized),
                           RuntimeWarning)
         return super().load_state_dict(weights, strict=strict, assign=assign)
-
     def apply_gno(self, block, source_coords, query_coords, source_features):
         return block(y=source_coords, x=query_coords, f_y=source_features)
 
@@ -116,7 +114,14 @@ class GINOSharedLatent(nn.Module):
 
     def sample_grid(self, grid, queries):
         q = queries.clamp(0.0, 1.0)
-        sample_coords = (q * 2.0 - 1.0).view(1, -1, 1, 1, 3)
+        # The latent grid is laid out as (C, D, H, W) = (C, x, y, z): it comes from
+        # build_latent_grid (meshgrid indexing="ij", z fastest) reshaped to
+        # (r, r, r, C) and permuted to channels-first.  F.grid_sample, however,
+        # reads the last coordinate dimension as (W, H, D) order.  Passing
+        # (x, y, z) unchanged therefore swapped x and z when decoding the field.
+        # Flip to (z, y, x) so query x indexes the D (= x) axis.
+        # NOTE: checkpoints trained before this fix learned the swapped mapping.
+        sample_coords = (q.flip(-1) * 2.0 - 1.0).view(1, -1, 1, 1, 3)
         sampled = F.grid_sample(grid, sample_coords, align_corners=True, mode="bilinear")
         return sampled.squeeze(0).squeeze(-1).squeeze(-1).transpose(0, 1)
 
@@ -161,3 +166,25 @@ class GINOSharedLatent(nn.Module):
     def forward(self, input_geom, latent_queries, output_queries, x, global_params, batch_dict=None):
         encoded = self.encode_process(input_geom, latent_queries, x, global_params)
         return self.decode_particle(encoded), self.decode_field(encoded, output_queries)
+
+
+def migrate_legacy_15_channel_state_dict(state_dict, model, reference_names, model_names):
+    """Explicitly migrate a legacy 15-output field decoder to the 12-output model."""
+    from gino.data.field_schema import MODEL_FIELD_TARGET_NAMES, REFERENCE_FIELD_TARGET_NAMES, validate_field_names
+    validate_field_names(reference_names, REFERENCE_FIELD_TARGET_NAMES, "Legacy reference field")
+    validate_field_names(model_names, MODEL_FIELD_TARGET_NAMES, "Model field")
+    weights = OrderedDict((key, value) for key, value in state_dict.items() if key != "_metadata")
+    final = len(model.field_decoder) - 1
+    weight_key, bias_key = f"field_decoder.{final}.weight", f"field_decoder.{final}.bias"
+    if weight_key not in weights or bias_key not in weights:
+        raise ValueError("Legacy checkpoint is missing the final field decoder parameters")
+    if weights[weight_key].shape[0] != len(REFERENCE_FIELD_TARGET_NAMES):
+        raise ValueError(f"Expected a legacy 15-channel decoder, got {tuple(weights[weight_key].shape)}")
+    if model.field_decoder[final].weight.shape[0] != len(MODEL_FIELD_TARGET_NAMES):
+        raise ValueError("Migration target model must have exactly 12 field output channels")
+    weights[weight_key] = weights[weight_key][:len(MODEL_FIELD_TARGET_NAMES)].clone()
+    weights[bias_key] = weights[bias_key][:len(MODEL_FIELD_TARGET_NAMES)].clone()
+    # This parameter belongs only to the removed independent vorticity objective.
+    weights.pop("log_vorticity_var", None)
+    warnings.warn("Migrated a legacy 15-channel field decoder by retaining velocity and gradient outputs.", RuntimeWarning)
+    return weights

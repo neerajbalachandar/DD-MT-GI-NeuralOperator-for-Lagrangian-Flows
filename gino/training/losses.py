@@ -36,11 +36,11 @@ def field_loss(pred, target, relative=False):
 
 def grouped_field_loss(pred, target, weights=None, relative=False, categories=None, category_weights=None):
     """Group normalized MSE, optionally balancing spatial query categories."""
-    if pred.shape != target.shape or pred.shape[-1] != 15:
-        raise ValueError(f"Expected matching field tensors with 15 channels, got {pred.shape} and {target.shape}")
+    if pred.shape != target.shape or pred.shape[-1] != 12:
+        raise ValueError(f"Expected matching model field tensors with 12 channels, got {pred.shape} and {target.shape}")
     if not torch.isfinite(pred).all() or not torch.isfinite(target).all():
         raise ValueError("Field prediction/target contains NaN or infinite values")
-    groups = {"velocity": slice(0, 3), "gradient": slice(3, 12), "vorticity": slice(12, 15)}
+    groups = {"velocity": slice(0, 3), "gradient": slice(3, 12)}
     if categories is None:
         terms = {name: F.mse_loss(pred[..., channels], target[..., channels])
                  for name, channels in groups.items()}

@@ -21,7 +21,12 @@ import numpy as np
 
 PREPROC_MAX_RSS_GB = float(os.environ.get("PREPROC_MAX_RSS_GB", "0"))
 ROLLOUT_MEMORY_CAP_GB = float(os.environ.get("ROLLOUT_MEMORY_CAP_GB", "2.0"))
-MAX_PREPROCESS_PARTICLES = max(1, int(os.environ.get("MAX_PREPROCESS_PARTICLES", "2048")))
+# Per-frame particle cap.  0 (the default) means "no cap": keep every particle.
+# The previous default of 2048 silently truncated the N320/N640 leapfrogging
+# cases, keeping only ~71% / ~36% of their circulation, so the learned
+# dynamics no longer matched the field the solver produced.  A positive value
+# still subsamples, but every truncated case now prints a loud warning.
+MAX_PREPROCESS_PARTICLES = max(0, int(os.environ.get("MAX_PREPROCESS_PARTICLES", "0")))
 PREPROCESS_DEVICE = "cpu"
 FIELD_SOURCE_DIAGNOSTICS: List[Dict[str, Any]] = []
 FIELD_SAMPLING_CONFIG: Dict[str, Any] = {"mode": "regular_grid"}
@@ -70,7 +75,7 @@ def _release_process_memory() -> None:
 def _particle_subset_indices(ids: np.ndarray, count: int) -> np.ndarray:
     """Select a stable, evenly distributed subset of particle rows."""
     n = len(ids)
-    if n <= count:
+    if count <= 0 or n <= count:  # count <= 0 disables the cap
         return np.arange(n, dtype=np.int64)
     decoded = np.char.decode(_to_s32(ids), "utf-8")
     if np.any(np.char.find(decoded, ":id:") >= 0):
@@ -189,6 +194,9 @@ FIELD_TARGET_NAMES = [
     "dUz_dx", "dUz_dy", "dUz_dz",
     "omega_x", "omega_y", "omega_z",
 ]
+from .field_schema import REFERENCE_FIELD_TARGET_NAMES
+if tuple(FIELD_TARGET_NAMES) != REFERENCE_FIELD_TARGET_NAMES:
+    raise RuntimeError("Preprocessing reference-field channel order differs from the shared field schema")
 
 ACTIVE_FIELD_QUERY_BOUNDS: Optional[Tuple[float, float, float, float, float, float]] = None
 FIELD_STD_FLOOR = float(os.environ.get("FIELD_STD_FLOOR", "1e-6"))
@@ -1841,6 +1849,7 @@ def _case_split_label(case: str) -> str:
 def _load_and_track_case(case: str, plist: List[Path], meta: Dict[str, Any]):
     """Load one case's merged frames and attach persistent S32 identities."""
     frames = []
+    truncation_warned = False
     for path in plist:
         with np.load(path, allow_pickle=True) as archive:
             data = {key: archive[key] for key in archive.files}
@@ -1852,6 +1861,14 @@ def _load_and_track_case(case: str, plist: List[Path], meta: Dict[str, Any]):
         source_particle_count = len(ids)
         selected = _particle_subset_indices(ids, MAX_PREPROCESS_PARTICLES)
         if len(selected) < source_particle_count:
+            if not truncation_warned:
+                print("!" * 78 + "\n"
+                      f"[WARNING] case={case}: MAX_PREPROCESS_PARTICLES={MAX_PREPROCESS_PARTICLES} TRUNCATES "
+                      f"{source_particle_count} -> {len(selected)} particles per frame "
+                      f"({len(selected) / source_particle_count:.0%} kept). The retained particles do NOT "
+                      "carry the full circulation; set MAX_PREPROCESS_PARTICLES=0 to keep all.\n" + "!" * 78,
+                      flush=True)
+                truncation_warned = True
             ids = ids[selected]
             state = {key: np.asarray(value)[selected] for key, value in state.items()}
             velocity = velocity[selected]
@@ -1909,7 +1926,7 @@ def _load_and_track_case(case: str, plist: List[Path], meta: Dict[str, Any]):
         print(f"[track] case={case} using fixed row correspondence for {count} particles across {len(frames)} frames")
     else:
         _assign_advected_position_tracks(frames, case)
-    if source_particle_counts and max(source_particle_counts) > MAX_PREPROCESS_PARTICLES:
+    if MAX_PREPROCESS_PARTICLES > 0 and source_particle_counts and max(source_particle_counts) > MAX_PREPROCESS_PARTICLES:
         print(f"[track] case={case} retained at most {MAX_PREPROCESS_PARTICLES} of up to "
               f"{max(source_particle_counts)} source particles per frame", flush=True)
     return frames
@@ -2631,7 +2648,7 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
     estimated_gb = (total_rows * (len(PARTICLE_INPUT_FEATURES) + 2 * len(TARGET_DELTA_NAMES) + 7) * 4
                     + n_pairs * MAX_FIELD_QUERY_POINTS * (3 + len(FIELD_TARGET_NAMES)) * 4) / 1e9
     print(f"[mem] allocating dataset arrays: cases={len(all_cases)}, pairs={n_pairs}, "
-          f"particle rows={total_rows}, capped particles/frame={MAX_PREPROCESS_PARTICLES}, "
+          f"particle rows={total_rows}, capped particles/frame={MAX_PREPROCESS_PARTICLES or 'all'}, "
           f"field queries/pair={MAX_FIELD_QUERY_POINTS}, estimated raw arrays={estimated_gb:.2f} GB",
           flush=True)
     X = np.empty((total_rows, len(PARTICLE_INPUT_FEATURES)), dtype=np.float32)
@@ -2725,6 +2742,10 @@ def build_particle_evolution_dataset(merged: List[Path]) -> Path:
         field_domain_mode=np.asarray(FIELD_DOMAIN_MODE, dtype=object),
         field_sampling_diagnostics=np.asarray(sampling_diagnostics, dtype=object),
         field_mesh_bounds_diagnostics=np.asarray(json.dumps(FIELD_MESH_BOUNDS_DIAGNOSTICS, sort_keys=True), dtype=object),
+        # Bounds are stored as [xmin, ymin, zmin, xmax, ymax, zmax]. The
+        # diagnostics scan covers all available native frames, not just queries.
+        field_native_domain_bounds=np.asarray(FIELD_MESH_BOUNDS_DIAGNOSTICS.get(
+            "global_bounds", [np.nan] * 6), dtype=np.float32),
         trajectory_envelope_cases=np.asarray(list(TRAJECTORY_BOUNDS_BY_CASE), dtype=object),
         trajectory_envelope_bounds=np.asarray([[*TRAJECTORY_BOUNDS_BY_CASE[k][0], *TRAJECTORY_BOUNDS_BY_CASE[k][1]]
                                                for k in TRAJECTORY_BOUNDS_BY_CASE], dtype=np.float32).reshape(-1, 6),
@@ -3201,8 +3222,13 @@ def preprocess_vpm_merged_frames(merged_root: Path, output_root: Optional[Path] 
             "field_sampling_mode": FIELD_SAMPLING_CONFIG.get("mode", "regular_grid"),
             "field_domain_mode": FIELD_DOMAIN_MODE,
             "field_query_bounds": _field_query_bounds(),
-            "field_native_domain_bounds": np.asarray(archive["field_native_domain_bounds"]).reshape(-1).tolist(),
-            "field_mesh_bounds_diagnostics": json.loads(str(np.asarray(archive["field_mesh_bounds_diagnostics"]).reshape(-1)[0])),
+            "field_mesh_bounds_diagnostics": json.loads(str(np.asarray(archive["field_mesh_bounds_diagnostics"]).reshape(-1)[0]))
+                if "field_mesh_bounds_diagnostics" in archive else {},
+            "field_native_domain_bounds": (
+                np.asarray(archive["field_native_domain_bounds"]).reshape(-1).tolist()
+                if "field_native_domain_bounds" in archive else
+                json.loads(str(np.asarray(archive["field_mesh_bounds_diagnostics"]).reshape(-1)[0])).get("global_bounds", [])
+                if "field_mesh_bounds_diagnostics" in archive else []),
             "field_sampling_category_counts": np.bincount(archive["field_query_categories"][archive["field_query_mask"]].astype(int), minlength=3).tolist(),
         }
     (OUT_ROOT / "preprocess_summary.json").write_text(json.dumps(summary, indent=2))

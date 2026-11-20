@@ -82,34 +82,32 @@ def test_normalized_rollout_loss_scales_each_state_component():
 
 
 def test_grouped_field_loss_slices_canonical_channels_with_independent_mse():
-    target = torch.ones((1, 4, 15))
+    target = torch.ones((1, 4, 12))
     prediction = target.clone()
     prediction[..., :3] += 1.0
     prediction[..., 3:12] += 2.0
-    prediction[..., 12:15] += 3.0
     aggregate, groups = grouped_field_loss(prediction, target)
     torch.testing.assert_close(groups["velocity"], torch.tensor(1.0))
     torch.testing.assert_close(groups["gradient"], torch.tensor(4.0))
-    torch.testing.assert_close(groups["vorticity"], torch.tensor(9.0))
-    torch.testing.assert_close(aggregate, torch.tensor(14.0))
+    torch.testing.assert_close(aggregate, torch.tensor(5.0))
 
 
 def test_grouped_field_mse_exact_constant_and_query_count_independent():
-    target = torch.arange(30, dtype=torch.float32).reshape(1, 2, 15)
+    target = torch.arange(24, dtype=torch.float32).reshape(1, 2, 12)
     aggregate, groups = grouped_field_loss(target, target)
     assert aggregate.item() == 0.0
     assert all(value.item() == 0.0 for value in groups.values())
     for n_queries in (1, 4, 19):
-        prediction = torch.ones((2, n_queries, 15))
+        prediction = torch.ones((2, n_queries, 12))
         reference = torch.zeros_like(prediction)
         total, pieces = grouped_field_loss(prediction, reference)
-        assert set(pieces) == {"velocity", "gradient", "vorticity"}
+        assert set(pieces) == {"velocity", "gradient"}
         assert all(value.item() == 1.0 for value in pieces.values())
-        assert total.item() == 3.0
+        assert total.item() == 2.0
 
 
 def test_uncertainty_weighted_losses_have_gradients_for_every_task_variance():
-    names = ("physical_state", "residual", "field_velocity", "field_gradient", "field_vorticity")
+    names = ("physical_state", "residual", "field_velocity", "field_gradient")
     variances = {name: torch.nn.Parameter(torch.zeros(())) for name in names}
     losses = {name: torch.tensor(2.0, requires_grad=True) for name in names}
     result = uncertainty_weighted_sum(losses, variances)
@@ -139,7 +137,7 @@ def test_physical_state_loss_normalizes_both_prediction_and_target():
 
 
 def test_grouped_field_loss_rejects_invalid_targets_instead_of_masking():
-    target = torch.ones((1, 2, 15))
+    target = torch.ones((1, 2, 12))
     target[0, 0, 0] = float("nan")
     with pytest.raises(ValueError, match="NaN or infinite"):
         grouped_field_loss(torch.zeros_like(target), target)

@@ -70,7 +70,7 @@ def test_ring_geometry_finds_axis_and_separated_axial_peaks():
 
 def test_category_losses_renormalize_for_empty_categories():
     import torch
-    target = torch.zeros((1, 4, 15))
+    target = torch.zeros((1, 4, 12))
     pred = torch.ones_like(target)
     categories = torch.tensor([[0, 0, 1, 1]])
     total, groups = grouped_field_loss(pred, target, categories=categories,

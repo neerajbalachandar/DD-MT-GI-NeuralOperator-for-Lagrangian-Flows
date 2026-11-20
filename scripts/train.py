@@ -17,7 +17,8 @@ from gino.data.dataset import (
     sequence_level_split,
 )
 from gino.data.normalization import NormalizationStats
-from gino.model.gino import GINOSharedLatent, build_latent_grid
+from gino.data.field_schema import MODEL_FIELD_TARGET_NAMES, REFERENCE_FIELD_TARGET_NAMES, validate_field_names
+from gino.model.gino import GINOSharedLatent, build_latent_grid, migrate_legacy_15_channel_state_dict
 from gino.training.trainer import Trainer, set_deterministic_seed
 from gino.utils import load_config
 
@@ -84,17 +85,26 @@ def report_identity_retention(dataset, pair_ids, horizon, split_name):
 
 
 def validate_warm_start_checkpoint(checkpoint, model_config, feature_names, target_names,
-                                   field_target_names, global_condition_channels, normalization):
+                                   field_target_names, global_condition_channels, normalization, model=None):
     """Validate all semantic interfaces needed before loading a Stage 1 model."""
     checks = {
         "feature_names": (list(checkpoint.get("feature_names", [])), list(feature_names)),
         "target_names": (list(checkpoint.get("target_names", [])), list(target_names)),
-        "field_target_names": (list(checkpoint.get("field_target_names", [])), list(field_target_names)),
         "global_condition_channels": (list(checkpoint.get("global_condition_channels", [])), list(global_condition_channels)),
     }
     for key, (found, expected) in checks.items():
         if found != expected:
             raise ValueError(f"Warm-start checkpoint {key} mismatch: checkpoint={found}, current={expected}")
+    old_field_names = checkpoint.get("reference_field_target_names", checkpoint.get("field_target_names", []))
+    validate_field_names(old_field_names, REFERENCE_FIELD_TARGET_NAMES, "Warm-start reference field")
+    validate_field_names(field_target_names, REFERENCE_FIELD_TARGET_NAMES, "Current reference field")
+    if list(old_field_names) != list(field_target_names):
+        raise ValueError("Warm-start reference field channel order differs from current archive")
+    legacy = checkpoint.get("model_field_target_names") is None
+    if not legacy:
+        validate_field_names(checkpoint["model_field_target_names"], MODEL_FIELD_TARGET_NAMES, "Warm-start model field")
+    elif model is None:
+        raise ValueError("Legacy 15-channel checkpoint migration requires the target model")
     warm_cfg = checkpoint.get("config", {}).get("model", {})
     architecture_keys = ("latent_res", "hidden_channels", "fno_layers", "fno_modes", "gno_radius",
                          "mlp_layers", "mlp_hidden", "query_pos_encoding_frequencies",
@@ -113,6 +123,9 @@ def validate_warm_start_checkpoint(checkpoint, model_config, feature_names, targ
         if key not in warm_stats or not np.allclose(np.asarray(warm_stats[key]), np.asarray(normalization[key]),
                                                      rtol=1e-6, atol=1e-8):
             raise ValueError(f"Warm-start normalization mismatch for {key}; Stage 1 and Stage 2 must use identical training data and preprocessing.")
+    if legacy:
+        return migrate_legacy_15_channel_state_dict(checkpoint["model_state_dict"], model,
+                                                     old_field_names, MODEL_FIELD_TARGET_NAMES)
     return checkpoint["model_state_dict"]
 
 
@@ -379,7 +392,9 @@ def main():
     report_identity_retention(retention_train, split["train_pair_ids"], max_h, "train")
     report_identity_retention(validation_diagnostics, validation_pair_ids,
                               validation_horizon, "validation")
-    model = GINOSharedLatent(len(in_names), delta_channels, len(data["field_target_names"]),
+    archive_field_names = [str(x) for x in data["field_target_names"]]
+    validate_field_names(archive_field_names, REFERENCE_FIELD_TARGET_NAMES, "Processed reference field")
+    model = GINOSharedLatent(len(in_names), delta_channels, len(MODEL_FIELD_TARGET_NAMES),
                              len(cfg["data"]["global_condition_channels"]), cfg["model"]).to(device)
     init_checkpoint = str(training_cfg.get("init_checkpoint", "")).strip()
     if init_checkpoint:
@@ -391,7 +406,7 @@ def main():
         warm = torch.load(warm_path, map_location=device, weights_only=False)
         warm_state = validate_warm_start_checkpoint(
             warm, cfg["model"], in_names, [str(x) for x in data["target_names"][:delta_channels]],
-            [str(x) for x in data["field_target_names"]], cfg["data"]["global_condition_channels"], vars(stats))
+            archive_field_names, cfg["data"]["global_condition_channels"], vars(stats), model=model)
         model.load_state_dict(warm_state, strict=True)
         print(f"[warm start] loaded compatible Stage 1 weights from {warm_path}")
     latent = build_latent_grid(cfg["model"]["latent_res"], device)
@@ -406,7 +421,9 @@ def main():
     trainer = Trainer(model, latent, train_ds, val_ds, stats, training_cfg, run_dir, device)
     trainer.fit(cfg, {"dataset_path": str(dataset_path), "split": checkpoint_split, "normalization": norm_meta,
                       "feature_names": in_names, "target_names": [str(x) for x in data["target_names"][:delta_channels]],
-                      "field_target_names": [str(x) for x in data["field_target_names"]],
+                      "field_target_names": archive_field_names,
+                      "reference_field_target_names": archive_field_names,
+                      "model_field_target_names": list(MODEL_FIELD_TARGET_NAMES),
                       "global_condition_channels": cfg["data"]["global_condition_channels"]})
     print(f"Best checkpoint: {run_dir / 'best_model.pt'}")
 

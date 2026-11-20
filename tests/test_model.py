@@ -60,7 +60,7 @@ def test_canonical_next_state_uses_decoded_particle_velocity_gradient_and_residu
             residual[..., 3] = 1.0
             return residual
         def decode_field(self, _, query):
-            field = torch.zeros(query.shape[0], query.shape[1], 15)
+            field = torch.zeros(query.shape[0], query.shape[1], 12)
             field[..., 0] = 2.0
             field[..., 3] = 1.0  # dUx/dx
             return field
@@ -88,12 +88,24 @@ def test_legacy_checkpoint_uncertainty_keys_migrate_only_expected_parameters():
               if not key.startswith("log_") and torch.is_tensor(value)}
     legacy["log_delta_var"] = torch.tensor(0.2)
     legacy["log_field_var"] = torch.tensor(0.3)
-    target = GINOSharedLatent(4, 10, 15, 1, cfg)
-    with pytest.warns(RuntimeWarning, match="Migrated legacy uncertainty"):
-        target.load_state_dict(legacy, strict=True)
+    target = GINOSharedLatent(4, 10, 12, 1, cfg)
+    legacy["log_vorticity_var"] = torch.tensor(0.4)
+    from gino.model.gino import migrate_legacy_15_channel_state_dict
+    from gino.data.field_schema import MODEL_FIELD_TARGET_NAMES, REFERENCE_FIELD_TARGET_NAMES
+    migrated = migrate_legacy_15_channel_state_dict(legacy, target, REFERENCE_FIELD_TARGET_NAMES, MODEL_FIELD_TARGET_NAMES)
+    final = len(target.field_decoder) - 1
+    torch.testing.assert_close(migrated[f"field_decoder.{final}.weight"],
+                               legacy[f"field_decoder.{final}.weight"][:12])
+    torch.testing.assert_close(migrated[f"field_decoder.{final}.bias"],
+                               legacy[f"field_decoder.{final}.bias"][:12])
+    assert "log_vorticity_var" not in migrated
+    with pytest.warns(RuntimeWarning, match="Initialized missing uncertainty"):
+        target.load_state_dict(migrated, strict=True)
     assert target.log_residual_var.item() == pytest.approx(0.2)
     assert target.log_velocity_var.item() == pytest.approx(0.3)
     assert target.log_physical_state_var.item() == 0.0
+    assert target.field_decoder[-1].weight.shape[0] == 12
+    assert "log_vorticity_var" not in target.state_dict()
 
 
 def test_m0_forward_matches_explicit_shared_latent_decoders():
@@ -132,3 +144,28 @@ def test_architecture_switches_execute_independently(switch):
                          torch.rand(1, 6, 3), torch.rand(1, 5, 3), torch.rand(1, 2))
     assert delta.shape == (1, 5, 7)
     assert field.shape == (1, 6, 12)
+
+
+@pytest.mark.parametrize("axis", [0, 1, 2])
+def test_sample_grid_axis_order_matches_latent_layout(axis):
+    """Regression: grid_sample reads coords as (W, H, D); the latent is (C, x, y, z).
+
+    Build a latent grid exactly as encode_process does (build_latent_grid ->
+    reshape(r, r, r, C) -> permute to channels-first) whose single channel equals
+    the latent node's coordinate along ``axis``; sampling it at arbitrary queries
+    must return that query coordinate (trilinear interpolation of a linear field
+    is exact).  Before the fix, x and z were swapped.
+    """
+    pytest.importorskip("neuralop")
+    from gino.model.gino import GINOSharedLatent, build_latent_grid
+    cfg = {"hidden_channels": 8, "latent_res": 5, "query_pos_encoding_frequencies": 1,
+           "gno_radius": 2., "fno_modes": 2, "fno_layers": 1, "mlp_hidden": 8, "mlp_layers": 1}
+    model = GINOSharedLatent(3, 7, 12, 2, cfg)
+    r = 5
+    latent_coords = build_latent_grid(r, "cpu")[0]                # [r^3, 3] (x, y, z)
+    values = latent_coords[:, axis:axis + 1]                      # [r^3, 1]
+    grid = values.reshape(r, r, r, -1).permute(3, 0, 1, 2).unsqueeze(0)
+    torch.manual_seed(0)
+    queries = torch.rand(64, 3)
+    sampled = model.sample_grid(grid, queries)                    # [64, 1]
+    torch.testing.assert_close(sampled[:, 0], queries[:, axis], atol=1e-5, rtol=0)

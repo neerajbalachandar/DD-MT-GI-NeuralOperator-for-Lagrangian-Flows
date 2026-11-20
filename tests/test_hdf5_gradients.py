@@ -9,7 +9,7 @@ def test_native_velocity_derivatives_use_physical_nonunit_spacing():
     x, y, z = (xyz[..., i] for i in range(3))
     velocity = np.stack((2*x + 3*y + 4*z, -x + 0.5*y + 0.2*z, 7*x - 2*y + z), axis=-1)
     values = physical_field_values(xyz.reshape(-1, 3), velocity.reshape(-1, 3), shape=(5, 5, 5))
-    np.testing.assert_allclose(values[:, 3:12], np.tile([2, -1, 7, 3, 0.5, -2, 4, 0.2, 1], (125, 1)), atol=1e-5)
+    np.testing.assert_allclose(values[:, 3:12], np.tile([2, 3, 4, -1, 0.5, 0.2, 7, -2, 1], (125, 1)), atol=1e-5)
 
 
 def test_native_velocity_derivatives_preserve_arbitrary_hdf5_row_order():
@@ -24,4 +24,4 @@ def test_native_velocity_derivatives_preserve_arbitrary_hdf5_row_order():
                                   -x_ordered + 0.5*y_ordered + 0.2*z_ordered,
                                   7*x_ordered - 2*y_ordered + z_ordered), axis=-1)
     np.testing.assert_allclose(values[:, :3], expected_velocity, atol=1e-6)
-    np.testing.assert_allclose(values[:, 3:12], np.tile([2, -1, 7, 3, 0.5, -2, 4, 0.2, 1], (125, 1)), atol=1e-5)
+    np.testing.assert_allclose(values[:, 3:12], np.tile([2, 3, 4, -1, 0.5, 0.2, 7, -2, 1], (125, 1)), atol=1e-5)

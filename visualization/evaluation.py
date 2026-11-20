@@ -63,12 +63,12 @@ def plot_field_error_maps(coords, truth, prediction, output_path, component_name
 
 
 def plot_eulerian_field_comparison(coords, truth, prediction, output_path, title="Eulerian field reconstruction"):
-    """Plot true, predicted, and absolute-error fields on the central x-z grid plane."""
+    """Plot 12 model-predicted velocity and gradient channels on an Eulerian plane."""
     coords, truth, prediction = np.asarray(coords), np.asarray(truth), np.asarray(prediction)
     if coords.ndim != 2 or coords.shape[1] != 3 or truth.shape != prediction.shape or truth.shape[0] != len(coords):
-        raise ValueError("Expected matching [n_points, 15] fields and [n_points, 3] Eulerian coordinates")
-    if truth.shape[1] < 15:
-        raise ValueError(f"Expected velocity, gradient, and vorticity channels; got {truth.shape[1]}")
+        raise ValueError("Expected matching [n_points, 12] model fields and [n_points, 3] Eulerian coordinates")
+    if truth.shape[1] != 12:
+        raise ValueError(f"Expected velocity and nine gradient channels; got {truth.shape[1]}")
     axes = [np.unique(coords[:, axis]) for axis in range(3)]
     if int(np.prod([len(axis) for axis in axes])) != len(coords):
         raise ValueError("Eulerian field coordinates do not form a complete Cartesian grid")
@@ -81,12 +81,10 @@ def plot_eulerian_field_comparison(coords, truth, prediction, output_path, title
                             for ix in range(len(axes[0]))], dtype=np.int64)
     quantities = ([ ("u_x", 0), ("u_y", 1), ("u_z", 2), ("|u|", "speed") ]
                   + [(name, index) for index, name in enumerate(
-                      ("dUx_dx", "dUx_dy", "dUx_dz", "dUy_dx", "dUy_dy", "dUy_dz",
-                       "dUz_dx", "dUz_dy", "dUz_dz"), start=3)]
-                  + [("omega_x", 12), ("omega_y", 13), ("omega_z", 14), ("|omega|", "omega")])
+                      ("gradU_xx", "gradU_xy", "gradU_xz", "gradU_yx", "gradU_yy", "gradU_yz",
+                       "gradU_zx", "gradU_zy", "gradU_zz"), start=3)])
     def values(array, key):
         if key == "speed": return np.linalg.norm(array[..., :3], axis=-1)
-        if key == "omega": return np.linalg.norm(array[..., 12:15], axis=-1)
         return array[..., key]
     fig, axes_plot = plt.subplots(len(quantities), 3, figsize=(13, 2.1 * len(quantities)),
                                   constrained_layout=True, squeeze=False)

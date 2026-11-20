@@ -1,0 +1,94 @@
+{
+  "seed": 0,
+  "device": "auto",
+  "data": {
+    "root": "processed_data/vortex_rings_v2",
+    "train_cases": [],
+    "val_cases": []
+  },
+  "model": {
+    "box_half_extent": [
+      2.8,
+      2.8,
+      3.3
+    ],
+    "latent_resolution": [
+      24,
+      24,
+      28
+    ],
+    "hidden_channels": 64,
+    "encoder_channels": 32,
+    "encoder_hidden": 64,
+    "fno_modes": [
+      12,
+      12,
+      14
+    ],
+    "fno_layers": 4,
+    "domain_padding": 0.25,
+    "query_fourier_frequencies": 3,
+    "decoder_hidden": 128,
+    "decoder_layers": 3,
+    "near_field": {
+      "enabled": true,
+      "channels": 4,
+      "rbf": 12,
+      "cutoff": 0.3,
+      "rho_max": 4.0
+    }
+  },
+  "training": {
+    "run_dir": "runs/vortex_gino",
+    "epochs": 50,
+    "operator_epochs": 20,
+    "steps_per_epoch": 250,
+    "frames_per_step": 4,
+    "learning_rate": 0.001,
+    "min_lr_ratio": 0.02,
+    "warmup_steps": 300,
+    "weight_decay": 1e-05,
+    "grad_clip_norm": 10.0,
+    "grid_queries": 8192,
+    "particle_queries": 1024,
+    "integrator": "rk4",
+    "dynamics_probability": 0.5,
+    "dynamics_weight": 1.0,
+    "rollout_horizon_schedule": [
+      [
+        20,
+        1
+      ],
+      [
+        28,
+        2
+      ],
+      [
+        36,
+        4
+      ],
+      [
+        44,
+        6
+      ]
+    ],
+    "loss_weights": {
+      "grid_u": 1.0,
+      "grid_w": 0.5,
+      "particle_u": 1.0,
+      "particle_J": 0.5,
+      "step_x": 1.0,
+      "step_gamma": 0.3
+    },
+    "val_frames": [
+      10,
+      50,
+      90,
+      130,
+      170
+    ],
+    "val_rollout_steps": 40,
+    "val_rollout_start": 20,
+    "val_rollout_max_particles": 3000
+  }
+}

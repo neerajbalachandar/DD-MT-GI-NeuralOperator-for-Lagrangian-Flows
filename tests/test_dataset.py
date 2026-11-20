@@ -39,15 +39,17 @@ def test_train_normalization_uses_selected_training_pairs_only():
     assert not np.allclose(stats.input_mean, data["inputs_t"].mean(0))
 
 
-def test_field_normalization_round_trips_all_target_channels():
+def test_field_normalization_uses_first_twelve_stats_for_model_channels():
     stats = NormalizationStats(np.zeros(1), np.ones(1), np.zeros(7), np.ones(7),
                               np.arange(15, dtype=np.float32), np.arange(1, 16, dtype=np.float32),
                               np.zeros(3), np.ones(3))
-    physical = np.arange(30, dtype=np.float32).reshape(2, 15)
-    normalized = (physical - stats.field_mean) / stats.field_std
+    physical = np.arange(24, dtype=np.float32).reshape(2, 12)
+    normalized = (physical - stats.field_mean[:12]) / stats.field_std[:12]
     import torch
     restored = stats.denormalize_field(torch.as_tensor(normalized)).cpu().numpy()
     np.testing.assert_allclose(restored, physical)
+    with pytest.raises(ValueError, match="12 channels"):
+        stats.denormalize_field(torch.zeros(2, 15))
 
 
 def test_legacy_dataset_missing_delta_t_is_backfilled():

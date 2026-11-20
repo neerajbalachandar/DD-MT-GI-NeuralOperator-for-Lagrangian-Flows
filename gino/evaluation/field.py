@@ -18,13 +18,14 @@ def evaluate_native_field(predicted_xyz, predicted_velocity, hdf5_path):
 import torch
 
 
-FIELD_GROUPS = {"velocity": slice(0, 3), "gradient": slice(3, 12), "vorticity": slice(12, 15)}
+FIELD_GROUPS = {"velocity": slice(0, 3), "gradient": slice(3, 12)}
 
 
 def field_group_metrics_torch(pred_norm, target_norm, pred_phys, target_phys):
     """Per-group normalized MSE, physical RMSE, and physical relative L2."""
-    if pred_norm.shape != target_norm.shape or pred_phys.shape != target_phys.shape:
-        raise ValueError("Field prediction/reference shapes differ")
+    if (pred_norm.shape != target_norm.shape or pred_phys.shape != target_phys.shape
+            or pred_norm.shape[-1] != 12 or pred_phys.shape[-1] != 12):
+        raise ValueError("Field prediction/reference must have matching 12-channel velocity/gradient shapes")
     result = {}
     for name, channels in FIELD_GROUPS.items():
         pn, tn = pred_norm[..., channels], target_norm[..., channels]

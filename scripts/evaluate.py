@@ -1,8 +1,10 @@
 import argparse
+import contextlib
 import csv
 import json
 from pathlib import Path
 import sys
+import traceback
 
 HERE = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(HERE))
@@ -22,7 +24,8 @@ from gino.evaluation.metrics import (mse, relative_l2, state_component_metrics,
                                      normalized_state_component_metrics, field_group_metrics)
 from gino.dynamics.rollout import inference_rollout
 from gino.dynamics.state_transition import predict_next_state
-from gino.model.gino import GINOSharedLatent, build_latent_grid
+from gino.data.field_schema import MODEL_FIELD_CHANNELS, MODEL_FIELD_TARGET_NAMES, REFERENCE_FIELD_TARGET_NAMES, validate_field_names
+from gino.model.gino import GINOSharedLatent, build_latent_grid, migrate_legacy_15_channel_state_dict
 from gino.utils import load_config, write_json
 from visualization.fields import (plot_native_ux_comparison, plot_normalized_ux_profiles,
                                   plot_velocity_magnitude_summary, plot_plane_snapshot_comparison)
@@ -30,6 +33,16 @@ from visualization.temporal import (plot_temporal_errors, plot_rollout_snapshots
                                     plot_rmse_vs_phase_grid, plot_training_history)
 from visualization.evaluation import (plot_state_parity, plot_eulerian_field_comparison,
                                        plot_eulerian_velocity_plane)
+
+
+@contextlib.contextmanager
+def _nonfatal_plotting(label):
+    """Run a plotting block; on failure print a warning instead of aborting evaluation."""
+    try:
+        yield
+    except Exception as exc:  # noqa: BLE001 - plotting is best-effort
+        print(f"[warning] {label} failed and were skipped: {type(exc).__name__}: {exc}", flush=True)
+        traceback.print_exc()
 
 
 def field_visual_plane_specs(case_name, native_xyz, native_velocity, ring_geometry=None, smoothed_center=None):
@@ -141,12 +154,23 @@ def main():
         print(f"Checkpoint/config architecture mismatch: {mismatches}")
     features = checkpoint.get("feature_names", cfg["data"]["input_features"])
     global_names = checkpoint.get("global_condition_channels", cfg["data"]["global_condition_channels"])
-    field_names = checkpoint.get("field_target_names", data["field_target_names"])
+    reference_field_names = checkpoint.get("reference_field_target_names",
+                                           checkpoint.get("field_target_names", data["field_target_names"]))
+    validate_field_names(data["field_target_names"], REFERENCE_FIELD_TARGET_NAMES, "Processed reference field")
+    validate_field_names(reference_field_names, REFERENCE_FIELD_TARGET_NAMES, "Checkpoint reference field")
+    model_field_names = checkpoint.get("model_field_target_names")
+    legacy_field_decoder = model_field_names is None
+    if not legacy_field_decoder:
+        validate_field_names(model_field_names, MODEL_FIELD_TARGET_NAMES, "Checkpoint model field")
+    else:
+        model_field_names = MODEL_FIELD_TARGET_NAMES
     target_names = checkpoint.get("target_names", data["target_names"])
     state = {key: value for key, value in checkpoint["model_state_dict"].items() if key != "_metadata"}
-    model = GINOSharedLatent(len(features), len(target_names), len(field_names), len(global_names), model_cfg).to(device)
+    model = GINOSharedLatent(len(features), len(target_names), len(MODEL_FIELD_TARGET_NAMES), len(global_names), model_cfg).to(device)
     # Strict loading allows only the explicitly migrated legacy uncertainty keys;
     # unrelated missing/unexpected keys still fail in GINOSharedLatent.load_state_dict.
+    if legacy_field_decoder:
+        state = migrate_legacy_15_channel_state_dict(state, model, reference_field_names, model_field_names)
     model.load_state_dict(state, strict=True)
     print("Checkpoint architecture/configuration: compatible")
     stats = NormalizationStats.from_checkpoint(checkpoint)
@@ -179,8 +203,7 @@ def main():
     for case in cases:
         case_records = [record for record in records if record.get("case", "unknown") == case]
         print(f"one-step {case}: {len(case_records)} pairs")
-        for key in ("position_rmse", "circulation_rmse", "sigma_rmse", "field_mse", "field_relative_l2",
-                    "vorticity_mse", "vorticity_relative_l2"):
+        for key in ("position_rmse", "circulation_rmse", "sigma_rmse", "field_mse", "field_relative_l2"):
             values = [float(record[key]) for record in case_records if key in record]
             if values:
                 print(f"  {key}: {float(np.mean(values)):.6g}")
@@ -246,7 +269,7 @@ def main():
     (out_dir / "teacher_forced_field_reconstruction.json").write_text(
         json.dumps(teacher_field_records, indent=2, default=str))
     teacher_summary = {}
-    for group in ("velocity", "gradient", "vorticity"):
+    for group in ("velocity", "gradient"):
         for metric in ("normalized_mse", "physical_rmse", "physical_relative_l2"):
             key = f"{group}_{metric}"
             values = [row[key] for row in teacher_field_records if key in row]
@@ -332,28 +355,22 @@ def main():
                         record.update({f"rollout_conditioned_{key}": value for key, value in
                                        field_group_metrics_torch(pred_norm_at_step, target_norm_at_step,
                                            pred_phys_tensor, target_phys_tensor).items()})
-                        if field_prediction.shape[-1] >= 15:
-                            record.update({"vorticity_mse": mse(field_prediction[..., 12:15], field_target[..., 12:15]),
-                                           "vorticity_relative_l2": relative_l2(field_prediction[..., 12:15],
-                                                                                field_target[..., 12:15])})
-                            if export_rollout_fields and export_this_start:
-                                if h == 1:
-                                    field_coords = batch["query_xyz_phys"][0].cpu().numpy()
-                                else:
-                                    field_coords = batch["rollout_query_xyz_phys"][0, h - 2].cpu().numpy()
-                                rollout_case_dir = (out_dir / "full_field_reconstruction" / "rollout" /
-                                                    str(case_name).replace("/", "_"))
-                                rollout_case_dir.mkdir(parents=True, exist_ok=True)
-                                frame_label = str(state_frame).replace("/", "_")
-                                np.savez_compressed(rollout_case_dir / f"frame_{frame_label}_h{h}.npz",
-                                    coordinates=field_coords.astype(np.float32),
-                                    velocity_truth=field_target[0, :, :3].astype(np.float32),
-                                    velocity_prediction=field_prediction[0, :, :3].astype(np.float32),
-                                    vorticity_truth=field_target[0, :, 12:15].astype(np.float32),
-                                    vorticity_prediction=field_prediction[0, :, 12:15].astype(np.float32),
-                                    field_target_names=np.asarray(field_names, dtype="U"),
-                                    case=np.asarray(str(case_name)), frame=np.asarray(frame_label),
-                                    horizon=np.asarray(h, dtype=np.int32))
+                        if export_rollout_fields and export_this_start:
+                            if h == 1:
+                                field_coords = batch["query_xyz_phys"][0].cpu().numpy()
+                            else:
+                                field_coords = batch["rollout_query_xyz_phys"][0, h - 2].cpu().numpy()
+                            rollout_case_dir = (out_dir / "full_field_reconstruction" / "rollout" /
+                                                str(case_name).replace("/", "_"))
+                            rollout_case_dir.mkdir(parents=True, exist_ok=True)
+                            frame_label = str(state_frame).replace("/", "_")
+                            np.savez_compressed(rollout_case_dir / f"frame_{frame_label}_h{h}.npz",
+                                coordinates=field_coords.astype(np.float32),
+                                field_truth=field_target[0].astype(np.float32),
+                                field_prediction=field_prediction[0].astype(np.float32),
+                                model_field_target_names=np.asarray(model_field_names, dtype="U"),
+                                case=np.asarray(str(case_name)), frame=np.asarray(frame_label),
+                                horizon=np.asarray(h, dtype=np.int32))
                     rollout_records.append(record)
                 else:
                     skipped_horizons[h] += 1
@@ -451,7 +468,7 @@ def main():
             with torch.inference_mode():
                 predicted = predict_field_at_xyz(model, batch, xyz, latent, stats, device)
             predicted_velocity, vorticity_truth = predicted[:, :3], truth[:, 12:15]
-            predicted_vorticity = predicted[:, 12:15]
+            predicted_model_field, reference_model_field = predicted, truth[:, :MODEL_FIELD_CHANNELS]
             native_velocity = truth[:, :3]
             from gino.evaluation.vortex_geometry import detect_ring_geometry, smooth_axis, track_axial_peaks
             geometry_cfg = cfg["evaluation"].get("vortex_geometry", {})
@@ -471,9 +488,9 @@ def main():
                 ring_peaks_by_case[case_key] = ring_geometry["ring_axial_locations_used_for_planes"]
             from gino.data.spatial_sampling import analyze_vorticity_cores
             core_mask, core_diagnostics = analyze_vorticity_cores(xyz, truth, geometry_cfg)
-            normalized_pred = (predicted - stats.field_mean) / stats.field_std
-            normalized_truth = (truth - stats.field_mean) / stats.field_std
-            group_slices = {"velocity": slice(0, 3), "gradient": slice(3, 12), "vorticity": slice(12, 15)}
+            normalized_pred = (predicted_model_field - stats.field_mean[:MODEL_FIELD_CHANNELS]) / stats.field_std[:MODEL_FIELD_CHANNELS]
+            normalized_truth = (reference_model_field - stats.field_mean[:MODEL_FIELD_CHANNELS]) / stats.field_std[:MODEL_FIELD_CHANNELS]
+            group_slices = {"velocity": slice(0, 3), "gradient": slice(3, 12)}
             group_metrics = {}
             for group, sl in group_slices.items():
                 err = predicted[:, sl] - truth[:, sl]
@@ -505,119 +522,126 @@ def main():
                 "native_grid_points": int(round(len(native_xyz) ** (1.0 / 3.0))),
                 "velocity_mse": mse(predicted_velocity, truth[:, :3]),
                 "velocity_relative_l2": relative_l2(predicted_velocity, truth[:, :3]),
-                "vorticity_mse": mse(predicted_vorticity, vorticity_truth),
-                "vorticity_relative_l2": relative_l2(predicted_vorticity, vorticity_truth),
                 "field_mse": mse(predicted_velocity, truth[:, :3]),
                 "field_relative_l2": relative_l2(predicted_velocity, truth[:, :3]),
                 "whole_domain_normalized_mse": mse(normalized_pred, normalized_truth),
                 "vortex_geometry": ring_geometry, "core_diagnostics": core_diagnostics,
                 **group_metrics, **region_metrics,
                 "outside_train_domain_fraction": outside_fraction,
-                "n_points": int(len(truth))}
+                "n_points": int(len(truth)),
+                # Filled below with the visualization planes of this frame.  It was
+                # previously never initialised -> KeyError 'plane_specs' at append.
+                "plane_specs": []}
             native_records.append(record)
             if save_full_fields:
                 case_dir = out_dir / "full_field_reconstruction" / str(context.get("case", "unknown")).replace("/", "_")
                 case_dir.mkdir(parents=True, exist_ok=True)
                 frame_name = str(context.get("frame_t", pair_id)).replace("/", "_")
                 np.savez_compressed(case_dir / f"frame_{frame_name}.npz",
-                    coordinates=xyz.astype(np.float32), field_truth=truth.astype(np.float32),
-                    field_prediction=predicted.astype(np.float32), velocity_truth=native_velocity.astype(np.float32),
+                    coordinates=xyz.astype(np.float32), reference_field=truth.astype(np.float32),
+                    model_field_truth=reference_model_field.astype(np.float32),
+                    model_field_prediction=predicted_model_field.astype(np.float32), velocity_truth=native_velocity.astype(np.float32),
                     velocity_prediction=predicted_velocity.astype(np.float32),
                     vorticity_truth=vorticity_truth.astype(np.float32),
-                    vorticity_prediction=predicted_vorticity.astype(np.float32),
-                    field_target_names=np.asarray(field_names, dtype="U"),
+                    reference_field_target_names=np.asarray(reference_field_names, dtype="U"),
+                    model_field_target_names=np.asarray(model_field_names, dtype="U"),
                     case=np.asarray(str(context.get("case", "unknown"))),
                     frame=np.asarray(frame_name), phase=np.asarray(float(context.get("phase_t", 0.0))))
             plane_mode = str(cfg["evaluation"].get("field_plane_mode", "highest_energy"))
             is_ring_case = "ring" in str(context.get("case", "")).lower()
-            requested_y = (float(np.unique(native_xyz[:, 1])[len(np.unique(native_xyz[:, 1])) // 2])
-                           if is_ring_case else
-                           (highest_energy_y_plane(native_xyz, native_velocity)
-                            if plane_mode == "highest_energy"
-                            else float(cfg["evaluation"].get("field_y_plane", 0.0))))
             if plane_mode not in ("highest_energy", "mid"):
                 raise ValueError("evaluation.field_plane_mode must be 'highest_energy' or 'mid'")
-            if plane_mode == "mid":
-                requested_y = float(np.unique(native_xyz[:, 1])[len(np.unique(native_xyz[:, 1])) // 2])
-            x_axis, z_axis, _, plane_xyz, _ = native_field_plane(
-                native_xyz, native_velocity, y_plane=requested_y, component=0)
-            true_components = []
-            for component in range(3):
-                _, _, _, _, values = native_field_plane(native_xyz, native_velocity,
-                    y_plane=requested_y, component=component)
-                true_components.append(values.reshape(len(z_axis), len(x_axis)))
-            true_velocity_slice = np.stack(true_components, axis=-1)
-            plane_batch = dict(batch)
-            plane_batch["output_queries"] = stats.normalize_positions(
-                torch.as_tensor(plane_xyz, dtype=torch.float32).unsqueeze(0).to(device)).clamp(0.0, 1.0)
-            plane_batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in plane_batch.items()}
-            with torch.inference_mode():
-                plane_result = predict_next_state(model, plane_batch, latent, stats)
-                predicted_velocity_slice = plane_result["field_phys"][0, :, :3].cpu().numpy().reshape(
-                    len(z_axis), len(x_axis), 3)
             case_name = context.get("case", "unknown")
             evaluation_role = "field_superresolution" if pair_id in field_superres_set else split
-            native_visual_candidates.setdefault((case_name, evaluation_role), []).append({
-                "phase": float(context.get("phase_t", 0.0)), "y_plane": float(plane_xyz[0, 1]),
-                "evaluation_role": evaluation_role,
-                "freestream_magnitude": float(np.linalg.norm(context.get("freestream", [1.0, 0.0, 0.0]))),
-                "physical_time": raw_context.get("task2_physical_time"),
-                "vtk_path": str(context.get("vtk_path", "")),
-                "x": x_axis, "z": z_axis,
-                "true_velocity": true_velocity_slice, "predicted_velocity": predicted_velocity_slice})
-            # Save several fixed, domain-relative planes per frame. A single batched
-            # query keeps the added visualization inference cost low.
-            plane_specs = field_visual_plane_specs(case_name, native_xyz, native_velocity,
-                ring_geometry=ring_geometry, smoothed_center=ring_geometry.get("axis_center_smoothed"))
-            plane_queries, plane_records = [], []
-            for normal_axis, location, plane_name in plane_specs:
-                first, second, truth_plane, query_xyz, actual_location, first_i, second_i = native_coordinate_plane(
-                    native_xyz, native_velocity, normal_axis, location)
-                plane_queries.append(query_xyz)
-                plane_records.append({
-                    "name": plane_name,
-                    "label": f"normal={'xyz'[normal_axis]} at {'xyz'[normal_axis]}={actual_location:.5g} m",
-                    "first": first, "second": second,
-                    "first_label": f"{'xyz'[first_i]} [m]",
-                    "second_label": f"{'xyz'[second_i]} [m]",
-                    "truth": truth_plane,
-                })
-            query_lengths = [len(points) for points in plane_queries]
-            all_plane_xyz = np.concatenate(plane_queries, axis=0)
-            plane_batch = dict(batch)
-            plane_batch["output_queries"] = stats.normalize_positions(
-                torch.as_tensor(all_plane_xyz, dtype=torch.float32).unsqueeze(0).to(device)).clamp(0.0, 1.0)
-            plane_batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in plane_batch.items()}
-            with torch.inference_mode():
-                plane_result = predict_next_state(model, plane_batch, latent, stats)
-                all_plane_prediction = plane_result["field_phys"][0, :, :3].cpu().numpy()
-            start = 0
-            for plane_record, count in zip(plane_records, query_lengths):
-                plane_record["prediction"] = all_plane_prediction[start:start + count].reshape(
-                    plane_record["truth"].shape)
-                start += count
-                record["plane_specs"].append({"name": plane_record["name"], "label": plane_record["label"]})
-                plane_visual_candidates.setdefault(
-                    (case_name, evaluation_role, plane_record["name"]), []).append({
-                        "phase": float(context.get("phase_t", 0.0)),
+            # Visualization-only work: a failure here must not abort metric collection.
+            try:
+                if not is_ring_case:
+                    # The legacy generic snapshot remains for non-ring families.
+                    # Rings are plotted only through the explicitly named geometry-aware planes.
+                    requested_y = (highest_energy_y_plane(native_xyz, native_velocity)
+                                   if plane_mode == "highest_energy"
+                                   else float(cfg["evaluation"].get("field_y_plane", 0.0)))
+                    if plane_mode == "mid":
+                        requested_y = float(np.unique(native_xyz[:, 1])[len(np.unique(native_xyz[:, 1])) // 2])
+                    x_axis, z_axis, _, plane_xyz, _ = native_field_plane(
+                        native_xyz, native_velocity, y_plane=requested_y, component=0)
+                    true_components = []
+                    for component in range(3):
+                        _, _, _, _, values = native_field_plane(native_xyz, native_velocity,
+                            y_plane=requested_y, component=component)
+                        true_components.append(values.reshape(len(z_axis), len(x_axis)))
+                    true_velocity_slice = np.stack(true_components, axis=-1)
+                    plane_batch = dict(batch)
+                    plane_batch["output_queries"] = stats.normalize_positions(
+                        torch.as_tensor(plane_xyz, dtype=torch.float32).unsqueeze(0).to(device)).clamp(0.0, 1.0)
+                    plane_batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in plane_batch.items()}
+                    with torch.inference_mode():
+                        plane_result = predict_next_state(model, plane_batch, latent, stats)
+                        predicted_velocity_slice = plane_result["field_phys"][0, :, :3].cpu().numpy().reshape(
+                            len(z_axis), len(x_axis), 3)
+                    native_visual_candidates.setdefault((case_name, evaluation_role), []).append({
+                        "phase": float(context.get("phase_t", 0.0)), "y_plane": float(plane_xyz[0, 1]),
+                        "evaluation_role": evaluation_role,
+                        "freestream_magnitude": float(np.linalg.norm(context.get("freestream", [1.0, 0.0, 0.0]))),
                         "physical_time": raw_context.get("task2_physical_time"),
-                        "name": plane_record["name"],
-                        "label": plane_record["label"],
-                        "first": plane_record["first"], "second": plane_record["second"],
-                        "first_label": plane_record["first_label"],
-                        "second_label": plane_record["second_label"],
-                        "true_velocity": plane_record["truth"],
-                        "predicted_velocity": plane_record["prediction"],
+                        "vtk_path": str(context.get("vtk_path", "")),
+                        "x": x_axis, "z": z_axis,
+                        "true_velocity": true_velocity_slice, "predicted_velocity": predicted_velocity_slice})
+                # Save several fixed, domain-relative planes per frame. A single batched
+                # query keeps the added visualization inference cost low.
+                plane_specs = field_visual_plane_specs(case_name, native_xyz, native_velocity,
+                    ring_geometry=ring_geometry, smoothed_center=ring_geometry.get("axis_center_smoothed"))
+                plane_queries, plane_records = [], []
+                for normal_axis, location, plane_name in plane_specs:
+                    first, second, truth_plane, query_xyz, actual_location, first_i, second_i = native_coordinate_plane(
+                        native_xyz, native_velocity, normal_axis, location)
+                    plane_queries.append(query_xyz)
+                    plane_records.append({
+                        "name": plane_name,
+                        "label": f"normal={'xyz'[normal_axis]} at {'xyz'[normal_axis]}={actual_location:.5g} m",
+                        "first": first, "second": second,
+                        "first_label": f"{'xyz'[first_i]} [m]",
+                        "second_label": f"{'xyz'[second_i]} [m]",
+                        "truth": truth_plane,
                     })
-            del plane_batch
+                query_lengths = [len(points) for points in plane_queries]
+                all_plane_xyz = np.concatenate(plane_queries, axis=0)
+                plane_batch = dict(batch)
+                plane_batch["output_queries"] = stats.normalize_positions(
+                    torch.as_tensor(all_plane_xyz, dtype=torch.float32).unsqueeze(0).to(device)).clamp(0.0, 1.0)
+                plane_batch = {k: (v.to(device) if torch.is_tensor(v) else v) for k, v in plane_batch.items()}
+                with torch.inference_mode():
+                    plane_result = predict_next_state(model, plane_batch, latent, stats)
+                    all_plane_prediction = plane_result["field_phys"][0, :, :3].cpu().numpy()
+                start = 0
+                for plane_record, count in zip(plane_records, query_lengths):
+                    plane_record["prediction"] = all_plane_prediction[start:start + count].reshape(
+                        plane_record["truth"].shape)
+                    start += count
+                    record["plane_specs"].append({"name": plane_record["name"], "label": plane_record["label"]})
+                    plane_visual_candidates.setdefault(
+                        (case_name, evaluation_role, plane_record["name"]), []).append({
+                            "phase": float(context.get("phase_t", 0.0)),
+                            "physical_time": raw_context.get("task2_physical_time"),
+                            "name": plane_record["name"],
+                            "label": plane_record["label"],
+                            "first": plane_record["first"], "second": plane_record["second"],
+                            "first_label": plane_record["first_label"],
+                            "second_label": plane_record["second_label"],
+                            "true_velocity": plane_record["truth"],
+                            "predicted_velocity": plane_record["prediction"],
+                        })
+                del plane_batch
+            except Exception as exc:  # noqa: BLE001 - plotting is best-effort
+                print(f"[warning] field-plane visualization skipped for {case_name} pair {pair_id}: "
+                      f"{type(exc).__name__}: {exc}", flush=True)
         for case, role in sorted({(record.get("case", "unknown"), record["evaluation_role"])
                                   for record in native_records}):
             rows = [record for record in native_records
                     if record.get("case", "unknown") == case and record["evaluation_role"] == role]
             print(f"native Task-2 {case} ({role}): {len(rows)} frames | "
                   f"velocity MSE={np.mean([row['field_mse'] for row in rows]):.6g} | "
-                  f"velocity relL2={np.mean([row['field_relative_l2'] for row in rows]):.6g} | "
-                  f"vorticity relL2={np.mean([row['vorticity_relative_l2'] for row in rows]):.6g}")
+                  f"velocity relL2={np.mean([row['field_relative_l2'] for row in rows]):.6g}")
     if not native_records and not allow_missing_native:
         raise RuntimeError("Native Task-2 evaluation produced no records. Check stored task2_field_path "
                            "values or set evaluation.allow_missing_native_task2=true to allow this.")
@@ -644,7 +668,7 @@ def main():
     rollout_field_records = [{"mode": "rollout_conditioned_field_reconstruction", **record}
                              for record in rollout_records if "rollout_conditioned_velocity_normalized_mse" in record]
     rollout_field_metrics = {}
-    for group in ("velocity", "gradient", "vorticity"):
+    for group in ("velocity", "gradient"):
         for metric in ("normalized_mse", "physical_rmse", "physical_relative_l2"):
             key = f"rollout_conditioned_{group}_{metric}"
             values = [row[key] for row in rollout_field_records if key in row]
@@ -655,7 +679,7 @@ def main():
         "records": rollout_field_records})
     write_json(out_dir / "native_task2_field.json", {"root": native_root, "records": native_records})
     if save_full_fields:
-        print(f"[field export] full velocity/vorticity grids saved under {out_dir / 'full_field_reconstruction'}")
+        print(f"[field export] full Eulerian model fields and reference diagnostics saved under {out_dir / 'full_field_reconstruction'}")
     if export_rollout_fields:
         print(f"[rollout field export] selected full-grid horizon snapshots saved under "
               f"{out_dir / 'full_field_reconstruction' / 'rollout'}")
@@ -672,110 +696,7 @@ def main():
             "records": rows,
         } for category, rows in sorted(category_records.items())
     })
-    if cfg["evaluation"].get("save_plots", True):
-        plot_temporal_errors(records, rollout_records, out_dir)
-        plot_training_history(checkpoint.get("history", []), out_dir / "training_loss_history.png")
-        snapshot_cases = sorted({case for case, _ in rollout_visuals})
-        for case_name in snapshot_cases:
-            snapshots = {horizon: item for (case, horizon), item in rollout_visuals.items()
-                         if case == case_name}
-            plot_rollout_snapshots(snapshots,
-                out_dir / f"rollout_snapshots_{case_name.replace('/', '_')}.png",
-                title=f"{case_name}: autoregressive particles colored by circulation/core-size proxy")
-    if cfg["evaluation"].get("save_plots", True) and native_visual_candidates:
-        requested_phase = float(cfg["evaluation"].get("field_visual_phase", 0.5))
-        for (case_name, role), candidates in native_visual_candidates.items():
-            sample = min(candidates, key=lambda item: abs(item["phase"] - requested_phase))
-            x_axis, z_axis = sample["x"], sample["z"]
-            true_ux = sample["true_velocity"][..., 0]
-            predicted_ux = sample["predicted_velocity"][..., 0]
-            safe_case = case_name.replace("/", "_")
-            time_value = sample.get("physical_time")
-            plot_native_ux_comparison(x_axis, z_axis, true_ux, predicted_ux,
-                out_dir / f"native_ux_comparison_{safe_case}_{role}.png",
-                phase=sample["phase"], physical_time=time_value)
-            plot_eulerian_velocity_plane(x_axis, z_axis, sample["true_velocity"],
-                sample["predicted_velocity"],
-                out_dir / f"native_eulerian_velocity_{safe_case}_{role}.png",
-                title=f"{case_name}: native-grid Eulerian velocity, phase={sample['phase']:.3f}")
-            configured_chord = cfg["evaluation"].get("reference_chord", None)
-            configured_leading_edge = cfg["evaluation"].get("reference_leading_edge_x", None)
-            if configured_chord is None or configured_leading_edge is None:
-                vtk_path = str(sample.get("vtk_path", ""))
-                if not vtk_path or not Path(vtk_path).is_file():
-                    print(f"[profiles] skipped {case_name}: no reference chord or solid geometry is available")
-                    continue
-                derived_leading_edge, derived_chord = estimate_chordwise_bounds(vtk_path)
-            chord = float(configured_chord if configured_chord is not None else derived_chord)
-            leading_edge = float(configured_leading_edge if configured_leading_edge is not None else derived_leading_edge)
-            plot_normalized_ux_profiles(x_axis, z_axis, sample["true_velocity"],
-                sample["predicted_velocity"],
-                out_dir / f"normalized_ux_profiles_{safe_case}_{role}.png",
-                freestream_speed=sample["freestream_magnitude"], chord=chord,
-                leading_edge_x=leading_edge,
-                x_stations_over_c=cfg["evaluation"].get("profile_x_over_c", [0.2, 0.4, 0.6]))
-        roles_by_case = {}
-        for case_name, role in native_visual_candidates:
-            roles_by_case.setdefault(case_name, set()).add(role)
-        requested_phases = (0.3, 0.5, 0.7)
-        for case_name, roles in sorted(roles_by_case.items()):
-            for role in ("field_superresolution", "test", "validation"):
-                if role not in roles:
-                    continue
-                candidates = native_visual_candidates[(case_name, role)]
-                samples = [min(candidates, key=lambda item: abs(item["phase"] - phase))
-                           for phase in requested_phases]
-                x_axis, z_axis = samples[0]["x"], samples[0]["z"]
-                true_slices = np.stack([sample["true_velocity"] for sample in samples])
-                predicted_slices = np.stack([sample["predicted_velocity"] for sample in samples])
-                speeds = [sample["freestream_magnitude"] if sample["freestream_magnitude"] > 0 else 1.0
-                          for sample in samples]
-                safe_case = case_name.replace("/", "_")
-                role_suffix = "" if role == "test" else f"_{role}"
-                plot_velocity_magnitude_summary(
-                    x_axis, z_axis, true_slices, predicted_slices, speeds,
-                    out_dir / f"velocity_magnitude_summary_{safe_case}{role_suffix}.png",
-                    phases=requested_phases,
-                    x_stations=cfg["evaluation"].get("profile_x_over_c", [0.2, 0.4, 0.6]),
-                    y_plane=float(samples[0]["y_plane"]))
-        requested_plane_phases = [float(value) for value in
-                                  cfg["evaluation"].get("field_visual_phases", [0.1, 0.3, 0.5, 0.7, 0.9])]
-        for (case_name, role, plane_name), candidates in sorted(plane_visual_candidates.items()):
-            # Select distinct available frames nearest the requested phases, so
-            # sparse snapshots do not silently repeat the same image row.
-            selected = []
-            for requested_phase in requested_plane_phases:
-                candidate = min(candidates, key=lambda item: abs(item["phase"] - requested_phase))
-                if all(candidate is not existing for existing in selected):
-                    selected.append(candidate)
-            if not selected:
-                continue
-            safe_case = case_name.replace("/", "_")
-            true_slices = np.stack([sample["true_velocity"] for sample in selected])
-            predicted_slices = np.stack([sample["predicted_velocity"] for sample in selected])
-            plot_plane_snapshot_comparison(
-                selected[0]["first"], selected[0]["second"], true_slices, predicted_slices,
-                [sample["phase"] for sample in selected],
-                out_dir / f"native_velocity_plane_{safe_case}_{role}_{plane_name}.png",
-                plane_name, selected[0]["first_label"], selected[0]["second_label"],
-                [sample.get("physical_time") for sample in selected],
-                [sample["label"] for sample in selected])
-    if cfg["evaluation"].get("save_parity_plots", True):
-        test_cases = sorted({str(record.get("case", "unknown")) for record in records})
-        for case_name in test_cases:
-            sample = one_step_visuals.get(case_name)
-            if sample is None:
-                continue
-            safe_case = case_name.replace("/", "_")
-            plot_state_parity(sample["truth"], sample["prediction"],
-                              out_dir / f"one_step_state_parity_{safe_case}.png",
-                              title=f"{case_name}: one-step particle state")
-            if "field_truth" in sample:
-                plot_eulerian_field_comparison(sample["coords"], sample["field_truth"], sample["field_prediction"],
-                                               out_dir / f"eulerian_field_comparison_{safe_case}.png",
-                                               title=f"{case_name}: one-step Eulerian field reconstruction")
-    if cfg["evaluation"].get("save_plots", True):
-        plot_rmse_vs_phase_grid(records, out_dir)
+    # Write CSV metrics before plotting so they always exist even if a plot fails.
     if records:
         with open(out_dir / "one_step.csv", "w", newline="", encoding="utf-8") as stream:
             columns = list(dict.fromkeys(key for record in records for key in record))
@@ -786,7 +707,117 @@ def main():
             writer = csv.DictWriter(stream, fieldnames=columns); writer.writeheader(); writer.writerows(rollout_records)
     if native_records:
         with open(out_dir / "native_task2_field.csv", "w", newline="", encoding="utf-8") as stream:
-            writer = csv.DictWriter(stream, fieldnames=native_records[0].keys()); writer.writeheader(); writer.writerows(native_records)
+            writer = csv.DictWriter(stream, fieldnames=list(dict.fromkeys(key for record in native_records for key in record))); writer.writeheader(); writer.writerows(native_records)
+    # Metrics JSON/CSV are already on disk; every plotting block below is
+    # best-effort so a plotting failure only prints a warning.
+    with _nonfatal_plotting('temporal/rollout plots'):
+        if cfg["evaluation"].get("save_plots", True):
+            plot_temporal_errors(records, rollout_records, out_dir)
+            plot_training_history(checkpoint.get("history", []), out_dir / "training_loss_history.png")
+            snapshot_cases = sorted({case for case, _ in rollout_visuals})
+            for case_name in snapshot_cases:
+                snapshots = {horizon: item for (case, horizon), item in rollout_visuals.items()
+                             if case == case_name}
+                plot_rollout_snapshots(snapshots,
+                    out_dir / f"rollout_snapshots_{case_name.replace('/', '_')}.png",
+                    title=f"{case_name}: autoregressive particles colored by circulation/core-size proxy")
+    with _nonfatal_plotting('native field plots'):
+        if cfg["evaluation"].get("save_plots", True) and native_visual_candidates:
+            requested_phase = float(cfg["evaluation"].get("field_visual_phase", 0.5))
+            for (case_name, role), candidates in native_visual_candidates.items():
+                sample = min(candidates, key=lambda item: abs(item["phase"] - requested_phase))
+                x_axis, z_axis = sample["x"], sample["z"]
+                true_ux = sample["true_velocity"][..., 0]
+                predicted_ux = sample["predicted_velocity"][..., 0]
+                safe_case = case_name.replace("/", "_")
+                time_value = sample.get("physical_time")
+                plot_native_ux_comparison(x_axis, z_axis, true_ux, predicted_ux,
+                    out_dir / f"native_ux_comparison_{safe_case}_{role}.png",
+                    phase=sample["phase"], physical_time=time_value)
+                plot_eulerian_velocity_plane(x_axis, z_axis, sample["true_velocity"],
+                    sample["predicted_velocity"],
+                    out_dir / f"native_eulerian_velocity_{safe_case}_{role}.png",
+                    title=f"{case_name}: native-grid Eulerian velocity, phase={sample['phase']:.3f}")
+                configured_chord = cfg["evaluation"].get("reference_chord", None)
+                configured_leading_edge = cfg["evaluation"].get("reference_leading_edge_x", None)
+                if configured_chord is None or configured_leading_edge is None:
+                    vtk_path = str(sample.get("vtk_path", ""))
+                    if not vtk_path or not Path(vtk_path).is_file():
+                        print(f"[profiles] skipped {case_name}: no reference chord or solid geometry is available")
+                        continue
+                    derived_leading_edge, derived_chord = estimate_chordwise_bounds(vtk_path)
+                chord = float(configured_chord if configured_chord is not None else derived_chord)
+                leading_edge = float(configured_leading_edge if configured_leading_edge is not None else derived_leading_edge)
+                plot_normalized_ux_profiles(x_axis, z_axis, sample["true_velocity"],
+                    sample["predicted_velocity"],
+                    out_dir / f"normalized_ux_profiles_{safe_case}_{role}.png",
+                    freestream_speed=sample["freestream_magnitude"], chord=chord,
+                    leading_edge_x=leading_edge,
+                    x_stations_over_c=cfg["evaluation"].get("profile_x_over_c", [0.2, 0.4, 0.6]))
+            roles_by_case = {}
+            for case_name, role in native_visual_candidates:
+                roles_by_case.setdefault(case_name, set()).add(role)
+            requested_phases = (0.3, 0.5, 0.7)
+            for case_name, roles in sorted(roles_by_case.items()):
+                for role in ("field_superresolution", "test", "validation"):
+                    if role not in roles:
+                        continue
+                    candidates = native_visual_candidates[(case_name, role)]
+                    samples = [min(candidates, key=lambda item: abs(item["phase"] - phase))
+                               for phase in requested_phases]
+                    x_axis, z_axis = samples[0]["x"], samples[0]["z"]
+                    true_slices = np.stack([sample["true_velocity"] for sample in samples])
+                    predicted_slices = np.stack([sample["predicted_velocity"] for sample in samples])
+                    speeds = [sample["freestream_magnitude"] if sample["freestream_magnitude"] > 0 else 1.0
+                              for sample in samples]
+                    safe_case = case_name.replace("/", "_")
+                    role_suffix = "" if role == "test" else f"_{role}"
+                    plot_velocity_magnitude_summary(
+                        x_axis, z_axis, true_slices, predicted_slices, speeds,
+                        out_dir / f"velocity_magnitude_summary_{safe_case}{role_suffix}.png",
+                        phases=requested_phases,
+                        x_stations=cfg["evaluation"].get("profile_x_over_c", [0.2, 0.4, 0.6]),
+                        y_plane=float(samples[0]["y_plane"]))
+            requested_plane_phases = [float(value) for value in
+                                      cfg["evaluation"].get("field_visual_phases", [0.1, 0.3, 0.5, 0.7, 0.9])]
+            for (case_name, role, plane_name), candidates in sorted(plane_visual_candidates.items()):
+                # Select distinct available frames nearest the requested phases, so
+                # sparse snapshots do not silently repeat the same image row.
+                selected = []
+                for requested_phase in requested_plane_phases:
+                    candidate = min(candidates, key=lambda item: abs(item["phase"] - requested_phase))
+                    if all(candidate is not existing for existing in selected):
+                        selected.append(candidate)
+                if not selected:
+                    continue
+                safe_case = case_name.replace("/", "_")
+                true_slices = np.stack([sample["true_velocity"] for sample in selected])
+                predicted_slices = np.stack([sample["predicted_velocity"] for sample in selected])
+                plot_plane_snapshot_comparison(
+                    selected[0]["first"], selected[0]["second"], true_slices, predicted_slices,
+                    [sample["phase"] for sample in selected],
+                    out_dir / f"native_velocity_plane_{safe_case}_{role}_{plane_name}.png",
+                    plane_name, selected[0]["first_label"], selected[0]["second_label"],
+                    [sample.get("physical_time") for sample in selected],
+                    [sample["label"] for sample in selected])
+    with _nonfatal_plotting('parity plots'):
+        if cfg["evaluation"].get("save_parity_plots", True):
+            test_cases = sorted({str(record.get("case", "unknown")) for record in records})
+            for case_name in test_cases:
+                sample = one_step_visuals.get(case_name)
+                if sample is None:
+                    continue
+                safe_case = case_name.replace("/", "_")
+                plot_state_parity(sample["truth"], sample["prediction"],
+                                  out_dir / f"one_step_state_parity_{safe_case}.png",
+                                  title=f"{case_name}: one-step particle state")
+                if "field_truth" in sample:
+                    plot_eulerian_field_comparison(sample["coords"], sample["field_truth"], sample["field_prediction"],
+                                                   out_dir / f"eulerian_field_comparison_{safe_case}.png",
+                                                   title=f"{case_name}: one-step Eulerian field reconstruction")
+    with _nonfatal_plotting('rmse-vs-phase plot'):
+        if cfg["evaluation"].get("save_plots", True):
+            plot_rmse_vs_phase_grid(records, out_dir)
     print(f"Saved {len(records)} one-step and {len(rollout_records)} rollout records to {out_dir}")
 
 

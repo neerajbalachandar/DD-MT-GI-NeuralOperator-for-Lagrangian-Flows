@@ -1,0 +1,61 @@
+# Co-moving physics-structured GINO for leapfrogging vortex rings.
+# Data: lossless per-case archives built by scripts/build_vortex_dataset.py.
+seed: 0
+device: auto
+data:
+  root: processed_data/vortex_rings_v2
+  # Use only the leapfrogging/isolated training cases; validation = held-out leapfrogging cases
+  # (includes an unseen N640 particle resolution).
+  train_cases: []          # empty = all cases with split=train
+  val_cases: []            # empty = all cases with split=val
+
+model:
+  box_half_extent: [2.8, 2.8, 3.3]    # co-moving latent box (physical units) around the circulation centroid
+  latent_resolution: [24, 24, 28]     # (nx, ny, nz) -> spacing ~0.24
+  hidden_channels: 64
+  encoder_channels: 32
+  encoder_hidden: 64
+  fno_modes: [12, 12, 14]             # (x, y, z) Fourier modes kept by the FNO
+  fno_layers: 4
+  domain_padding: 0.25
+  query_fourier_frequencies: 3
+  substeps: 2            # coupled RK4 substeps per saved interval (cores rotate ~1.5 rad per interval)
+  gamma_dynamics: rate   # 'rate' (learned relative circulation rate) or 'stretching' (J^T Gamma)
+  # runs/vortex_gino/final_model.pt = the joint-phase epoch-30 EMA checkpoint of this config with
+  # FLOWVPM relaxation switched on for rollouts: relaxation: {enabled: true, rlxf: 0.3, per_interval: 4}
+  relaxation: {enabled: false}
+  decoder_hidden: 128
+  decoder_layers: 3
+  near_field:
+    enabled: true
+    channels: 4
+    rbf: 12
+    cutoff: 0.3          # physical radius of the learned short-range kernel (~3 sigma)
+    rho_max: 4.0
+
+training:
+  run_dir: runs/vortex_gino
+  epochs: 50
+  operator_epochs: 20
+  steps_per_epoch: 250
+  frames_per_step: 4
+  learning_rate: 0.0006
+  ema_decay: 0.998          # validation/checkpoints/evaluation use EMA weights
+  min_lr_ratio: 0.02
+  warmup_steps: 300
+  weight_decay: 0.00001
+  grad_clip_norm: 10.0
+  grid_queries: 8192
+  particle_queries: 1024
+  integrator: rk4
+  dynamics_probability: 0.5
+  dynamics_weight: 1.0
+  # [start_epoch, horizon]: autoregressive window length for the coupled RK4 loss
+  rollout_horizon_schedule: [[20, 1], [28, 2], [36, 4], [44, 6]]
+  loss_weights: {grid_u: 1.0, grid_w: 0.5, particle_u: 1.0, particle_J: 0.5, gamma_rate: 1.0, step_x: 1.0, step_gamma: 0.3}
+  grid_sampling_fractions: [0.5, 0.35, 0.15]   # near particles / inside latent box / anywhere
+  near_particle_distance: 0.5
+  val_frames: [10, 50, 90, 130, 170]
+  val_rollout_steps: 40
+  val_rollout_start: 20
+  val_rollout_max_particles: 3000

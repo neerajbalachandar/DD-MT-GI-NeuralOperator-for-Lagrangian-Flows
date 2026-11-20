@@ -87,3 +87,12 @@ def test_rollout_truth_uses_persistent_ids_not_row_positions():
     states, ids = _aligned_rollout_truth(frames)
     assert ids.tolist() == ["a", "b"]
     np.testing.assert_array_equal(states[:, :, 0], [[1., 2.], [10., 20.]])
+
+
+def test_particle_cap_defaults_to_keeping_every_particle():
+    # Regression: a 2048 default silently dropped particles (and circulation)
+    # from the N320/N640 cases.  0 now means "no cap".
+    from gino.data import preprocessing_pipeline as pp
+    ids = np.asarray([f"row:{j}" for j in range(5000)], dtype="S32")
+    np.testing.assert_array_equal(pp._particle_subset_indices(ids, 0), np.arange(5000))
+    assert len(pp._particle_subset_indices(ids, 100)) == 100

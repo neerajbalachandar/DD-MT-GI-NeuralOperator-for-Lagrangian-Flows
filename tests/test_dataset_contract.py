@@ -2,6 +2,7 @@ import numpy as np
 
 from gino.data.dataset import EvolutionDataset
 from gino.data.normalization import NormalizationStats
+from gino.data.field_schema import REFERENCE_FIELD_TARGET_NAMES
 
 
 def _toy_data():
@@ -24,10 +25,11 @@ def _toy_data():
              "phase_delta": .5, "dt": .1, "vtk_path": "frame2.vtk"}], dtype=object),
         "field_query_mask": np.ones((2, 2), dtype=bool),
         "query_coords": np.zeros((2, 2, 3), dtype=np.float32),
-        "targets_velocity_field": np.zeros((2, 2, 12), dtype=np.float32),
+        "targets_velocity_field": np.zeros((2, 2, 15), dtype=np.float32),
+        "field_target_names": np.asarray(REFERENCE_FIELD_TARGET_NAMES, dtype=object),
         "in_mean": np.zeros(len(names), dtype=np.float32), "in_std": np.ones(len(names), dtype=np.float32),
         "out_mean": np.zeros(10, dtype=np.float32), "out_std": np.ones(10, dtype=np.float32),
-        "field_mean": np.zeros(12, dtype=np.float32), "field_std": np.ones(12, dtype=np.float32),
+        "field_mean": np.zeros(15, dtype=np.float32), "field_std": np.ones(15, dtype=np.float32),
         "coord_min": np.zeros(3, dtype=np.float32), "coord_span": np.ones(3, dtype=np.float32),
     }
 
@@ -63,7 +65,7 @@ def test_rollouts_stop_at_pair_ids_outside_the_active_split_and_field_holdout_is
     data = _toy_data()
     stats = NormalizationStats.fit_train_sequences(data, [0], [3])
     dataset = EvolutionDataset(data, [0], ["u_x"], [], max_particles=8, max_queries=8,
-                               rollout_horizon=2, normalization=stats,
+                               rollout_horizon=1, normalization=stats,
                                field_target_exclude_ids=[0])
     sample = dataset[0]
     assert sample["rollout_state_targets"].shape[0] == 1

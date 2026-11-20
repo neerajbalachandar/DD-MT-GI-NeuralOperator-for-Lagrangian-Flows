@@ -1,0 +1,17 @@
+/hpc/home/neerajc/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/neuralop-env/lib/python3.12/site-packages/torch/autograd/graph.py:882: UserWarning: grid_sampler_3d_backward_cuda does not have a deterministic implementation, but you set 'torch.use_deterministic_algorithms(True, warn_only=True)'. You can file an issue at https://github.com/pytorch/pytorch/issues to help us prioritize adding deterministic support for this operation. (Triggered internally at /pytorch/aten/src/ATen/Context.cpp:160.)
+  return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+/hpc/home/neerajc/FLOWUnsteady/Flow-reconstruction-in-VPM-using-FNO/gino/training/vortex_trainer.py:246: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
+Consider using tensor.detach() first. (Triggered internally at /pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:838.)
+  sums.setdefault(k, []).append(float(v))
+[data] train: ['isolated_N320_g20p000_sigma0p080', 'leapfrog_N160_d0p750_g0p500', 'leapfrog_N160_d1p000_g0p750', 'leapfrog_N160_d2p000_g1p000', 'leapfrog_N320_d0p750_g0p750', 'leapfrog_N320_d1p000_g0p500', 'leapfrog_N320_d1p000_g1p000', 'leapfrog_N320_d1p250_g0p750']
+[data] val:   ['leapfrog_N160_d0p750_g0p750', 'leapfrog_N160_d2p000_g0p500', 'leapfrog_N320_d0p750_g1p000', 'leapfrog_N640_d0p750_g1p000']
+[scales] {"velocity_scale": 5.617170810699463, "gradient_scale": 83.123291015625, "gamma_scale": 2.3962693214416504}  params=19.43M
+epoch 001 [operator H=0] lr=8.33e-04 205s | score=0.5913 t_grid_u=0.5669 t_grid_w=1.13 t_particle_u=0.4568 t_particle_J=0.4875 t_grad_norm=59.91 v_grid_u=0.4001 v_grid_w=0.576 v_particle_u=0.1383 v_particle_J=0.2112
+epoch 002 [operator H=0] lr=9.99e-04 208s | score=0.3031 t_grid_u=0.05532 t_grid_w=0.7082 t_particle_u=0.0185 t_particle_J=0.02234 t_grad_norm=50.1 v_grid_u=0.174 v_grid_w=0.4323 v_particle_u=0.09643 v_particle_J=0.1307
+epoch 003 [operator H=0] lr=9.97e-04 239s | score=0.2411 t_grid_u=0.02406 t_grid_w=0.3125 t_particle_u=0.01275 t_particle_J=0.01238 t_grad_norm=23.48 v_grid_u=0.1217 v_grid_w=0.3444 v_particle_u=0.09326 v_particle_J=0.1045
+epoch 004 [operator H=0] lr=9.92e-04 367s | score=0.2125 t_grid_u=0.01568 t_grid_w=0.2521 t_particle_u=0.01063 t_particle_J=0.01024 t_grad_norm=19.57 v_grid_u=0.1008 v_grid_w=0.2887 v_particle_u=0.08539 v_particle_J=0.1054
+epoch 005 [operator H=0] lr=9.85e-04 260s | score=0.1955 t_grid_u=0.01053 t_grid_w=0.1673 t_particle_u=0.006657 t_particle_J=0.01018 t_grad_norm=23.98 v_grid_u=0.0949 v_grid_w=0.1834 v_particle_u=0.0743 v_particle_J=0.1051
+epoch 006 [operator H=0] lr=9.77e-04 285s | score=0.2751 t_grid_u=0.00813 t_grid_w=0.1497 t_particle_u=0.004446 t_particle_J=0.009514 t_grad_norm=23.67 v_grid_u=0.09691 v_grid_w=0.2385 v_particle_u=0.1515 v_particle_J=0.1068
+epoch 007 [operator H=0] lr=9.66e-04 267s | score=0.1689 t_grid_u=0.006507 t_grid_w=0.1074 t_particle_u=0.003258 t_particle_J=0.009113 t_grad_norm=17.52 v_grid_u=0.08886 v_grid_w=0.1605 v_particle_u=0.05569 v_particle_J=0.09719
+epoch 008 [operator H=0] lr=9.54e-04 280s | score=0.1848 t_grid_u=0.007225 t_grid_w=0.08315 t_particle_u=0.00659 t_particle_J=0.008485 t_grad_norm=17.91 v_grid_u=0.09524 v_grid_w=0.1527 v_particle_u=0.06589 v_particle_J=0.09485
+epoch 009 [operator H=0] lr=9.40e-04 245s | score=0.1689 t_grid_u=0.006089 t_grid_w=0.08611 t_particle_u=0.005434 t_particle_J=0.007301 t_grad_norm=19.83 v_grid_u=0.07805 v_grid_w=0.1782 v_particle_u=0.06696 v_particle_J=0.09563

@@ -52,7 +52,7 @@ class Trainer:
         self.run_dir, self.device = Path(run_dir), device
         self.run_dir.mkdir(parents=True, exist_ok=True)
         uncertainty_names = {"log_physical_state_var", "log_residual_var", "log_velocity_var",
-                             "log_gradient_var", "log_vorticity_var"}
+                             "log_gradient_var"}
         regularized, unregularized = [], []
         for name, parameter in model.named_parameters():
             (unregularized if name in uncertainty_names else regularized).append(parameter)
@@ -76,11 +76,11 @@ class Trainer:
     def _epoch(self, loader, train, epoch=1):
         self.model.train(train)
         totals = {k: [] for k in ("total_loss", "state_loss", "residual_loss", "field_loss", "field_velocity_loss",
-                                  "field_gradient_loss", "field_vorticity_loss", "rollout_loss",
+                                  "field_gradient_loss", "rollout_loss",
                                   "pushforward_loss", "gradient_norm", "effective_horizon",
                                   "field_supervision_fraction")}
         category_names = ("uniform", "vortex", "trajectory")
-        for group in ("velocity", "gradient", "vorticity"):
+        for group in ("velocity", "gradient"):
             for category in category_names:
                 totals[f"field_{group}_{category}_loss"] = []
         accum = max(int(self.config.get("gradient_accumulation_steps", 1)), 1)
@@ -155,7 +155,7 @@ class Trainer:
                     _, field_groups = grouped_field_loss(
                         field, batch["field_target"], categories=batch.get("field_query_categories"),
                         category_weights=self.config.get("field_category_loss_weights", [0.4, 0.4, 0.2]))
-                    field_term = sum(field_groups[name] for name in ("velocity", "gradient", "vorticity"))
+                    field_term = sum(field_groups[name] for name in ("velocity", "gradient"))
                 else:
                     field_term, field_groups = None, {}
                 task_losses = {}
@@ -164,12 +164,11 @@ class Trainer:
                     task_losses["residual"] = residual_term
                 if self.config.get("use_field_loss", True) and has_field_target:
                     task_losses.update({f"field_{key}": field_groups[key]
-                                        for key in ("velocity", "gradient", "vorticity")})
+                                        for key in ("velocity", "gradient")})
                 variances = {"physical_state": self.model.log_physical_state_var,
                              "residual": self.model.log_residual_var,
                              "field_velocity": self.model.log_velocity_var,
-                             "field_gradient": self.model.log_gradient_var,
-                             "field_vorticity": self.model.log_vorticity_var}
+                             "field_gradient": self.model.log_gradient_var}
                 if self.config.get("use_homoscedastic_weighting", True):
                     one_step = uncertainty_weighted_sum(task_losses, variances)
                 else:
@@ -244,10 +243,9 @@ class Trainer:
             if field_term is not None:
                 totals["field_loss"].append(field_term.detach())
                 for name, metric in (("velocity", "field_velocity_loss"),
-                                     ("gradient", "field_gradient_loss"),
-                                     ("vorticity", "field_vorticity_loss")):
+                                     ("gradient", "field_gradient_loss")):
                     totals[metric].append(field_groups[name].detach())
-                for group in ("velocity", "gradient", "vorticity"):
+                for group in ("velocity", "gradient"):
                     for category, label in enumerate(category_names):
                         value = field_groups.get(f"{group}_category_{category}")
                         if value is not None:
@@ -320,7 +318,7 @@ class Trainer:
             max_probability = float(self.config.get("scheduled_sampling_max_probability", 0.3))
             if self.scheduler and did_validate:
                 self.scheduler.step(val_loss)
-            uncertainty_names = ("physical_state", "residual", "velocity", "gradient", "vorticity")
+            uncertainty_names = ("physical_state", "residual", "velocity", "gradient")
             uncertainty_values = {}
             for name in uncertainty_names:
                 parameter = getattr(self.model, f"log_{name}_var")
@@ -358,8 +356,8 @@ class Trainer:
             print(
                 f"epoch {epoch:03d} | train {train_loss:.6g} | val {val_loss:.6g} | "
                 f"state {train_metrics['state_loss']:.6g} | field {train_metrics['field_loss']:.6g} | "
-                f"field groups (u/grad/omega) {train_metrics['field_velocity_loss']:.4g}/"
-                f"{train_metrics['field_gradient_loss']:.4g}/{train_metrics['field_vorticity_loss']:.4g} | "
+                f"field groups (u/grad) {train_metrics['field_velocity_loss']:.4g}/"
+                f"{train_metrics['field_gradient_loss']:.4g} | "
                 f"field coverage {train_metrics['field_supervision_fraction']:.1%} | "
                 f"rollout {train_metrics['rollout_loss']:.6g} | pushforward {train_metrics['pushforward_loss']:.6g} | "
                 f"H {row['rollout_horizon']} (effective {train_metrics['effective_horizon']:.2f}) | "
@@ -381,7 +379,9 @@ class Trainer:
                             "coord_min": norm["coord_min"], "coord_span": norm["coord_span"],
                             "state_mean": norm["state_mean"], "state_std": norm["state_std"],
                             "feature_names": metadata["feature_names"], "target_names": metadata["target_names"],
-                            "field_target_names": metadata["field_target_names"],
+                            "field_target_names": metadata["reference_field_target_names"],
+                            "reference_field_target_names": metadata["reference_field_target_names"],
+                            "model_field_target_names": metadata["model_field_target_names"],
                             "global_condition_channels": metadata["global_condition_channels"],
                             "dataset_path": metadata["dataset_path"], "split": metadata["split"], "best_score": best,
                             "mechanisms": {k: self.config.get(k) for k in ("use_rollout_loss", "use_scheduled_sampling", "use_gns_noise", "use_pushforward", "use_homoscedastic_weighting")},

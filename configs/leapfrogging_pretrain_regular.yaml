@@ -7,7 +7,7 @@ data:
   allow_missing_native_task2: false
   input_features: [Gamma_x, Gamma_y, Gamma_z, sigma]
   global_condition_channels: [freestream_magnitude, phase]
-  max_particles: 2048
+  max_particles: 8192   # >= largest case (5760); 2048 silently dropped 29-64% of N320/N640 circulation
   max_queries: 32768
   field_domain_mode: full_native_grid
   field_sampling:

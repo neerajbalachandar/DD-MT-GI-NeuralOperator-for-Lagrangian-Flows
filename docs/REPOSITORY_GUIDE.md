@@ -1,5 +1,37 @@
 # Repository Guide and Review Notes
 
+## Current pipeline (VortexGINO, November 2026)
+
+| Path | Purpose |
+|---|---|
+| `gino/data/vortex_raw.py`, `scripts/build_vortex_dataset.py` | Lossless per-case export of raw FLOWVPM output to `processed_data/vortex_rings_v2/<case>.npz` (+ `manifest.json`): all particles, exact particle velocity/gradient (self term completed), exact Winckelmans Biot-Savart grid velocity, FLOWVPM vorticity. Also the exact analytic evaluator `winckelmans_velocity_jacobian`. |
+| `gino/data/vortex_frames.py` | GPU-resident case store, ring membership/diagnostics. |
+| `gino/model/vortex_operator.py` | `VortexGINO`: co-moving latent box, Gamma-linear summed P2G encoder, FNO, decoder with equivariant near-field kernel (analytic gradient), learned circulation-rate head, coupled RK4 substep dynamics + learned residual. |
+| `gino/training/vortex_trainer.py`, `scripts/train_vortex.py`, `configs/vortex_gino.yaml` | Operator phase (grid U/W, particle u/J, circulation rate) then joint phase with multi-step RK4 rollout losses; EMA weights; per-phase best checkpoints; resume with optimizer state; optional off-trajectory augmentation with exact Biot-Savart targets. |
+| `scripts/evaluate_vortex.py`, `visualization/vortex_plots.py` | Teacher-forced field reconstruction + 180-step rollouts, conservation diagnostics, `summary.md`, clear per-case plots. |
+| `tests/test_vortex_operator.py`, `tests/test_vortex_data.py` | Physics/invariance/data-consistency tests. |
+
+## Defects found in the legacy pipeline (and how the new pipeline addresses them)
+
+Data
+- N320/N640 cases were truncated to 2048 of 2880/5760 particles (`MAX_PREPROCESS_PARTICLES=2048`), keeping only 71%/36% of the circulation that produced the field targets. -> all particles kept; legacy cap raised.
+- Frame 0 of every case has zero FLOWVPM particle velocity/gradient (written before the first evaluation) and was used as a target. -> masked.
+- FLOWVPM particle J omits the self-induced term, so it is not a sample of the continuous field the decoder predicts (irreducible ~15-22% error). -> completed with `2.5/(4 pi sigma^3)[Gamma]x`.
+- FLOWVPM grid U includes the effect of ~32k injected grid probe particles (1.4-5% off, 23% on the 64^3 grid). -> replaced with the exact Biot-Savart field of the particles.
+- Field gradients were finite differences on a 0.16 x 0.16 x 0.51 grid against sigma = 0.1 cores (aliased). -> analytic vorticity W is used instead.
+
+Model
+- The field decoder sampled the latent with x and z swapped (grid_sample axis order). Fixed in `gino/model/gino.py` (+ regression test).
+- Anisotropic absolute-frame normalisation: 16^3 latent spacing 0.33 x 0.33 x 1.13 over a 5 x 5 x 17 box; FNO kept only |k|<=3; mean-reduction GNO (breaks Biot-Savart superposition and resolution invariance). -> co-moving isotropic box, summed Gamma-linear encoder, more modes, domain padding.
+- Explicit Euler over a 4-solver-step interval explained only ~40-45% of the displacement (core particles rotate ~1.5 rad per saved frame); even exact physics with 1 RK4 step collapses the cores. -> 2 coupled RK4 substeps (exact physics: 0.3% one-step error).
+- Stretching used the classic scheme while FLOWVPM runs transposed. Fixed in `gino/dynamics/physics.py`. In the new model, J^T Gamma is a ~3% residue of |J||Gamma|, so a learned J makes it exponentially unstable -> learned relative circulation rate supervised with the exact J^T Gamma/|Gamma|.
+
+Training / evaluation
+- State/rollout losses normalised by the absolute state std (position errors vanished, Gamma_z noise dominated); conflicting residual vs state targets; homoscedastic weights + plateau LR collapsed the LR to 5e-9; phase/freestream conditioning invited memorisation. -> relative losses (grid/particle fields; one-step errors relative to the true displacement), fixed weights, warmup+cosine LR, EMA weights, no global conditioning.
+- `scripts/evaluate.py` crashed with `KeyError: 'plane_specs'`, so no plots/metrics were written. Fixed; plotting failures are now non-fatal.
+- The spatial-SR test case has the same initial condition as a training case; it is reported only as a field super-resolution check.
+
+
 ## Project Flow
 
 `scripts/preprocess.py` calls `gino/data/preprocessing.py`, which configures and runs `gino/data/preprocessing_pipeline.py`. The pipeline reads Task-1 particle XMF/HDF5 and Task-2 Eulerian XMF/HDF5, matches field snapshots by XMF time, makes physical-identity particle transitions, derives train-only normalization/domain metadata, and writes `processed_data/particle_evolution_dataset.npz`.

@@ -7,6 +7,8 @@ def predict_next_state(model, batch, latent_grid, normalization, dt=None, decode
     encoded = model.encode_process(batch["input_geom"], latent_grid, batch["x"], batch["global_params"])
     residual_norm = model.decode_particle(encoded)
     particle_field_norm = model.decode_field(encoded, batch.get("particle_queries", batch["input_geom"]))
+    if particle_field_norm.shape[-1] != 12:
+        raise ValueError(f"Particle-query decoder must return velocity plus 3x3 gradient (12 channels), got {particle_field_norm.shape}")
     field_norm = model.decode_field(encoded, batch["output_queries"]) if decode_output_field else None
     residual_all = normalization.denormalize_residual(residual_norm)
     residual = residual_all[..., :7]

@@ -15,14 +15,14 @@ def relative_l2(pred, target, eps=1e-8):
 
 
 def field_group_metrics(pred, target):
-    """Relative-L2 diagnostics using the canonical 3/9/3 field channel layout."""
-    if pred.shape != target.shape or pred.shape[-1] != 15:
-        raise ValueError(f"Expected matching 15-channel fields, got {pred.shape} and {target.shape}")
-    groups = {"velocity": slice(0, 3), "gradient": slice(3, 12), "vorticity": slice(12, 15)}
+    """Relative-L2 diagnostics for velocity and its 3x3 gradient."""
+    if pred.shape != target.shape or pred.shape[-1] != 12:
+        raise ValueError(f"Expected matching 12-channel model fields, got {pred.shape} and {target.shape}")
+    groups = {"velocity": slice(0, 3), "gradient": slice(3, 12)}
     out = {f"field_{name}_relative_l2": relative_l2(pred[..., channels], target[..., channels])
            for name, channels in groups.items()}
     out["field_grouped_weighted_relative_l2"] = (out["field_velocity_relative_l2"]
-        + 0.5 * out["field_gradient_relative_l2"] + 0.1 * out["field_vorticity_relative_l2"])
+        + 0.5 * out["field_gradient_relative_l2"])
     return out
 
 

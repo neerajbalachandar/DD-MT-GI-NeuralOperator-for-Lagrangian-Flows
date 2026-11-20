@@ -103,8 +103,7 @@ def plot_training_history(history, output_path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     panels = [
         (("state_loss", "State"), ("field_loss", "Grouped field")),
-        (("field_velocity_loss", "Velocity"), ("field_gradient_loss", "Velocity gradient"),
-         ("field_vorticity_loss", "Vorticity")),
+        (("field_velocity_loss", "Velocity"), ("field_gradient_loss", "Velocity gradient")),
         (("rollout_loss", "Differentiable rollout"), ("pushforward_loss", "Pushforward")),
     ]
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.8), constrained_layout=True)

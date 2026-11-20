@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from scripts.train import validate_warm_start_checkpoint
+from gino.data.field_schema import MODEL_FIELD_TARGET_NAMES, REFERENCE_FIELD_TARGET_NAMES
 
 
 ARCHITECTURE = {
@@ -19,7 +20,9 @@ NORMALIZATION = {name: np.asarray([value], dtype=np.float32) for name, value in 
 def checkpoint():
     return {
         "feature_names": ["u_x"], "target_names": ["dx"],
-        "field_target_names": [f"field_{i}" for i in range(15)],
+        "field_target_names": list(REFERENCE_FIELD_TARGET_NAMES),
+        "reference_field_target_names": list(REFERENCE_FIELD_TARGET_NAMES),
+        "model_field_target_names": list(MODEL_FIELD_TARGET_NAMES),
         "global_condition_channels": ["phase"],
         "config": {"model": dict(ARCHITECTURE)}, "normalization": NORMALIZATION,
         "model_state_dict": {"weight": np.asarray([1.0])},
@@ -28,11 +31,11 @@ def checkpoint():
 
 def test_warm_start_accepts_matching_model_and_normalization_contract():
     state = validate_warm_start_checkpoint(checkpoint(), dict(ARCHITECTURE), ["u_x"], ["dx"],
-        [f"field_{i}" for i in range(15)], ["phase"], NORMALIZATION)
+        list(REFERENCE_FIELD_TARGET_NAMES), ["phase"], NORMALIZATION)
     assert "weight" in state
 
 
 def test_warm_start_rejects_channel_order_mismatch():
-    with pytest.raises(ValueError, match="field_target_names mismatch"):
+    with pytest.raises(ValueError, match="reference field channel order mismatch"):
         validate_warm_start_checkpoint(checkpoint(), dict(ARCHITECTURE), ["u_x"], ["dx"],
-            [f"field_{i}" for i in reversed(range(15))], ["phase"], NORMALIZATION)
+            list(reversed(REFERENCE_FIELD_TARGET_NAMES)), ["phase"], NORMALIZATION)

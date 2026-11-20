@@ -7,7 +7,7 @@ data:
   allow_missing_native_task2: false
   input_features: [Gamma_x, Gamma_y, Gamma_z, sigma]
   global_condition_channels: [freestream_magnitude, phase]
-  max_particles: 2048
+  max_particles: 8192   # >= largest case (5760); 2048 silently dropped 29-64% of N320/N640 circulation
   max_queries: 32768
   field_domain_mode: full_native_grid
   field_sampling:
@@ -44,8 +44,8 @@ model:
   predict_delta_u: true
 training:
   # Residual channels 7:10 supervise delta-u as an auxiliary output; they do not propagate state.
-  run_dir: runs/leapfrogging_rollout_stateonly_mse_uncertainty
-  init_checkpoint: runs/leapfrogging_pretrain_adaptive_stateonly_mse_uncertainty/best_model.pt
+  run_dir: runs/leapfrogging_rollout_12ch
+  init_checkpoint: runs/leapfrogging_pretrain_adaptive_12ch/best_model.pt
   epochs: 100
   gradient_accumulation_steps: 1
   dataloader_num_workers: 8

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+from .field_schema import MODEL_FIELD_CHANNELS, MODEL_FIELD_TARGET_NAMES, REFERENCE_FIELD_TARGET_NAMES, validate_field_names
 
 
 @dataclass
@@ -16,6 +17,7 @@ class NormalizationStats:
     coord_span: np.ndarray
     state_mean: np.ndarray = None
     state_std: np.ndarray = None
+    field_target_names: tuple = None
 
     @classmethod
     def from_checkpoint(cls, checkpoint):
@@ -25,12 +27,19 @@ class NormalizationStats:
             if value is None:
                 raise ValueError(f"Checkpoint is missing required normalization statistic: {primary}")
             return np.asarray(value, dtype=np.float32).reshape(-1)
+        reference_names = checkpoint.get("reference_field_target_names", checkpoint.get("field_target_names"))
+        model_names = checkpoint.get("model_field_target_names")
+        if reference_names is not None:
+            validate_field_names(reference_names, REFERENCE_FIELD_TARGET_NAMES, "Reference field")
+        if model_names is not None:
+            validate_field_names(model_names, MODEL_FIELD_TARGET_NAMES, "Model field")
         return cls(
             required("input_mean"), required("input_std"),
             required("target_mean", "residual_mean"), required("target_std", "residual_std"),
             required("field_mean"), required("field_std"),
             required("coord_min"), required("coord_span"),
             required("state_mean")[:7], required("state_std")[:7],
+            tuple(reference_names) if reference_names is not None else None,
         )
 
     @classmethod
@@ -73,7 +82,8 @@ class NormalizationStats:
                     state_mean[channel], state_std[channel] = values.mean(), max(float(values.std()), 1e-8)
         return cls(x.mean(0), np.maximum(x.std(0), 1e-8), residual_rows.mean(0),
                    np.maximum(residual_rows.std(0), 1e-8), field.mean(0),
-                   np.maximum(field.std(0), 1e-8), coord_min, coord_span, state_mean, state_std)
+                   np.maximum(field.std(0), 1e-8), coord_min, coord_span, state_mean, state_std,
+                   tuple(str(name) for name in data.get("field_target_names", [])) or None)
 
     def _tensor(self, value, ref):
         return torch.as_tensor(value, dtype=ref.dtype, device=ref.device)
@@ -85,10 +95,20 @@ class NormalizationStats:
         return value * std + mean
 
     def denormalize_field(self, value):
-        return value * self._tensor(self.field_std, value) + self._tensor(self.field_mean, value)
+        self._validate_model_field(value)
+        return value * self._tensor(self.field_std[:MODEL_FIELD_CHANNELS], value) + self._tensor(self.field_mean[:MODEL_FIELD_CHANNELS], value)
 
     def normalize_field(self, value):
-        return (value - self._tensor(self.field_mean, value)) / self._tensor(self.field_std, value).clamp_min(1e-8)
+        self._validate_model_field(value)
+        return (value - self._tensor(self.field_mean[:MODEL_FIELD_CHANNELS], value)) / self._tensor(self.field_std[:MODEL_FIELD_CHANNELS], value).clamp_min(1e-8)
+
+    def _validate_model_field(self, value):
+        if value.shape[-1] != MODEL_FIELD_CHANNELS:
+            raise ValueError(f"Model field values must have {MODEL_FIELD_CHANNELS} channels in order {list(MODEL_FIELD_TARGET_NAMES)}; got {value.shape}")
+        if self.field_target_names is not None:
+            validate_field_names(self.field_target_names, REFERENCE_FIELD_TARGET_NAMES, "Normalization reference field")
+        if len(self.field_mean) < MODEL_FIELD_CHANNELS or len(self.field_std) < MODEL_FIELD_CHANNELS:
+            raise ValueError("Field normalization statistics must contain at least the 12 model channels")
 
     def normalize_input(self, value):
         return (value - self._tensor(self.input_mean, value)) / self._tensor(self.input_std, value).clamp_min(1e-8)

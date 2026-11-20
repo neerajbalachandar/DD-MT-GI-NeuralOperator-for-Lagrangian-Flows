@@ -4,6 +4,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from .context import RolloutContext
+from .field_schema import MODEL_FIELD_CHANNELS, REFERENCE_FIELD_TARGET_NAMES
 
 SUPPORTED_ROLLOUT_CORRESPONDENCE = frozenset({
     "matched_source_particle_ids",
@@ -281,14 +282,17 @@ class EvolutionDataset(Dataset):
         field_available = bool(len(qmask))
         coords = np.asarray(self.data["query_coords"][pid, qmask], dtype=np.float32)
         queries = np.clip((coords - coord_min) / coord_span, 0.0, 1.0)
-        fmean = np.asarray(self.data["field_mean"], dtype=np.float32).reshape(-1) if self.normalization is None else self.normalization.field_mean
-        fstd = np.maximum(np.asarray(self.data["field_std"], dtype=np.float32).reshape(-1), 1e-8) if self.normalization is None else np.maximum(self.normalization.field_std, 1e-8)
-        field = (np.asarray(self.data["targets_velocity_field"][pid, qmask], dtype=np.float32) - fmean) / fstd
+        names = [str(name) for name in self.data.get("field_target_names", [])]
+        if names != list(REFERENCE_FIELD_TARGET_NAMES):
+            raise ValueError(f"Archive reference field channel order mismatch: expected {list(REFERENCE_FIELD_TARGET_NAMES)}, got {names}")
+        fmean = np.asarray(self.data["field_mean"], dtype=np.float32).reshape(-1)[:MODEL_FIELD_CHANNELS] if self.normalization is None else self.normalization.field_mean[:MODEL_FIELD_CHANNELS]
+        fstd = np.maximum(np.asarray(self.data["field_std"], dtype=np.float32).reshape(-1)[:MODEL_FIELD_CHANNELS], 1e-8) if self.normalization is None else np.maximum(self.normalization.field_std[:MODEL_FIELD_CHANNELS], 1e-8)
+        field = (np.asarray(self.data["targets_velocity_field"][pid, qmask, :MODEL_FIELD_CHANNELS], dtype=np.float32) - fmean) / fstd
         field_categories = (np.asarray(self.data["field_query_categories"][pid, qmask], dtype=np.int64)
                             if "field_query_categories" in self.data else np.zeros(len(qmask), dtype=np.int64))
         if not field_available:
             coords, queries = xyz[:1].copy(), geom[:1].copy()
-            field = np.zeros((1, len(fmean)), dtype=np.float32)
+            field = np.zeros((1, MODEL_FIELD_CHANNELS), dtype=np.float32)
         future = []
         future_fields, future_queries, future_query_xyz, future_field_available = [], [], [], []
         future_contexts, future_teacher_inputs = [], []
@@ -308,7 +312,7 @@ class EvolutionDataset(Dataset):
             has_future_field = bool(len(future_mask))
             if has_future_field:
                 future_xyz = np.asarray(self.data["query_coords"][next_id, future_mask], dtype=np.float32)
-                future_field = (np.asarray(self.data["targets_velocity_field"][next_id, future_mask], dtype=np.float32) - fmean) / fstd
+                future_field = (np.asarray(self.data["targets_velocity_field"][next_id, future_mask, :MODEL_FIELD_CHANNELS], dtype=np.float32) - fmean) / fstd
                 future_queries.append(np.clip((future_xyz - coord_min) / coord_span, 0.0, 1.0))
             else:
                 future_xyz = coords.copy()

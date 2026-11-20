@@ -8,6 +8,8 @@ sys.path.insert(0, str(HERE))
 
 def main():
     parser = argparse.ArgumentParser(description="Preprocess generated FLOWVPM particle and field data.")
+    parser.add_argument("--config", type=Path, default=HERE / "configs/default.yaml",
+                        help="YAML configuration supplying query budget, domain, and sampling strategy.")
     parser.add_argument("--source-root", type=Path, default=None,
                         help="Generated root containing train/, validate/, and test/ (default: configured FLOWVPM data root).")
     parser.add_argument("--merged-frames", type=Path, default=None,
@@ -30,19 +32,20 @@ def main():
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto",
                         help="Use CUDA for field-gradient preprocessing when available.")
     args = parser.parse_args()
+    from gino.utils import load_config
+    cfg = load_config(str(args.config))
     import os
     if args.field_grid_points is not None:
         if args.field_grid_points < 2:
             parser.error("--field-grid-points must be at least 2")
         os.environ["FIELD_GRID_POINTS"] = str(args.field_grid_points)
-    if args.max_field_query_points is not None:
-        if args.max_field_query_points < 1:
+    query_budget = args.max_field_query_points
+    if query_budget is None:
+        query_budget = int(cfg["data"].get("max_queries", 4096))
+    if query_budget is not None:
+        if query_budget < 1:
             parser.error("--max-field-query-points must be positive")
-        os.environ["MAX_FIELD_QUERY_POINTS"] = str(args.max_field_query_points)
-    if (args.field_grid_points is not None and args.max_field_query_points is not None
-            and args.max_field_query_points >= args.field_grid_points ** 3):
-        # A full-grid request must not be clipped to the particle-support box.
-        os.environ["FIELD_QUERY_BOUNDS"] = "none"
+        os.environ["MAX_FIELD_QUERY_POINTS"] = str(query_budget)
     if args.case_prefix:
         os.environ["CASE_PREFIX"] = args.case_prefix
     if args.preproc_max_rss_gb is not None:
@@ -55,7 +58,10 @@ def main():
         if args.source_root is not None:
             parser.error("--source-root and --merged-frames are mutually exclusive")
         print(run_preprocessing_from_merged_frames(args.merged_frames, args.output_dir,
-                                                   raw_root=args.raw_root, device=args.device))
+                                                   raw_root=args.raw_root, device=args.device,
+                                                   field_sampling=cfg["data"].get("field_sampling", {"mode": "regular_grid"}),
+                                                   field_domain_mode=cfg["data"].get("field_domain_mode", "full_native_grid"),
+                                                   max_queries=query_budget))
     else:
         max_pairs = args.max_pairs_per_case or None
         print(run_preprocessing(args.source_root, args.output_dir,

@@ -1,0 +1,12 @@
+{
+  "mode": "teacher_forced_field_reconstruction",
+  "n_samples": 720,
+  "metrics": {
+    "velocity_normalized_mse": 0.8291161920668351,
+    "velocity_physical_rmse": 0.4319844849407673,
+    "velocity_physical_relative_l2": 0.7632448928223716,
+    "gradient_normalized_mse": 1.63001734668182,
+    "gradient_physical_rmse": 1.1563916983703773,
+    "gradient_physical_relative_l2": 0.9417007813023196
+  }
+}
