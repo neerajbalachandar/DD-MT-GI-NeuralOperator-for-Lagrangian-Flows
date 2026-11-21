@@ -1,0 +1,86 @@
+[model] runs/vortex_gino_full/best_model.pt  epoch=80  score=0.7054261305524658  integrator=rk4 x2 substeps  gamma_dynamics=rate  box_half=[2.8, 2.8, 3.3]
+[data] 11 case(s): ['leapfrog_N160_d1p500_g1p000', 'leapfrog_N320_d1p250_g1p000', 'test_outside_regime__free_pair_N320_sep5p000_gm1p000', 'test_outside_regime__leapfrog_N320_d2p500_g0p250', 'test_outside_regime__toroidal_R1p500_g20p000_dx0p500', 'test_spatial_sr__leapfrog_spatial_N320_d1p000_g1p000', 'test_temporal_sr__perturbed_N320_amp0p100_mode3', 'leapfrog_N160_d0p750_g0p750', 'leapfrog_N160_d2p000_g0p500', 'leapfrog_N320_d0p750_g1p000', 'leapfrog_N640_d0p750_g1p000']
+[case] leapfrog N160 d=1.5 Γ=1.0: TF u=0.049 w=0.058 u_p=0.025 Γrate=0.076 | rollout 180 steps: |dx|/R0=1.266 (persistence 9.301) Γ=1.196 Σ|Γ| drift=0.223 field u=1.048 outBox=0.00 (7s)
+[case] leapfrog N320 d=1.25 Γ=1.0: TF u=0.044 w=0.031 u_p=0.021 Γrate=0.050 | rollout 180 steps: |dx|/R0=0.994 (persistence 9.438) Γ=1.389 Σ|Γ| drift=0.140 field u=1.063 outBox=0.00 (8s)
+[case] free pair N320 sep=5.0 Γ2/Γ1=-1.0 [out-of-regime]: TF u=0.870 w=1.545 u_p=0.390 Γrate=1.130 | rollout 180 steps: |dx|/R0=6.104 (persistence 6.950) Γ=2.033 Σ|Γ| drift=0.143 field u=1.075 outBox=0.40 (7s)
+[case] leapfrog N320 d=2.5 Γ=0.25 [out-of-regime]: TF u=0.106 w=0.201 u_p=0.050 Γrate=0.079 | rollout 180 steps: |dx|/R0=0.617 (persistence 4.850) Γ=0.810 Σ|Γ| drift=0.022 field u=1.104 outBox=0.00 (8s)
+[case] toroidal R1.5 Γ=20.0 dx0.5 [out-of-regime]: TF u=0.289 w=0.569 u_p=0.291 Γrate=0.661 | rollout 180 steps: |dx|/R0=2.107 (persistence 4.111) Γ=1.653 Σ|Γ| drift=0.067 field u=0.999 outBox=0.36 (16s)
+[case] leapfrog N320 d=1.0 Γ=1.0 [64³ grid; seen IC: field super-resolution check only]: TF u=0.045 w=0.041 u_p=0.022 Γrate=0.055 | rollout 180 steps: |dx|/R0=1.024 (persistence 9.914) Γ=1.331 Σ|Γ| drift=0.074 field u=0.982 outBox=0.02 (9s)
+[case] perturbed N320 amp0.1 mode3 [dt/4]: TF u=0.109 w=0.111 u_p=0.102 Γrate=0.437 | rollout 180 steps: |dx|/R0=0.220 (persistence 1.734) Γ=0.177 Σ|Γ| drift=0.002 field u=0.887 outBox=0.00 (10s)
+[case] leapfrog N160 d=0.75 Γ=0.75: TF u=0.041 w=0.038 u_p=0.024 Γrate=0.056 | rollout 180 steps: |dx|/R0=0.749 (persistence 9.200) Γ=1.093 Σ|Γ| drift=0.107 field u=0.943 outBox=0.00 (6s)
+[case] leapfrog N160 d=2.0 Γ=0.5: TF u=0.092 w=0.073 u_p=0.032 Γrate=0.075 | rollout 180 steps: |dx|/R0=0.727 (persistence 6.082) Γ=0.763 Σ|Γ| drift=0.153 field u=1.066 outBox=0.00 (6s)
+[case] leapfrog N320 d=0.75 Γ=1.0: TF u=0.047 w=0.058 u_p=0.026 Γrate=0.052 | rollout 180 steps: |dx|/R0=2.047 (persistence 10.528) Γ=1.332 Σ|Γ| drift=0.215 field u=0.964 outBox=0.14 (8s)
+[case] leapfrog N640 d=0.75 Γ=1.0: TF u=0.047 w=0.139 u_p=0.027 Γrate=0.054 | rollout 180 steps: |dx|/R0=1.796 (persistence 10.527) Γ=2.058 Σ|Γ| drift=0.040 field u=0.968 outBox=0.07 (19s)
+
+case                                            group      TF u     TF ω   TF u_p    TF Γ̇    steps  RO |dx|/R   persist     RO Γ  RO Σ|Γ|     RO u  outBox
+leapfrog_N160_d1p500_g1p000                     in-reg    0.049    0.058    0.025    0.076      180      1.266     9.301    1.196    0.223    1.048    0.00
+leapfrog_N320_d1p250_g1p000                     in-reg    0.044    0.031    0.021    0.050      180      0.994     9.438    1.389    0.140    1.063    0.00
+test_outside_regime__free_pair_N320_sep5p000_g  OOR       0.870    1.545    0.390    1.130      180      6.104     6.950    2.033    0.143    1.075    0.40
+test_outside_regime__leapfrog_N320_d2p500_g0p2  OOR       0.106    0.201    0.050    0.079      180      0.617     4.850    0.810    0.022    1.104    0.00
+test_outside_regime__toroidal_R1p500_g20p000_d  OOR       0.289    0.569    0.291    0.661      180      2.107     4.111    1.653    0.067    0.999    0.36
+test_spatial_sr__leapfrog_spatial_N320_d1p000_  seenIC    0.045    0.041    0.022    0.055      180      1.024     9.914    1.331    0.074    0.982    0.02
+test_temporal_sr__perturbed_N320_amp0p100_mode  OOR       0.109    0.111    0.102    0.437      180      0.220     1.734    0.177    0.002    0.887    0.00
+leapfrog_N160_d0p750_g0p750                     val       0.041    0.038    0.024    0.056      180      0.749     9.200    1.093    0.107    0.943    0.00
+leapfrog_N160_d2p000_g0p500                     val       0.092    0.073    0.032    0.075      180      0.727     6.082    0.763    0.153    1.066    0.00
+leapfrog_N320_d0p750_g1p000                     val       0.047    0.058    0.026    0.052      180      2.047    10.528    1.332    0.215    0.964    0.14
+leapfrog_N640_d0p750_g1p000                     val       0.047    0.139    0.027    0.054      180      1.796    10.527    2.058    0.040    0.968    0.07
+
+TF = teacher-forced from true particles (mean over frames); Γ̇ = particle circulation rate; RO = autoregressive rollout at the final step (DIV@k: diverged at step k, final values NaN); |dx|/R = mean position error / initial ring radius; persist = same for frozen particles; Σ|Γ| = total-circulation drift vs truth; outBox = max fraction of particles outside the latent box.
+group: val = validation, in-reg = in-regime test, OOR = out-of-regime test, seenIC = seen IC: field super-resolution check only (excluded from the summary).
+
+# VortexGINO evaluation: overall summary
+
+checkpoint `runs/vortex_gino_full/best_model.pt` (epoch 80), integrator rk4 with 2 substeps per saved interval
+
+Means over the cases of each group (finite values only; n = cases contributing / cases in group). TF = teacher-forced (decoded from the TRUE particles); rollout = autoregressive from the start frame.
+
+| metric | (a) validation cases | (b) in-regime test cases (leapfrog_N160_d1p500_g1p000, leapfrog_N320_d1p250_g1p000) | (c) out-of-regime test cases (test_outside_regime*, test_temporal_sr*) |
+|---|---|---|---|
+| TF grid velocity relL2 | 0.05691 (n=4/4) | 0.04674 (n=2/2) | 0.3434 (n=4/4) |
+| TF grid vorticity relL2 | 0.07703 (n=4/4) | 0.04445 (n=2/2) | 0.6063 (n=4/4) |
+| TF velocity error share: vortex region | 0.04172 (n=4/4) | 0.03348 (n=2/2) | 0.2481 (n=4/4) |
+| TF velocity error share: far field | 0.03747 (n=4/4) | 0.03228 (n=2/2) | 0.2316 (n=4/4) |
+| TF particle velocity relL2 | 0.02713 (n=4/4) | 0.02312 (n=2/2) | 0.2083 (n=4/4) |
+| TF particle velocity-gradient relL2 | 0.03911 (n=4/4) | 0.02694 (n=2/2) | 0.2011 (n=4/4) |
+| TF particle circulation-rate relL2 | 0.05917 (n=4/4) | 0.06256 (n=2/2) | 0.5769 (n=4/4) |
+| rollout diverged (fraction of cases) | 0 (n=4/4) | 0 (n=2/2) | 0 (n=4/4) |
+| rollout steps completed | 180 (n=4/4) | 180 (n=2/2) | 180 (n=4/4) |
+| rollout final position error / R0 | 1.33 (n=4/4) | 1.13 (n=2/2) | 2.262 (n=4/4) |
+| persistence baseline / R0 | 9.084 (n=4/4) | 9.37 (n=2/2) | 4.411 (n=4/4) |
+| rollout final circulation relL2 | 1.312 (n=4/4) | 1.293 (n=2/2) | 1.168 (n=4/4) |
+| rollout final total-|Γ| drift vs truth | 0.1288 (n=4/4) | 0.1813 (n=2/2) | 0.05841 (n=4/4) |
+| rollout final impulse drift vs truth | 1.836 (n=4/4) | 1.227 (n=2/2) | 0.6973 (n=4/4) |
+| rollout final grid velocity relL2 | 0.9856 (n=4/4) | 1.056 (n=2/2) | 1.017 (n=4/4) |
+
+## Cases per group
+
+* (a) validation cases: leapfrog_N160_d0p750_g0p750, leapfrog_N160_d2p000_g0p500, leapfrog_N320_d0p750_g1p000, leapfrog_N640_d0p750_g1p000
+* (b) in-regime test cases (leapfrog_N160_d1p500_g1p000, leapfrog_N320_d1p250_g1p000): leapfrog_N160_d1p500_g1p000, leapfrog_N320_d1p250_g1p000
+* (c) out-of-regime test cases (test_outside_regime*, test_temporal_sr*): test_outside_regime__free_pair_N320_sep5p000_gm1p000, test_outside_regime__leapfrog_N320_d2p500_g0p250, test_outside_regime__toroidal_R1p500_g20p000_dx0p500, test_temporal_sr__perturbed_N320_amp0p100_mode3
+
+Excluded from the averages above (still in metrics.json / summary.csv):
+* test_spatial_sr__leapfrog_spatial_N320_d1p000_g1p000: seen IC: field super-resolution check only (same initial condition as the training case leapfrog_N320_d1p000_g1p000; only the output grid is finer)
+
+## What the metrics mean
+
+* **TF grid velocity relL2** (`tf_u_rel_l2`): error of the velocity field decoded from the TRUE particles, relative to the field's size (0 = perfect, 1 = as large as the field itself).
+* **TF grid vorticity relL2** (`tf_w_rel_l2`): same for the vorticity (curl of the predicted velocity gradient); harder than velocity because vorticity is concentrated in thin cores.
+* **TF velocity error share: vortex region** (`tf_u_err_vortex_frac_of_total`): part of the full-grid velocity relL2 that comes from the 5% of nodes with the strongest vorticity.
+* **TF velocity error share: far field** (`tf_u_err_far_frac_of_total`): part of the full-grid velocity relL2 that comes from the remaining 95% of nodes (squares of the two shares add up to the square of the full relL2).
+* **TF particle velocity relL2** (`tf_particle_u_rel_l2`): error of the velocity the model predicts AT the particles, which is what moves them in a rollout.
+* **TF particle velocity-gradient relL2** (`tf_particle_J_rel_l2`): error of the predicted velocity gradient at the particles (includes the self-induced term).
+* **TF particle circulation-rate relL2** (`tf_particle_gamma_rate_rel_l2`): error of the predicted rate of change of each particle's circulation (vortex stretching), which drives the circulation in a rollout.
+* **rollout diverged (fraction of cases)** (`ro_diverged`): share of rollouts that blew up (non-finite values, Σ|Γ| off its start value by > 50% or ring spread > 3x its start value); final rollout values below are averaged over the remaining cases only.
+* **rollout steps completed** (`rollout_steps_completed`): how many saved-frame intervals the model was rolled out before stopping or diverging.
+* **rollout final position error / R0** (`ro_final_pos_err_over_R`): mean distance between predicted and true particles at the end of the rollout, in units of the ring radius (0.1 = one tenth of a ring radius off).
+* **persistence baseline / R0** (`persistence_final_pos_err_over_R`): the same error if the particles had simply stayed where they started; the model must be well below this.
+* **rollout final circulation relL2** (`ro_final_gamma_rel_l2`): error of the predicted particle circulation vectors at the end of the rollout.
+* **rollout final total-|Γ| drift vs truth** (`ro_final_sum_abs_gamma_drift`): relative difference between predicted and true total circulation magnitude (conservation check).
+* **rollout final impulse drift vs truth** (`ro_final_impulse_drift`): difference between predicted and true linear impulse, relative to the rings' impulse (conservation check; the impulse of an inviscid flow is constant).
+* **rollout final grid velocity relL2** (`ro_final_field_u_rel_l2`): velocity-field error when the field is decoded from the model's OWN rolled-out particles.
+
+[gpu] peak allocated memory: 2.03 GiB
+[done] metrics: runs/vortex_gino_full/evaluation/metrics.json
+       summary: runs/vortex_gino_full/evaluation/summary.csv
+       overall: runs/vortex_gino_full/evaluation/summary.md
+       plots:   runs/vortex_gino_full/evaluation/plots

@@ -433,8 +433,9 @@ def _empty(ax, text):
 
 
 def plot_training_curves(path, history, title="Training history", operator_epochs=None, total_epochs=None,
-                         rollout_steps=None, rollout_start=None):
-    """rollout_steps / rollout_start: the train_config's val_rollout_steps / val_rollout_start (panel title)."""
+                         rollout_steps=None, rollout_start=None, selected_epoch=None):
+    """rollout_steps / rollout_start: the train_config's val_rollout_steps / val_rollout_start (panel title).
+    selected_epoch: epoch of the evaluated checkpoint, marked (dotted line) in every panel."""
     if not history:
         return None
     ep = np.array([h.get("epoch", i + 1) for i, h in enumerate(history)], dtype=float)
@@ -466,9 +467,11 @@ def plot_training_curves(path, history, title="Training history", operator_epoch
             ax.legend(frameon=False, loc="upper right")
     ax = axes[n_terms]
     any_ro = False
-    for key, lab, col in (("val_rollout_mean_position_error", "mean particle position error", OKABE_ITO[0]),
-                          ("val_rollout_ring_z_error", "ring centroid |Δz|", OKABE_ITO[1]),
-                          ("val_rollout_ring_radius_error", "ring radius |ΔR|", OKABE_ITO[2])):
+    for key, lab, col in (("val_rollout_mean_position_error", "mean particle position error [length]", OKABE_ITO[0]),
+                          ("val_rollout_ring_z_error", "ring centroid |Δz| [length]", OKABE_ITO[1]),
+                          ("val_rollout_ring_radius_error", "ring radius |ΔR| [length]", OKABE_ITO[2]),
+                          ("val_rollout_gamma_rel_l2", "circulation rel. L2 [-]", OKABE_ITO[4]),
+                          ("val_rollout_sum_abs_gamma_drift", "Σ|Γ| drift [-]", OKABE_ITO[5])):
         v = series(key)
         if np.isfinite(v).any():
             any_ro = True
@@ -479,7 +482,7 @@ def plot_training_curves(path, history, title="Training history", operator_epoch
         ax.set_title(f"Validation rollout ({rollout_steps} steps)")
     else:
         ax.set_title("Validation rollout")
-    ax.set_ylabel("absolute error  [length]")
+    ax.set_ylabel("error at the end of the rollout")
     if any_ro:
         ax.set_yscale("log")
         ax.legend(frameon=False, loc="upper right")
@@ -498,6 +501,8 @@ def plot_training_curves(path, history, title="Training history", operator_epoch
     for ax in axes[n_terms + 2:]:
         ax.set_visible(False)
     for ax in axes[:n_terms + 2]:
+        if selected_epoch is not None:
+            ax.axvline(float(selected_epoch), color="black", ls=":", lw=1.2)
         ax.set_xlabel("epoch")
         ax.set_xlim(0.5, max(float(ep.max()), float(total_epochs or 0), (switch or 0) + 3) + 0.5)
         ax.grid(True, which="both", alpha=0.25)

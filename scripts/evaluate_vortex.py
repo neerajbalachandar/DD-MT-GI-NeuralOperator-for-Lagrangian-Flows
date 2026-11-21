@@ -746,8 +746,21 @@ def main():
     if not args.no_plots:
         vp.plot_error_vs_step(plot_dir / "error_vs_step.png", results)
         vp.plot_field_error_vs_time(plot_dir / "field_error_vs_time.png", results)
-        vp.plot_training_curves(plot_dir / "training_curves.png", ck.get("history", []),
-                                title=f"Training history of {ck_path.name} (epoch {ck.get('epoch')})",
+        # The checkpoint stores the history only up to its own (best) epoch; prefer the run's full
+        # history.json when it sits next to the checkpoint, and mark the evaluated epoch.
+        history = ck.get("history", [])
+        hist_file = ck_path.parent / "history.json"
+        if hist_file.is_file():
+            try:
+                full = json.loads(hist_file.read_text())
+                if len(full) >= len(history):
+                    history = full
+            except (OSError, ValueError):
+                pass
+        vp.plot_training_curves(plot_dir / "training_curves.png", history,
+                                title=f"Training history of {ck_path.parent.name}; evaluated checkpoint "
+                                      f"{ck_path.name} = epoch {ck.get('epoch')} (dotted line)",
+                                selected_epoch=ck.get("epoch"),
                                 operator_epochs=train_cfg.get("operator_epochs"), total_epochs=train_cfg.get("epochs"),
                                 rollout_steps=train_cfg.get("val_rollout_steps"),
                                 rollout_start=train_cfg.get("val_rollout_start"))

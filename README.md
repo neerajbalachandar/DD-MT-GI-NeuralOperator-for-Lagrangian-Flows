@@ -24,6 +24,16 @@ Architecture (GNO encoder -> FNO -> GNO decoder) in `gino/model/vortex_operator.
 - neuralop FNO with domain padding;
 - decoder = latent sample + equivariant learned near-field Biot-Savart kernel with an analytic gradient.
 
+End to end (data -> tests -> training -> evaluation + plots), ~4-8 h on a 16 GB GPU:
+
+```bash
+python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+bash scripts/run_full_pipeline.sh            # uses configs/vortex_gino_full.yaml, writes runs/vortex_gino_full/
+RESUME=1 bash scripts/run_full_pipeline.sh   # continue after an interruption
+```
+
+Individual steps:
+
 ```bash
 # 1. lossless per-case archives from the raw FLOWVPM output (all particles, exact particle u/J,
 #    exact Biot-Savart grid velocity, FLOWVPM vorticity)            (~8 min, GPU)
